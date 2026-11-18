@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.22 — 2026-11-19
+
+- OkHttp 4.12.0 → 4.12.1 (PR 21): the compromised-CA blocklist for CVE-2026-111943 — certificates from a widely-trusted CA whose private keys leaked are now rejected.
+
 ## 0.1.21 — 2026-11-18
 
 - Search reset and go to top (PR 15): a Reset button in the search row clears the query, restores the sort to Newest and scrolls the list to the top; a go-to-top button appears once the list is scrolled down.
