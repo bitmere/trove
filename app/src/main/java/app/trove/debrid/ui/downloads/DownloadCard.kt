@@ -49,7 +49,7 @@ internal fun DownloadRow(
                     style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 addedDate(download.createdAtEpochMs)?.let { date ->
                     Text(stringResource(R.string.added_date, date), style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 DownloadTransfer(download)
                 if (download.status == DownloadStatus.READY) {
@@ -89,7 +89,8 @@ internal fun DownloadCover(download: DebridDownload, metadata: MediaMetadata? = 
                     "series" -> stringResource(R.string.media_series)
                     else -> null
                 }
-                val subtitle = listOfNotNull(identity.year?.toString(), type).joinToString(" · ")
+                val (episode, quality) = remember(download.name) { parseReleaseDetails(download.name) }
+                val subtitle = downloadCoverSubtitle(identity, type, episode, quality)
                 if (subtitle.isNotEmpty()) Text(subtitle, style = MaterialTheme.typography.bodySmall)
                 Text("${kindWord(download.kind)} · ${statusWord(download.status)}",
                     style = MaterialTheme.typography.labelLarge)
@@ -104,8 +105,10 @@ internal fun DownloadTransfer(download: DebridDownload) {
     val progress = downloadProgress(download)
     if (progress != null) {
         val fraction by animateFloatAsState(progress.fraction, spring(), label = "Download progress")
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text(stringResource(R.string.downloading), style = MaterialTheme.typography.labelLarge)
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(TroveSpace.small),
+            verticalAlignment = Alignment.CenterVertically) {
+            Text(stringResource(R.string.downloading), modifier = Modifier.weight(1f),
+                style = MaterialTheme.typography.labelLarge)
             Text(progress.percentage, style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.primary)
         }
         LinearProgressIndicator(progress = { fraction }, modifier = Modifier.fillMaxWidth().height(8.dp),
@@ -129,7 +132,7 @@ internal fun kindWord(kind: DownloadKind): String = when (kind) {
 }
 
 @Composable
-internal fun PlaybackSpinner() {
-    CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp,
+internal fun PlaybackSpinner(modifier: Modifier = Modifier) {
+    CircularProgressIndicator(modifier = modifier.size(TroveSpace.page), strokeWidth = 2.dp,
         color = LocalContentColor.current)
 }

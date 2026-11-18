@@ -16,7 +16,11 @@ import app.trove.debrid.core.ProviderCapabilities
 import app.trove.debrid.core.ShareClassifier
 import app.trove.debrid.core.ShareInput
 import app.trove.debrid.core.StreamUrl
+import app.trove.debrid.data.SavedConnection
 import app.trove.debrid.data.TroveRepository
+import app.trove.debrid.data.defaultExcludeWords
+import app.trove.debrid.data.defaultPreferWords
+import app.trove.debrid.data.normalizeReleaseWords
 
 fun sampleDownload(
     id: String = "11",
@@ -44,8 +48,8 @@ class FakeProvider(
         "aabbcc" to CachedInfo(ready = true, name = "Dune Part Two 2024", sizeBytes = 1_000_000L),
     ),
     var playUrl: String = "https://example.com/play/abc123",
+    override val service: DebridService = DebridService.TORBOX,
 ) : DebridProvider {
-    override val service: DebridService = DebridService.TORBOX
     override val capabilities: ProviderCapabilities = ProviderCapabilities(
         authFlow = AuthFlow.API_KEY,
         streamingApi = true,
@@ -53,11 +57,13 @@ class FakeProvider(
         multiFilePick = true,
         nzb = true,
     )
+    var cacheDelayMs: Long = 0
     var addFailure: DebridError? = null
     var playFailure: Exception? = null
     val playedFileIds = mutableListOf<String>()
     var throwOnPlay: Boolean = false
     var deletedIds = mutableListOf<String>()
+    val deleteFailures = mutableMapOf<String, Exception>()
     var addedInputs = mutableListOf<AddInput>()
 
     override suspend fun validateAccount() =
@@ -71,12 +77,15 @@ class FakeProvider(
     override suspend fun add(input: AddInput): Result<DebridDownload> {
         addedInputs += input
         addFailure?.let { return Result.failure(it) }
-        val added = sampleDownload(id = "99", name = "Added")
+        val added = sampleDownload(id = "99", name = "Added").copy(service = service)
         downloads += added
         return Result.success(added)
     }
 
-    override suspend fun checkCached(hashes: List<String>) = Result.success(cached)
+    override suspend fun checkCached(hashes: List<String>): Result<Map<String, CachedInfo>?> {
+        kotlinx.coroutines.delay(cacheDelayMs)
+        return Result.success(cached)
+    }
 
     override suspend fun getStreamUrl(downloadId: String, fileId: String): Result<StreamUrl> {
         playedFileIds += fileId
@@ -89,6 +98,7 @@ class FakeProvider(
 
     override suspend fun delete(id: String): Result<Unit> {
         deletedIds += id
+        deleteFailures[id]?.let { return Result.failure(it) }
         downloads.removeAll { it.id == id }
         return Result.success(Unit)
     }
@@ -108,33 +118,195 @@ class FakeRepository(
     var throwOnValidate: Boolean = false,
     /** Artificial delay inside validate, for duplicate-submit tests. */
     var validateDelayMs: Long = 0L,
+    var realDebridProvider: FakeProvider = FakeProvider(service = DebridService.REAL_DEBRID),
+    var allDebridProvider: FakeProvider = FakeProvider(service = DebridService.ALLDEBRID),
+    var premiumizeProvider: FakeProvider = FakeProvider(service = DebridService.PREMIUMIZE),
+    var offcloudProvider: FakeProvider = FakeProvider(service = DebridService.OFFCLOUD),
+    var debridlinkProvider: FakeProvider = FakeProvider(service = DebridService.DEBRID_LINK),
 ) : TroveRepository {
+    var savedExcludeWords = defaultExcludeWords
+    var savedPreferWords = defaultPreferWords
+
+    override suspend fun loadExcludeWords() = savedExcludeWords
+    override suspend fun saveExcludeWords(words: List<String>) {
+        savedExcludeWords = normalizeReleaseWords(words)
+    }
+
+    override suspend fun loadPreferWords() = savedPreferWords
+    override suspend fun savePreferWords(words: List<String>) {
+        savedPreferWords = normalizeReleaseWords(words)
+    }
+
+    var savedShowClutterFiles = false
+    override suspend fun loadShowClutterFiles() = savedShowClutterFiles
+    override suspend fun saveShowClutterFiles(show: Boolean) {
+        savedShowClutterFiles = show
+    }
+
     var savedPlayer: app.trove.debrid.core.PlayerComponent? = null
     override suspend fun defaultPlayer() = savedPlayer
     override suspend fun setDefaultPlayer(player: app.trove.debrid.core.PlayerComponent?) { savedPlayer = player }
     var savedKey: String? = null
     var addedClassified = mutableListOf<ClassifiedShare>()
     var validateCalls: Int = 0
-    var cacheDelayMs: Long = 0
 
-    override fun accounts(): List<DebridAccount> =
-        if (savedKey != null) {
-            listOf(
-                DebridAccount(
-                    id = "torbox-1",
-                    service = DebridService.TORBOX,
-                    label = "TorBox (Essential)",
-                    addedAtEpochMs = 1L,
-                    lastValidatedEpochMs = 1L,
-                ),
-            )
-        } else {
-            emptyList()
-        }
+    private var savedRealDebridToken: String? = null
+    private var savedAllDebridKey: String? = null
+    private var savedPremiumizeKey: String? = null
+    private var savedOffcloudKey: String? = null
+    private var savedDebridLinkKey: String? = null
+    private var selectedService: DebridService? = DebridService.TORBOX
 
-    override fun torboxAccount(): DebridAccount? = accounts().firstOrNull()
+    override fun accounts(): List<DebridAccount> = listOfNotNull(
+        torboxAccount(), realDebridAccount(), allDebridAccount(), premiumizeAccount(), offcloudAccount(), debridLinkAccount(),
+    )
+
+    override fun torboxAccount(): DebridAccount? = if (hasTorboxKey()) {
+        DebridAccount("torbox-1", DebridService.TORBOX, "TorBox (Essential)", 1L, 1L)
+    } else null
+
+    override fun realDebridAccount(): DebridAccount? = if (hasRealDebridKey()) {
+        DebridAccount("realdebrid-1", DebridService.REAL_DEBRID, "Real-Debrid (Premium)", 1L, 1L)
+    } else null
+
+    override fun allDebridAccount(): DebridAccount? = if (hasAllDebridKey()) {
+        DebridAccount("alldebrid-1", DebridService.ALLDEBRID, "AllDebrid (Premium)", 1L, 1L)
+    } else null
+
+    override fun premiumizeAccount(): DebridAccount? = if (hasPremiumizeKey()) {
+        DebridAccount("premiumize-1", DebridService.PREMIUMIZE, "Premiumize (Premium)", 1L, 1L)
+    } else null
+
+    override fun offcloudAccount(): DebridAccount? = if (hasOffcloudKey()) {
+        DebridAccount("offcloud-1", DebridService.OFFCLOUD, "Offcloud", 1L, 1L)
+    } else null
+
+    override fun debridLinkAccount(): DebridAccount? = if (hasDebridLinkKey()) {
+        DebridAccount("debridlink-1", DebridService.DEBRID_LINK, "Debrid-Link (Premium)", 1L, 1L)
+    } else null
+
     override fun hasTorboxKey(): Boolean = savedKey != null
-    override fun provider(): DebridProvider? = provider
+    override fun hasRealDebridKey(): Boolean = savedRealDebridToken != null
+    override fun hasAllDebridKey(): Boolean = savedAllDebridKey != null
+    override fun hasPremiumizeKey(): Boolean = savedPremiumizeKey != null
+    override fun hasOffcloudKey(): Boolean = savedOffcloudKey != null
+    override fun hasDebridLinkKey(): Boolean = savedDebridLinkKey != null
+
+    private fun hasCredential(service: DebridService?): Boolean = when (service) {
+        DebridService.TORBOX -> hasTorboxKey()
+        DebridService.REAL_DEBRID -> hasRealDebridKey()
+        DebridService.ALLDEBRID -> hasAllDebridKey()
+        DebridService.PREMIUMIZE -> hasPremiumizeKey()
+        DebridService.OFFCLOUD -> hasOffcloudKey()
+        DebridService.DEBRID_LINK -> hasDebridLinkKey()
+        else -> false
+    }
+
+    override fun activeService(): DebridService? = when {
+        hasCredential(selectedService) -> selectedService
+        hasTorboxKey() -> DebridService.TORBOX
+        hasRealDebridKey() -> DebridService.REAL_DEBRID
+        hasAllDebridKey() -> DebridService.ALLDEBRID
+        hasPremiumizeKey() -> DebridService.PREMIUMIZE
+        hasOffcloudKey() -> DebridService.OFFCLOUD
+        hasDebridLinkKey() -> DebridService.DEBRID_LINK
+        else -> null
+    }
+
+    override suspend fun setActiveService(service: DebridService) {
+        if (hasCredential(service)) selectedService = service
+    }
+
+    override fun provider(): DebridProvider? = when (activeService() ?: selectedService) {
+        DebridService.REAL_DEBRID -> realDebridProvider
+        DebridService.ALLDEBRID -> allDebridProvider
+        DebridService.PREMIUMIZE -> premiumizeProvider
+        DebridService.OFFCLOUD -> offcloudProvider
+        DebridService.DEBRID_LINK -> debridlinkProvider
+        // Existing ViewModel fixtures inject a TorBox provider without seeding a key.
+        DebridService.TORBOX -> provider
+        else -> null
+    }
+
+    override fun providerFor(service: DebridService): DebridProvider? = when (service) {
+        // Existing ViewModel fixtures inject a TorBox provider without seeding a key.
+        DebridService.TORBOX -> provider
+        DebridService.REAL_DEBRID -> realDebridProvider.takeIf { hasRealDebridKey() }
+        DebridService.ALLDEBRID -> allDebridProvider.takeIf { hasAllDebridKey() }
+        DebridService.PREMIUMIZE -> premiumizeProvider.takeIf { hasPremiumizeKey() }
+        DebridService.OFFCLOUD -> offcloudProvider.takeIf { hasOffcloudKey() }
+        DebridService.DEBRID_LINK -> debridlinkProvider.takeIf { hasDebridLinkKey() }
+    }
+
+    override suspend fun loadConnection(): SavedConnection {
+        val service = activeService()
+        return SavedConnection(accounts().firstOrNull { it.service == service }, hasCredential(service), provider())
+    }
+
+    override suspend fun validateAndSaveRealDebridToken(token: String): Result<DebridAccount> {
+        val trimmed = token.trim()
+        if (trimmed.isEmpty() || trimmed == "bad-token") return Result.failure(DebridError.AuthInvalid())
+        savedRealDebridToken = trimmed
+        selectedService = DebridService.REAL_DEBRID
+        return Result.success(checkNotNull(realDebridAccount()))
+    }
+
+    override fun signOutRealDebrid() {
+        savedRealDebridToken = null
+        if (selectedService == DebridService.REAL_DEBRID) selectedService = activeService()
+    }
+
+    override suspend fun validateAndSaveAllDebridKey(key: String): Result<DebridAccount> {
+        val trimmed = key.trim()
+        if (trimmed.isEmpty() || trimmed == "bad-key") return Result.failure(DebridError.AuthInvalid())
+        savedAllDebridKey = trimmed
+        selectedService = DebridService.ALLDEBRID
+        return Result.success(checkNotNull(allDebridAccount()))
+    }
+
+    override fun signOutAllDebrid() {
+        savedAllDebridKey = null
+        if (selectedService == DebridService.ALLDEBRID) selectedService = activeService()
+    }
+
+    override suspend fun validateAndSavePremiumizeKey(key: String): Result<DebridAccount> {
+        val trimmed = key.trim()
+        if (trimmed.isEmpty() || trimmed == "bad-key") return Result.failure(DebridError.AuthInvalid())
+        savedPremiumizeKey = trimmed
+        selectedService = DebridService.PREMIUMIZE
+        return Result.success(checkNotNull(premiumizeAccount()))
+    }
+
+    override fun signOutPremiumize() {
+        savedPremiumizeKey = null
+        if (selectedService == DebridService.PREMIUMIZE) selectedService = activeService()
+    }
+
+    override suspend fun validateAndSaveOffcloudKey(key: String): Result<DebridAccount> {
+        val trimmed = key.trim()
+        if (trimmed.isEmpty() || trimmed == "bad-key") return Result.failure(DebridError.AuthInvalid())
+        savedOffcloudKey = trimmed
+        selectedService = DebridService.OFFCLOUD
+        return Result.success(checkNotNull(offcloudAccount()))
+    }
+
+    override suspend fun validateAndSaveDebridLinkKey(key: String): Result<DebridAccount> {
+        val trimmed = key.trim()
+        if (trimmed.isEmpty() || trimmed == "bad-key") return Result.failure(DebridError.AuthInvalid())
+        savedDebridLinkKey = trimmed
+        selectedService = DebridService.DEBRID_LINK
+        return Result.success(checkNotNull(debridLinkAccount()))
+    }
+
+    override fun signOutOffcloud() {
+        savedOffcloudKey = null
+        if (selectedService == DebridService.OFFCLOUD) selectedService = activeService()
+    }
+
+    override fun signOutDebridLink() {
+        savedDebridLinkKey = null
+        if (selectedService == DebridService.DEBRID_LINK) selectedService = activeService()
+    }
 
     override suspend fun validateAndSaveTorboxKey(key: String): Result<DebridAccount> {
         validateCalls++
@@ -147,17 +319,19 @@ class FakeRepository(
 
     override fun signOutTorbox() {
         savedKey = null
+        if (selectedService == DebridService.TORBOX) selectedService = activeService()
     }
 
     override suspend fun listDownloads(provider: DebridProvider) = provider.listDownloads()
     override suspend fun delete(provider: DebridProvider, id: String) = provider.delete(id)
+
+    override suspend fun deleteMany(provider: DebridProvider, downloads: List<DebridDownload>) =
+        super<TroveRepository>.deleteMany(provider, downloads)
     override suspend fun play(provider: DebridProvider, download: DebridDownload, fileId: String) =
         provider.getStreamUrl(download.id, fileId)
 
-    override suspend fun checkCached(provider: DebridProvider, hash: String): Result<Map<String, CachedInfo>?> {
-        kotlinx.coroutines.delay(cacheDelayMs)
-        return Result.success(cachedForHash)
-    }
+    override suspend fun checkCached(provider: DebridProvider, hash: String): Result<Map<String, CachedInfo>?> =
+        Result.success(cachedForHash)
 
     override suspend fun addClassified(provider: DebridProvider, classified: ClassifiedShare): Result<DebridDownload> {
         addedClassified += classified

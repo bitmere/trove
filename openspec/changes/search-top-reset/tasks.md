@@ -1,0 +1,9 @@
+- [ ] Verify from code: clear (X) exists and clears only the query; no go-to-top or reset-search exists anywhere; record how query/sort/tab state is held.
+- [ ] Add `resetSearch()` to `DownloadsViewModel` (clear query + `setSort(NEWEST)`, reusing the persisting sort path).
+- [ ] Add the Reset button to the search row in `DownloadsScreen`, visible only when `query.isNotBlank() || sort != NEWEST`; on tap call `resetSearch()` and animate the current tab's list to item 0.
+- [ ] Add the go-to-top button above the floating cluster in `DownloadsScreen`, visible only when the current tab's `firstVisibleItemIndex >= 10`; on tap animate the current tab's list to item 0. Leave `FloatingActions` untouched.
+- [ ] Add `reset_search` and `go_to_top` strings to `strings.xml`.
+- [ ] Add focused ViewModel tests first: reset clears query, restores and persists NEWEST, is a no-op when clean.
+- [ ] Source review, resource XML parsing and static consistency checks; provide review summary for the user.
+- [ ] Coordinator: run focused new tests, then full existing JVM suite, then lint. (Do not compile before the user approves this spec.)
+- [ ] Coordinator: phone-check go to top on each tab, reset from a dirty search, sort persistence across restart, and unchanged clear (X) / Add / Search behaviour.

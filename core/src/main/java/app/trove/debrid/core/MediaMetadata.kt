@@ -12,11 +12,32 @@ import java.util.Locale
 /** Media identity only, independent of provider and playback credentials. */
 data class MediaMetadata(val title: String, val year: Int?, val type: String?, val posterUrl: String? = null)
 data class MediaQuery(val title: String, val year: Int?, val type: String?)
+data class ReleaseDetails(val episode: String?, val quality: String?)
 
 private val extension = Regex("\\.(mkv|mp4|avi|mov|webm|m4v|ts|torrent|nzb)$", RegexOption.IGNORE_CASE)
 private val yearToken = Regex("(?<!\\d)(19\\d{2}|20\\d{2})(?!\\d)")
-private val episode = Regex("(?i)\\b(?:s\\d{1,2}(?:e\\d{1,3})?|\\d{1,2}x\\d{2}|season\\s+\\d+)\\b")
+private val episode = Regex("(?i)\\b(?:s(\\d{1,2})(?:e(\\d{1,3}))?|(\\d{1,2})x(\\d{2})|season\\s+\\d+)\\b")
 private val releaseTag = Regex("(?i)\\b(?:2160p|1080[pi]|720p|480p|4k|web[ -]?(?:rip|dl)|bluray|blu[ -]ray|b[dr]rip|dvdrip|hdtv|remux|hevc|avc|[xh][ .-]?26[45]|hdr10?\\+?|dv|aac|dts|ddp|ac3|multi|dual|proper|repack)\\b")
+
+fun parseReleaseDetails(name: String): ReleaseDetails {
+    if (name.contains("://") || name.startsWith("magnet:", true)) return ReleaseDetails(null, null)
+    val base = name.replace('\\', '/').substringAfterLast('/').replace(extension, "")
+        .replace('.', ' ').replace('_', ' ')
+    val episodeToken = episode.findAll(base).firstNotNullOfOrNull { match ->
+        val (sSeason, sEpisode, xSeason, xEpisode) = match.destructured
+        val season = sSeason.ifEmpty { xSeason }
+        val number = sEpisode.ifEmpty { xEpisode }
+        if (number.isEmpty()) null else "S${season.padStart(2, '0')}E${number.padStart(2, '0')}"
+    }
+    val quality = releaseTag.findAll(base).firstNotNullOfOrNull { match ->
+        when (val tag = match.value.lowercase(Locale.ROOT)) {
+            "4k" -> "2160p"
+            "2160p", "1080p", "1080i", "720p", "480p" -> tag
+            else -> null
+        }
+    }
+    return ReleaseDetails(episodeToken, quality)
+}
 
 fun parseMediaName(name: String): MediaQuery {
     // URLs and magnets must never become third-party search requests.

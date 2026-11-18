@@ -6,6 +6,7 @@ import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -39,8 +40,12 @@ class ShareActivity : ComponentActivity() {
         // The Activity ViewModel survives rotation; do not overwrite an edited or submitted input.
         val restoreInput = model.state.value.let { it.inputText.isNotEmpty() || it.adding || it.added }
         var share by mutableStateOf<PendingShare?>(null)
+        // Read the local theme before the first composition to avoid a default-theme flash.
+        val repository = container.repository
+        repository.loadStartupTheme()
         setContent {
-            TroveTheme {
+            val theme by repository.theme.collectAsState()
+            TroveTheme(preference = theme) {
                 share?.let { input ->
                     AddSheet(
                         viewModel = model,
