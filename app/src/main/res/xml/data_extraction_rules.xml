@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<data-extraction-rules>
+    <cloud-backup>
+        <!-- Encrypted credentials must never be backed up (and are useless
+             without the device Keystore key anyway). -->
+        <exclude domain="sharedpref" path="trove_credentials.xml" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="sharedpref" path="trove_credentials.xml" />
+    </device-transfer>
+</data-extraction-rules>

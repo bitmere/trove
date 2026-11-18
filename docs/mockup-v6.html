@@ -1,0 +1,608 @@
+<!-- v6 mockup: historical only, not the current design. -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TorBox — v6 design mockup</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --paper:#FFFFFF;
+    --ink:#171717;
+    --muted:#6E6E6E;
+    --hairline:#E7E7E7;
+    --jade:#00A67E;
+    --jade-soft:rgba(0,166,126,.12);
+    --track:#ECECEC;
+    --chip:#F2F2F2;
+    --page:#ECECE8;
+  }
+  *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  body{
+    background:var(--page);
+    font-family:'Inter',system-ui,-apple-system,'Segoe UI',sans-serif;
+    color:var(--ink);
+    padding:40px 24px 64px;
+  }
+  .page{max-width:1320px;margin:0 auto}
+  header.page-head{margin-bottom:28px}
+  header.page-head h1{
+    font-family:'Space Grotesk','Inter',sans-serif;
+    font-size:22px;font-weight:700;letter-spacing:-.02em;
+  }
+  header.page-head p{margin-top:6px;font-size:14px;color:var(--muted);max-width:640px;line-height:1.5}
+  header.page-head p b{color:var(--ink);font-weight:600}
+  .phones{display:flex;gap:56px;flex-wrap:wrap;align-items:flex-start}
+  .phone-col{width:390px;max-width:100%}
+  .phone-col > .caption{margin-top:18px;font-size:13px;line-height:1.55;color:var(--muted)}
+  .phone-col > .caption b{color:var(--ink);font-weight:600}
+
+  /* ---------- phone frame ---------- */
+  .phone{
+    position:relative;width:390px;max-width:100%;height:844px;
+    background:var(--paper);
+    border:10px solid #111;
+    border-radius:52px;
+    overflow:hidden;
+    box-shadow:0 24px 64px rgba(0,0,0,.22);
+  }
+  .statusbar{
+    height:46px;display:flex;align-items:center;justify-content:space-between;
+    padding:6px 26px 0;font-size:14px;font-weight:600;
+  }
+  .statusbar .icons{display:flex;align-items:center;gap:6px}
+
+  /* ---------- compact header ---------- */
+  .appbar{
+    display:flex;align-items:center;justify-content:space-between;
+    padding:10px 20px 4px;
+  }
+  .appbar .title-row{display:flex;align-items:baseline;gap:8px}
+  .appbar .wordmark{
+    font-family:'Space Grotesk','Inter',sans-serif;
+    font-size:20px;font-weight:700;letter-spacing:-.02em;
+  }
+  .appbar .plan{font-size:11px;font-weight:600;color:var(--muted);letter-spacing:.02em}
+  .appbar .avatar{
+    width:34px;height:34px;border-radius:50%;
+    background:var(--chip);color:var(--ink);
+    display:flex;align-items:center;justify-content:center;
+    font-size:14px;font-weight:600;
+  }
+
+  /* ---------- top subtabs (One UI pattern: categories of the current screen) ---------- */
+  .segments{
+    display:flex;margin:14px 20px 0;padding:3px;
+    background:var(--chip);border-radius:999px;
+  }
+  .segments span{
+    flex:1;text-align:center;padding:8px 0;border-radius:999px;
+    font-size:13px;font-weight:600;color:var(--muted);
+  }
+  .segments span.on{background:var(--ink);color:#fff;box-shadow:0 2px 6px rgba(0,0,0,.18)}
+
+  /* ---------- search field (a field, not a destination) ---------- */
+  .searchfield{
+    display:flex;align-items:center;gap:10px;
+    margin:12px 20px 0;padding:11px 16px;border-radius:999px;
+    background:var(--chip);color:var(--muted);
+    font-size:14px;font-weight:500;
+  }
+  .searchfield svg{flex-shrink:0}
+
+  /* ---------- download list ---------- */
+  .list{padding:6px 0 120px}
+  .row{
+    padding:16px 20px 15px;
+    border-bottom:1px solid var(--hairline);
+  }
+  .row-top{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
+  .row-name{
+    font-size:15px;font-weight:600;line-height:1.35;letter-spacing:-.01em;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  }
+  .row-meta{margin-top:3px;font-size:13px;color:var(--muted)}
+  .row-side{flex-shrink:0;text-align:right}
+  .row-side .pct{
+    font-family:'Space Grotesk','Inter',sans-serif;
+    font-size:18px;font-weight:700;letter-spacing:-.02em;
+  }
+  .row-side .state{font-size:12px;font-weight:600;color:var(--muted);margin-top:2px}
+  .row-side .state.ready{color:var(--jade)}
+  .play-btn{
+    width:36px;height:36px;border-radius:50%;
+    background:var(--jade);border:none;cursor:pointer;
+    display:flex;align-items:center;justify-content:center;
+    box-shadow:0 3px 10px rgba(0,166,126,.35);
+  }
+  .row-sub{
+    display:flex;justify-content:space-between;align-items:center;
+    margin-top:4px;font-size:12px;color:var(--muted);
+  }
+  .row-sub .play-label{color:var(--jade);font-weight:600}
+  .track{margin-top:12px;height:3px;background:var(--track);border-radius:999px;overflow:hidden}
+  .track i{display:block;height:100%;background:var(--jade);border-radius:999px}
+  .row.dim{opacity:.55}
+
+  /* ---------- floating liquid-glass action cluster (One UI 9.5 pattern) ----------
+     No bottom nav in v6: the only floating glass is this action cluster,
+     bottom-right in the thumb zone. Add is the solid jade primary;
+     Search is the smaller glass circle. */
+  .action-cluster{
+    position:absolute;right:20px;bottom:20px;z-index:6;
+    display:flex;flex-direction:column;align-items:center;gap:12px;
+  }
+  .action-add{
+    width:56px;height:56px;border-radius:50%;
+    background:var(--jade);border:none;cursor:pointer;
+    display:flex;align-items:center;justify-content:center;
+    box-shadow:0 8px 20px rgba(0,166,126,.45), 0 2px 6px rgba(0,0,0,.18);
+  }
+  .action-search{
+    width:44px;height:44px;border-radius:50%;
+    background:rgba(255,255,255,.72);
+    -webkit-backdrop-filter:blur(24px) saturate(1.7);
+    backdrop-filter:blur(24px) saturate(1.7);
+    border:1px solid rgba(255,255,255,.65);
+    box-shadow:0 8px 20px rgba(0,0,0,.14), inset 0 1px 0 rgba(255,255,255,.85);
+    cursor:pointer;display:flex;align-items:center;justify-content:center;
+    color:var(--ink);
+  }
+
+  /* ---------- player chooser sheet (phone 3) ---------- */
+  .sheet h3{
+    font-family:'Space Grotesk','Inter',sans-serif;
+    font-size:17px;font-weight:700;letter-spacing:-.01em;margin:6px 0 4px;
+  }
+  .sheet .sheet-sub{font-size:13px;color:var(--muted);line-height:1.45}
+  .chooser{margin-top:16px;border-top:1px solid var(--hairline)}
+  .chooser-row{
+    display:flex;align-items:center;gap:14px;
+    padding:14px 2px;border-bottom:1px solid var(--hairline);
+  }
+  .chooser-row .app-icon{
+    width:44px;height:44px;border-radius:12px;flex-shrink:0;
+    background:var(--chip);color:var(--ink);
+    display:flex;align-items:center;justify-content:center;
+    font-family:'Space Grotesk','Inter',sans-serif;
+    font-size:19px;font-weight:700;
+  }
+  .chooser-row .app-name{font-size:15px;font-weight:600}
+  .chooser-row .app-sub{font-size:12px;color:var(--muted);margin-top:2px}
+  .chooser-row .check{
+    margin-left:auto;width:22px;height:22px;border-radius:50%;
+    background:var(--jade);color:#fff;flex-shrink:0;
+    display:flex;align-items:center;justify-content:center;
+  }
+  .sheet .choice-row{display:flex;gap:12px;margin-top:20px}
+  .sheet .choice-row .primary{flex:1;margin-top:0}
+  .sheet .choice-row .secondary{
+    flex:1;height:52px;border:1px solid var(--hairline);border-radius:999px;
+    background:var(--paper);color:var(--ink);cursor:pointer;
+    font-family:'Inter',sans-serif;font-size:15px;font-weight:600;
+  }
+
+  /* ---------- share sheet (phone 2) ---------- */
+  .scrim{position:absolute;inset:0;background:rgba(0,0,0,.38);z-index:3}
+  .sheet{
+    position:absolute;left:0;right:0;bottom:0;z-index:4;
+    background:var(--paper);
+    border-radius:28px 28px 0 0;
+    padding:10px 20px 26px;
+    box-shadow:0 -12px 40px rgba(0,0,0,.18);
+  }
+  .sheet .handle{width:38px;height:4px;border-radius:999px;background:#D8D8D8;margin:2px auto 16px}
+  .sheet .from{font-size:12px;color:var(--muted)}
+  .sheet .link{
+    margin-top:6px;font-size:13px;line-height:1.45;color:var(--ink);
+    background:var(--chip);border-radius:10px;padding:10px 12px;
+    font-family:ui-monospace,'SF Mono',Menlo,monospace;
+    word-break:break-all;
+  }
+  .sheet .detected{
+    display:inline-flex;align-items:center;gap:6px;
+    margin-top:12px;padding:6px 11px;border-radius:999px;
+    background:var(--jade-soft);color:#00785C;
+    font-size:12px;font-weight:600;
+  }
+  .sheet label{display:block;margin-top:18px;font-size:12px;font-weight:600;color:var(--muted)}
+  .sheet .namefield{
+    margin-top:6px;padding:12px;border:1px solid var(--hairline);border-radius:12px;
+    font-size:14px;font-weight:500;
+  }
+  .sheet .cached{
+    display:flex;align-items:center;gap:8px;margin-top:14px;
+    font-size:13px;font-weight:500;
+  }
+  .sheet .cached .tick{
+    width:20px;height:20px;border-radius:50%;background:var(--jade);color:#fff;
+    display:flex;align-items:center;justify-content:center;flex-shrink:0;
+  }
+  .sheet .primary{
+    display:block;width:100%;margin-top:20px;height:52px;border:none;border-radius:999px;
+    background:var(--jade);color:#fff;cursor:pointer;
+    font-family:'Inter',sans-serif;font-size:15px;font-weight:600;
+  }
+  .sheet .cancel{
+    display:block;width:100%;margin-top:6px;padding:10px 0;border:none;background:none;cursor:pointer;
+    font-family:'Inter',sans-serif;font-size:14px;font-weight:600;color:var(--muted);
+  }
+
+  /* ---------- footer: tokens + rules ---------- */
+  footer{margin-top:48px;border-top:1px solid #D8D8D3;padding-top:24px}
+  footer h2{
+    font-family:'Space Grotesk','Inter',sans-serif;
+    font-size:15px;font-weight:700;letter-spacing:-.01em;margin-bottom:14px;
+  }
+  .swatches{display:flex;gap:20px;flex-wrap:wrap}
+  .swatch{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--muted)}
+  .swatch i{width:18px;height:18px;border-radius:6px;border:1px solid rgba(0,0,0,.12);display:block}
+  .swatch b{color:var(--ink);font-weight:600}
+  footer .rules{margin-top:18px;font-size:13px;line-height:1.7;color:var(--muted);max-width:720px}
+  footer .rules b{color:var(--ink);font-weight:600}
+  @media (max-width:900px){ .phones{gap:32px} }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <header class="page-head">
+    <h1>TorBox — v6 design mockup</h1>
+    <p>Main Downloads screen, the share-to-add sheet, and the player chooser. <b>There is no bottom nav in v6.</b> This app has one primary destination — the Downloads list — and the guidelines are clear: Material 3 says under 3 destinations use tabs, not a bottom bar, and Settings is not a primary destination; One UI splits the screen into a Viewing Area (top) and an Interaction Area (bottom half), with screen categories as subtabs at the top. So Torrents / Web / Usenet are top subtabs, Search is a field at the top of the list, Settings lives behind the avatar, and the only floating glass is the Add + Search action cluster at bottom-right (One UI 9.5 pattern). Tap Play on a ready row and Android asks which player to use.</p>
+  </header>
+
+  <div class="phones">
+
+    <!-- ============ PHONE 1 : DOWNLOADS ============ -->
+    <div class="phone-col">
+      <div class="phone">
+        <div class="statusbar">
+          <span>9:41</span>
+          <span class="icons">
+            <svg width="17" height="11" viewBox="0 0 17 11" fill="#171717"><rect x="0" y="7" width="3" height="4" rx="1"/><rect x="4.5" y="5" width="3" height="6" rx="1"/><rect x="9" y="2.5" width="3" height="8.5" rx="1"/><rect x="13.5" y="0" width="3" height="11" rx="1"/></svg>
+            <svg width="16" height="11" viewBox="0 0 16 12" fill="none" stroke="#171717" stroke-width="1.6" stroke-linecap="round"><path d="M1.5 4.2a10 10 0 0 1 13 0M4 7a6.4 6.4 0 0 1 8 0"/><circle cx="8" cy="10" r="1.1" fill="#171717" stroke="none"/></svg>
+            <svg width="25" height="12" viewBox="0 0 25 12" fill="none"><rect x="0.5" y="0.5" width="21" height="11" rx="3.5" stroke="#171717" opacity=".4"/><rect x="2" y="2" width="15" height="8" rx="2" fill="#171717"/><path d="M23.5 4v4a2.2 2.2 0 0 0 0-4Z" fill="#171717" opacity=".4"/></svg>
+          </span>
+        </div>
+
+        <div class="appbar">
+          <div class="title-row">
+            <span class="wordmark">TorBox</span>
+            <span class="plan">Essential</span>
+          </div>
+          <div class="avatar">C</div>
+        </div>
+
+        <div class="segments">
+          <span class="on">Torrents&nbsp;12</span>
+          <span>Web&nbsp;4</span>
+          <span>Usenet&nbsp;1</span>
+        </div>
+
+        <div class="searchfield">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.8-3.8"/></svg>
+          <span>Search downloads</span>
+        </div>
+
+        <div class="list">
+          <div class="row">
+            <div class="row-top">
+              <div>
+                <div class="row-name">Dune: Part Two (2024) 2160p WEB-DL</div>
+                <div class="row-meta">18.4 GB · 2 files</div>
+              </div>
+              <div class="row-side">
+                <button class="play-btn" aria-label="Play">
+                  <svg width="14" height="16" viewBox="0 0 14 16" fill="#fff"><path d="M1 1.8v12.4c0 .9 1 1.5 1.8 1L13 8.9c.8-.5.8-1.6 0-2.1L2.8.8C2 .3 1 .9 1 1.8Z"/></svg>
+                </button>
+                <div class="state ready" style="margin-top:5px">Ready</div>
+              </div>
+            </div>
+            <div class="row-sub"><span>Added today</span><span class="play-label">Play</span></div>
+            <div class="track"><i style="width:100%"></i></div>
+          </div>
+
+          <div class="row">
+            <div class="row-top">
+              <div>
+                <div class="row-name">The Last of Us S02E05</div>
+                <div class="row-meta">3.2 GB · 1 file</div>
+              </div>
+              <div class="row-side">
+                <div class="pct">62%</div>
+                <div class="state">4.8 MB/s</div>
+              </div>
+            </div>
+            <div class="row-sub"><span>Downloading</span><span>12 min left</span></div>
+            <div class="track"><i style="width:62%"></i></div>
+          </div>
+
+          <div class="row">
+            <div class="row-top">
+              <div>
+                <div class="row-name">Interstellar (2014) REMUX</div>
+                <div class="row-meta">42.1 GB · 1 file</div>
+              </div>
+              <div class="row-side">
+                <div class="pct" style="color:var(--muted);font-size:15px">Queued</div>
+                <div class="state">Waiting</div>
+              </div>
+            </div>
+            <div class="row-sub"><span>Position 2 in queue</span><span>—</span></div>
+            <div class="track"><i style="width:0%"></i></div>
+          </div>
+
+          <div class="row">
+            <div class="row-top">
+              <div>
+                <div class="row-name">Planet Earth III E02</div>
+                <div class="row-meta">5.8 GB · 1 file</div>
+              </div>
+              <div class="row-side">
+                <button class="play-btn" aria-label="Play">
+                  <svg width="14" height="16" viewBox="0 0 14 16" fill="#fff"><path d="M1 1.8v12.4c0 .9 1 1.5 1.8 1L13 8.9c.8-.5.8-1.6 0-2.1L2.8.8C2 .3 1 .9 1 1.8Z"/></svg>
+                </button>
+                <div class="state ready" style="margin-top:5px">Ready</div>
+              </div>
+            </div>
+            <div class="row-sub"><span>Added yesterday</span><span class="play-label">Play</span></div>
+            <div class="track"><i style="width:100%"></i></div>
+          </div>
+
+          <div class="row dim">
+            <div class="row-top">
+              <div>
+                <div class="row-name">Silo S02 Complete</div>
+                <div class="row-meta">14.7 GB · 10 files</div>
+              </div>
+              <div class="row-side">
+                <div class="pct">18%</div>
+                <div class="state">2.1 MB/s</div>
+              </div>
+            </div>
+            <div class="row-sub"><span>Downloading</span><span>1 h 40 min left</span></div>
+            <div class="track"><i style="width:18%"></i></div>
+          </div>
+        </div>
+
+        <div class="action-cluster">
+          <button class="action-search" aria-label="Search downloads">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.8-3.8"/></svg>
+          </button>
+          <button class="action-add" aria-label="Add download">
+            <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.6" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+          </button>
+        </div>
+      </div>
+      <p class="caption"><b>Downloads — no bottom nav.</b> Compact 20px wordmark, no hero. Torrents / Web / Usenet are top subtabs (One UI: categories of the current screen go at the top), and Search is a full-width field at the top of the list — not a destination. Flat rows on hairlines, progress is a 3px track under each row. Ready rows carry a Play button — tap it and Android asks which player to use. The list runs to the bottom edge; nothing is hidden under a nav bar. Bottom-right in the thumb zone sits the floating glass action cluster: a jade + for Add and a smaller glass magnifier that jumps to search (One UI 9.5 pattern). Settings, accounts and providers live behind the avatar in the top bar.</p>
+    </div>
+
+    <!-- ============ PHONE 2 : SHARE TO ADD ============ -->
+    <div class="phone-col">
+      <div class="phone">
+        <div class="statusbar">
+          <span>9:41</span>
+          <span class="icons">
+            <svg width="17" height="11" viewBox="0 0 17 11" fill="#171717"><rect x="0" y="7" width="3" height="4" rx="1"/><rect x="4.5" y="5" width="3" height="6" rx="1"/><rect x="9" y="2.5" width="3" height="8.5" rx="1"/><rect x="13.5" y="0" width="3" height="11" rx="1"/></svg>
+            <svg width="16" height="11" viewBox="0 0 16 12" fill="none" stroke="#171717" stroke-width="1.6" stroke-linecap="round"><path d="M1.5 4.2a10 10 0 0 1 13 0M4 7a6.4 6.4 0 0 1 8 0"/><circle cx="8" cy="10" r="1.1" fill="#171717" stroke="none"/></svg>
+            <svg width="25" height="12" viewBox="0 0 25 12" fill="none"><rect x="0.5" y="0.5" width="21" height="11" rx="3.5" stroke="#171717" opacity=".4"/><rect x="2" y="2" width="15" height="8" rx="2" fill="#171717"/><path d="M23.5 4v4a2.2 2.2 0 0 0 0-4Z" fill="#171717" opacity=".4"/></svg>
+          </span>
+        </div>
+
+        <div class="appbar">
+          <div class="title-row">
+            <span class="wordmark">TorBox</span>
+            <span class="plan">Essential</span>
+          </div>
+          <div class="avatar">C</div>
+        </div>
+
+        <div class="segments">
+          <span class="on">Torrents&nbsp;12</span>
+          <span>Web&nbsp;4</span>
+          <span>Usenet&nbsp;1</span>
+        </div>
+
+        <div class="searchfield">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.8-3.8"/></svg>
+          <span>Search downloads</span>
+        </div>
+
+        <div class="list">
+          <div class="row">
+            <div class="row-top">
+              <div>
+                <div class="row-name">Dune: Part Two (2024) 2160p WEB-DL</div>
+                <div class="row-meta">18.4 GB · 2 files</div>
+              </div>
+              <div class="row-side">
+                <button class="play-btn" aria-label="Play">
+                  <svg width="14" height="16" viewBox="0 0 14 16" fill="#fff"><path d="M1 1.8v12.4c0 .9 1 1.5 1.8 1L13 8.9c.8-.5.8-1.6 0-2.1L2.8.8C2 .3 1 .9 1 1.8Z"/></svg>
+                </button>
+                <div class="state ready" style="margin-top:5px">Ready</div>
+              </div>
+            </div>
+            <div class="row-sub"><span>Added today</span><span class="play-label">Play</span></div>
+            <div class="track"><i style="width:100%"></i></div>
+          </div>
+          <div class="row">
+            <div class="row-top">
+              <div>
+                <div class="row-name">The Last of Us S02E05</div>
+                <div class="row-meta">3.2 GB · 1 file</div>
+              </div>
+              <div class="row-side">
+                <div class="pct">62%</div>
+                <div class="state">4.8 MB/s</div>
+              </div>
+            </div>
+            <div class="row-sub"><span>Downloading</span><span>12 min left</span></div>
+            <div class="track"><i style="width:62%"></i></div>
+          </div>
+        </div>
+
+        <div class="scrim"></div>
+
+        <div class="sheet">
+          <div class="handle"></div>
+          <div class="from">Shared from Chrome</div>
+          <div class="link">magnet:?xt=urn:btih:9f2c41d7e8b3…&amp;dn=Dune.Part.Two.2024.2160p.WEB-DL</div>
+          <span class="detected">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6 3v12a6 6 0 0 0 12 0V3"/><path d="M6 3h4v5H6zM14 3h4v5h-4z"/></svg>
+            Torrent · magnet link
+          </span>
+          <label for="sheet-name">Name</label>
+          <div class="namefield" id="sheet-name">Dune: Part Two (2024) 2160p WEB-DL</div>
+          <div class="cached">
+            <span class="tick">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><path d="m4 12.5 5 5L20 6.5"/></svg>
+            </span>
+            Cached on TorBox — starts instantly
+          </div>
+          <button class="primary">Add download</button>
+          <button class="cancel">Cancel</button>
+        </div>
+      </div>
+      <p class="caption"><b>Share to add.</b> Share any link from a browser and the sheet opens with the type already detected. <b>magnet:</b> → Torrent · <b>.torrent</b> → Torrent · <b>.nzb</b> → Usenet · <b>other link</b> → Web download. One tap adds it.</p>
+    </div>
+
+    <!-- ============ PHONE 3 : PLAY WITH (PLAYER CHOOSER) ============ -->
+    <div class="phone-col">
+      <div class="phone">
+        <div class="statusbar">
+          <span>9:41</span>
+          <span class="icons">
+            <svg width="17" height="11" viewBox="0 0 17 11" fill="#171717"><rect x="0" y="7" width="3" height="4" rx="1"/><rect x="4.5" y="5" width="3" height="6" rx="1"/><rect x="9" y="2.5" width="3" height="8.5" rx="1"/><rect x="13.5" y="0" width="3" height="11" rx="1"/></svg>
+            <svg width="16" height="11" viewBox="0 0 16 12" fill="none" stroke="#171717" stroke-width="1.6" stroke-linecap="round"><path d="M1.5 4.2a10 10 0 0 1 13 0M4 7a6.4 6.4 0 0 1 8 0"/><circle cx="8" cy="10" r="1.1" fill="#171717" stroke="none"/></svg>
+            <svg width="25" height="12" viewBox="0 0 25 12" fill="none"><rect x="0.5" y="0.5" width="21" height="11" rx="3.5" stroke="#171717" opacity=".4"/><rect x="2" y="2" width="15" height="8" rx="2" fill="#171717"/><path d="M23.5 4v4a2.2 2.2 0 0 0 0-4Z" fill="#171717" opacity=".4"/></svg>
+          </span>
+        </div>
+
+        <div class="appbar">
+          <div class="title-row">
+            <span class="wordmark">TorBox</span>
+            <span class="plan">Essential</span>
+          </div>
+          <div class="avatar">C</div>
+        </div>
+
+        <div class="segments">
+          <span class="on">Torrents&nbsp;12</span>
+          <span>Web&nbsp;4</span>
+          <span>Usenet&nbsp;1</span>
+        </div>
+
+        <div class="searchfield">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.8-3.8"/></svg>
+          <span>Search downloads</span>
+        </div>
+
+        <div class="list">
+          <div class="row">
+            <div class="row-top">
+              <div>
+                <div class="row-name">Dune: Part Two (2024) 2160p WEB-DL</div>
+                <div class="row-meta">18.4 GB · 2 files</div>
+              </div>
+              <div class="row-side">
+                <button class="play-btn" aria-label="Play">
+                  <svg width="14" height="16" viewBox="0 0 14 16" fill="#fff"><path d="M1 1.8v12.4c0 .9 1 1.5 1.8 1L13 8.9c.8-.5.8-1.6 0-2.1L2.8.8C2 .3 1 .9 1 1.8Z"/></svg>
+                </button>
+                <div class="state ready" style="margin-top:5px">Ready</div>
+              </div>
+            </div>
+            <div class="row-sub"><span>Added today</span><span class="play-label">Play</span></div>
+            <div class="track"><i style="width:100%"></i></div>
+          </div>
+          <div class="row">
+            <div class="row-top">
+              <div>
+                <div class="row-name">The Last of Us S02E05</div>
+                <div class="row-meta">3.2 GB · 1 file</div>
+              </div>
+              <div class="row-side">
+                <div class="pct">62%</div>
+                <div class="state">4.8 MB/s</div>
+              </div>
+            </div>
+            <div class="row-sub"><span>Downloading</span><span>12 min left</span></div>
+            <div class="track"><i style="width:62%"></i></div>
+          </div>
+        </div>
+
+        <div class="scrim"></div>
+
+        <div class="sheet">
+          <div class="handle"></div>
+          <h3>Play with</h3>
+          <div class="sheet-sub">Dune: Part Two (2024) 2160p WEB-DL — stream link from TorBox</div>
+          <div class="chooser">
+            <div class="chooser-row">
+              <span class="app-icon">N</span>
+              <div>
+                <div class="app-name">Nuvio</div>
+                <div class="app-sub">Video player</div>
+              </div>
+            </div>
+            <div class="chooser-row">
+              <span class="app-icon">V</span>
+              <div>
+                <div class="app-name">VLC</div>
+                <div class="app-sub">Video player</div>
+              </div>
+              <span class="check">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><path d="m4 12.5 5 5L20 6.5"/></svg>
+              </span>
+            </div>
+            <div class="chooser-row">
+              <span class="app-icon">M</span>
+              <div>
+                <div class="app-name">MX Player</div>
+                <div class="app-sub">Video player</div>
+              </div>
+            </div>
+          </div>
+          <div class="choice-row">
+            <button class="primary">Just once</button>
+            <button class="secondary">Always</button>
+          </div>
+        </div>
+      </div>
+      <p class="caption"><b>Play with.</b> Play hands the stream link to Android's chooser — any player that can open a link works, not just Nuvio. Pick a player, then <b>Just once</b> or <b>Always</b>, the way Android always asks.</p>
+    </div>
+
+  </div>
+
+  <footer>
+    <h2>Token system</h2>
+    <div class="swatches">
+      <span class="swatch"><i style="background:#FFFFFF"></i><span><b>Paper #FFFFFF</b> — canvas, interface disappears</span></span>
+      <span class="swatch"><i style="background:#171717"></i><span><b>Ink #171717</b> — nearly all text</span></span>
+      <span class="swatch"><i style="background:#6E6E6E"></i><span><b>Muted #6E6E6E</b> — secondary text</span></span>
+      <span class="swatch"><i style="background:#E7E7E7"></i><span><b>Hairline #E7E7E7</b> — row separators</span></span>
+      <span class="swatch"><i style="background:#00A67E"></i><span><b>Jade #00A67E</b> — the one accent: ready, progress, play</span></span>
+      <span class="swatch"><i style="background:rgba(255,255,255,.72);box-shadow:inset 0 0 0 1px rgba(0,0,0,.08)"></i><span><b>Glass rgba(255,255,255,.72)</b> — floating action cluster only</span></span>
+    </div>
+    <p class="rules">
+      <b>Type:</b> Space Grotesk for the wordmark and the big percent numerals, Inter for everything else — not Inter-only.
+      <b>Layout primitive:</b> a flat list on hairlines; progress is a 3px track under each row, never a card.
+      <b>Signature move:</b> the right-hand status column — one word or one number per row (Ready / 62% / Queued) — plus the play button on ready rows.
+      <b>What changed in v6:</b> the bottom nav is gone entirely. This app has one primary destination — the Downloads list — so per Material 3 (under 3 destinations use tabs, not a bottom bar; Settings is not a primary destination) and One UI (Viewing Area on top, Interaction Area in the bottom half; screen categories as subtabs at the top), Torrents / Web / Usenet are top subtabs, Search is a field at the top of the list, and Settings, accounts and providers live behind the avatar. The floating liquid glass survives as an action cluster in the thumb zone, bottom-right: a jade + for Add and a smaller glass magnifier that jumps to search (One UI 9.5 pattern). Play is still dynamic: tapping it hands the stream link to Android's chooser, so Nuvio, VLC, MX Player, or any player that opens a link works. A third frame shows that chooser.
+      <b>Rejected:</b> a 2-item Downloads / Search bottom nav — still a nav bar for one real destination, and Search is a field, not a destination.
+    </p>
+    <h2 style="margin-top:26px">What the latest TorBox API allows</h2>
+    <p class="rules">
+      Checked live against the OpenAPI spec — still <b>v1</b> (OpenAPI 3.1.0, base <b>https://api.torbox.app</b>); there is no v2.
+      <b>Play:</b> <b>GET /v1/api/stream/createstream</b> (id, file_id, type, chosen_subtitle_index, chosen_audio_index, chosen_resolution_index, scrobbling_enabled) + <b>getstreamdata</b> returns a stream link any player can open — this is the playback path, preferred over requestdl for Play.
+      <b>Add:</b> async creates (<b>asynccreatetorrent</b> / <b>asynccreatewebdownload</b> / <b>asynccreateusenetdownload</b>) return immediately and process in the background, so adding feels instant.
+      <b>More:</b> batch requestdl (GET and POST) for several files at once; RSS feeds (add / list / items / control); integrations that export to Dropbox, Google Drive, OneDrive, Gofile, Pixeldrain and 1Fichier with job status; notifications; user stats and subscriptions; speedtest.
+      <b>Latest changelog:</b> v9.3.1 (2026-11-09) — web-download fixes, uncached torrents more reliable; v9.3 (2026-11-04) — buffering and slow-download fixes; v9 — NNTP direct Usenet, AirLock, T3, WebDAV, tags.
+    </p>
+  </footer>
+
+</div>
+</body>
+</html>

@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+      - name: Test, lint and build debug APK without release secrets
+        run: ./gradlew --no-daemon :app:testDebugUnitTest :core:test :app:lint :app:assembleDebug
+      - name: Check source guards
+        if: ${{ !cancelled() }}
+        run: python3 scripts/check-senior-rewrite.py
+      - name: Upload test and lint reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trove-ci-reports
+          path: |
+            app/build/reports/tests/
+            app/build/test-results/
+            core/build/reports/tests/
+            core/build/test-results/
+            app/build/reports/lint-results*
+          if-no-files-found: warn
+          retention-days: 7
+
+  quality-gate:
+    if: always()
+    needs: [build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require successful validation
+        env:
+          BUILD_RESULT: ${{ needs.build.result }}
+        run: test "$BUILD_RESULT" = success
