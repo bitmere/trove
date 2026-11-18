@@ -187,24 +187,62 @@ class TorBoxProviderTest {
 
 
 
+    // Real /webdl/hosters shape: objects with name + domains arrays + status.
+    // Turbobit is disabled here; the plain string keeps the legacy branch covered.
+    private val hostersJson = """
+        [
+          {"name":"Rapidgator","domains":["rapidgator.net","rg.to"],"status":true},
+          {"name":"1Fichier","domains":["1Fichier.COM","www.1fichier.com","alterupload.com"],"status":true},
+          {"name":"Turbobit","domains":["turbobit.net","turbo.to"],"status":false},
+          "legacy.example"
+        ]
+    """.trimIndent()
+
     @Test
     fun `supportsUrl matches hoster domains`() {
         val (p, _) = provider { req ->
             if (req.url.contains("/webdl/hosters")) {
-                HttpResponse(200, envelope("""["example.com","example.net"]"""))
+                HttpResponse(200, envelope(hostersJson))
             } else HttpResponse(404, "{}")
         }
-        val ok = kotlinx.coroutines.runBlocking { p.supportsUrl("https://example.com/file/abc") }.getOrThrow()
-        assertTrue(ok)
-        val no = kotlinx.coroutines.runBlocking { p.supportsUrl("https://example.org/x") }.getOrThrow()
-        assertFalse(no)
+        assertTrue(kotlinx.coroutines.runBlocking { p.supportsUrl("https://rapidgator.net/file/abc") }.getOrThrow())
+        assertTrue(kotlinx.coroutines.runBlocking { p.supportsUrl("https://rg.to/file/abc") }.getOrThrow())
+        assertTrue(kotlinx.coroutines.runBlocking { p.supportsUrl("https://sub.1fichier.com/abc") }.getOrThrow())
+        assertFalse(kotlinx.coroutines.runBlocking { p.supportsUrl("https://turbobit.net/abc") }.getOrThrow())
+        assertFalse(kotlinx.coroutines.runBlocking { p.supportsUrl("https://example.org/x") }.getOrThrow())
+    }
+
+    @Test
+    fun `hosterDomains parses real hoster objects not display names`() = kotlinx.coroutines.runBlocking {
+        val (p, _) = provider { req ->
+            if (req.url.contains("/webdl/hosters")) HttpResponse(200, envelope(hostersJson))
+            else HttpResponse(404, "{}")
+        }
+        val domains = p.hosterDomains()
+        assertEquals(
+            setOf("rapidgator.net", "rg.to", "1fichier.com", "alterupload.com", "legacy.example"),
+            domains,
+        )
+        assertFalse("Rapidgator" in domains)
+        assertFalse("1Fichier" in domains)
+        assertFalse("turbobit.net" in domains)
+        assertFalse("turbo.to" in domains)
+        for (url in listOf("https://rapidgator.net/file/abc", "https://rg.to/file/abc", "https://1fichier.com/abc")) {
+            assertTrue(ShareClassifier.classify(ShareInput(text = url), domains) is ClassifiedShare.HosterLink)
+        }
+        assertTrue(
+            ShareClassifier.classify(ShareInput(text = "https://unknown.example/abc"), domains)
+                is ClassifiedShare.UnsupportedHoster,
+        )
+        assertTrue(p.supportsUrl("https://rapidgator.net/file/abc").getOrThrow())
+        assertFalse(p.supportsUrl("https://turbobit.net/abc").getOrThrow())
     }
 
     @Test
     fun `hoster discovery retries after a transient error then caches success`() = kotlinx.coroutines.runBlocking {
         var calls = 0
         val (provider, _) = provider {
-            if (++calls == 1) HttpResponse(503, "") else HttpResponse(200, envelope("""["example.com"]"""))
+            if (++calls == 1) HttpResponse(503, "") else HttpResponse(200, envelope("""[{"name":"Example","domains":["example.com"],"status":true}]"""))
         }
         assertTrue(provider.hosterDomains().isEmpty())
         assertEquals(setOf("example.com"), provider.hosterDomains())

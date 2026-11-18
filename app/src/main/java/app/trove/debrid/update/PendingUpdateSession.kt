@@ -27,7 +27,14 @@ class PendingUpdateSession(
     }
     fun isOwnedPath(path: String): Boolean = runCatching {
         val file = File(path)
-        file.absolutePath == file.canonicalPath && file.parentFile?.canonicalFile == updatesDir.canonicalFile && file.extension == "apk"
+        // filesDir lives under /data/user/0, a symlink to /data/data, so a raw
+        // absolute path never equals the canonical path. Canonicalize both
+        // sides, and reject a leaf symlink escaping the directory: its
+        // canonical file would not be the canonical parent plus its own name.
+        val canonicalParent = updatesDir.canonicalFile
+        val canonical = file.canonicalFile
+        file.extension == "apk" && canonical.parentFile == canonicalParent &&
+            canonical == File(canonicalParent, file.name)
     }.getOrDefault(false)
 
     fun save(id: Int, version: Long, file: File, operation: String) = synchronized(lock) {

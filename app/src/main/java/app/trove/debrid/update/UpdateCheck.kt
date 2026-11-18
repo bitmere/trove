@@ -16,7 +16,7 @@ const val UPDATE_LATEST_URL = "$API_RELEASES/latest"
 
 val UPDATE_NO_CACHE_HEADERS = mapOf("Cache-Control" to "no-cache", "Pragma" to "no-cache")
 
-enum class UpdateIssue { NETWORK, UNAVAILABLE, RATE_LIMIT, ASSETS, MANIFEST, DOWNLOAD, EMPTY, TRUNCATED, DIGEST_MISMATCH, VERIFICATION, PACKAGE, SIGNER, INSTALL, SETTINGS, PREVIOUS_SESSION }
+enum class UpdateIssue { NETWORK, UNAVAILABLE, RATE_LIMIT, ASSETS, MANIFEST, DOWNLOAD, EMPTY, TRUNCATED, DIGEST_MISMATCH, VERIFICATION, OWNERSHIP, PACKAGE, SIGNER, INSTALL, SETTINGS, PREVIOUS_SESSION }
 class UpdateException(val issue: UpdateIssue, val diagnostics: UpdateDiagnostics? = null) : IOException(issue.name)
 
 sealed interface UpdateCheckResult {

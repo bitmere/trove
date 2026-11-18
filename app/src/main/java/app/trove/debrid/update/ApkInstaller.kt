@@ -16,7 +16,31 @@ sealed interface InstallOutcome {
     data class SessionStarted(val sessionId: Int) : InstallOutcome
     data object SystemInstallerLaunched : InstallOutcome
     data object NeedsUnknownSources : InstallOutcome
-    data class Error(val issue: UpdateIssue) : InstallOutcome
+    data class Error(val issue: UpdateIssue, val diagnostics: InstallDiagnostics? = null) : InstallOutcome
+}
+
+enum class InstallCheck { PASS, FAIL, NOT_CHECKED }
+
+/** One typed install-guard record: per-sub-check results, expected vs observed
+ * measurements, and whether the file was deleted. In memory only; no URL, path,
+ * key, response body, raw header or exception message is retained. `deleted`
+ * is null when no deletion was attempted (the file was not owned). */
+data class InstallDiagnostics(
+    val ownership: InstallCheck,
+    val size: InstallCheck,
+    val sha256: InstallCheck,
+    val expectedSize: Long,
+    val observedSize: Long?,
+    val expectedSha256: String,
+    val observedSha256: String?,
+    val deleted: Boolean?,
+) {
+    override fun toString(): String = buildString {
+        appendLine("ownership: ${ownership.name.lowercase()}")
+        appendLine("size: ${size.name.lowercase()} (expected $expectedSize, observed ${observedSize ?: "unavailable"})")
+        appendLine("sha256: ${sha256.name.lowercase()} (expected $expectedSha256, observed ${observedSha256 ?: "unavailable"})")
+        append("file deleted: ${deleted?.toString() ?: "not attempted"}")
+    }
 }
 
 /** Test boundary preserving create/open/write+fsync/commit/abandon ordering. */

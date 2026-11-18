@@ -407,12 +407,28 @@ class TorBoxProvider(
         catch (e: CancellationException) { throw e }
         catch (_: Exception) { null }
         if (data == null) return emptySet()
-        val domains = data.mapNotNull { item ->
+        val domains = data.flatMap { item ->
             when (item) {
-                is com.google.gson.JsonPrimitive -> item.asString.lowercase()
-                is JsonObject -> (item.optString("domain") ?: item.optString("host") ?: item.optString("name"))
-                    ?.lowercase()?.removePrefix("www.")
-                else -> null
+                // Tolerate a plain-string list; the live API returns objects.
+                is com.google.gson.JsonPrimitive -> listOfNotNull(
+                    item.asString.takeIf { item.isString }?.normalizeHosterDomain(),
+                )
+                is JsonObject -> {
+                    // Live shape: {"name", "domains": [...], "status": bool}.
+                    // Only active hosters contribute; an absent status means active.
+                    if (!item.optBoolean("status", true)) emptyList()
+                    else {
+                        val array = item["domains"] as? JsonArray
+                        if (array != null) array.mapNotNull { entry ->
+                            (entry as? com.google.gson.JsonPrimitive)
+                                ?.asString?.takeIf { entry.isString }?.normalizeHosterDomain()
+                        } else listOfNotNull(
+                            (item.optString("domain") ?: item.optString("host") ?: item.optString("name"))
+                                ?.normalizeHosterDomain(),
+                        )
+                    }
+                }
+                else -> emptyList()
             }
         }.toSet()
         hosterCache = System.currentTimeMillis() to domains
@@ -490,6 +506,10 @@ class TorBoxProvider(
 // ------------------------------------------------------------------
 // Gson lenient accessors
 // ------------------------------------------------------------------
+
+/** Lowercase, strip a www. prefix, drop blanks. */
+private fun String.normalizeHosterDomain(): String? =
+    trim().lowercase().removePrefix("www.").takeIf { it.isNotEmpty() }
 
 internal fun JsonObject.optString(name: String): String? {
     val el = this[name] ?: return null

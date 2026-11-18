@@ -141,16 +141,19 @@ class AndroidUpdateBackend(context: Context) : UpdateBackend {
     override suspend fun install(file: File, release: LatestRelease, operation: String): InstallOutcome {
         if (!canInstall()) return InstallOutcome.NeedsUnknownSources
         val caller = currentCoroutineContext()
+        var guard: InstallGuardFailure? = null
         return try {
             // Reverify at the install boundary, including retries and permission returns.
-            if (!pending.isOwnedPath(file.absolutePath) || file.length() != release.size || sha256(file) { caller.ensureActive() } != release.sha256) throw UpdateException(UpdateIssue.VERIFICATION)
+            guard = verifyInstallGuard(pending, file, release) { caller.ensureActive() }
+            if (guard != null) throw UpdateException(guard.issue)
             verifyArchive(file, release)
             caller.ensureActive()
             installer.install(file, release.versionCode, operation) { caller.ensureActive() }
         } catch (e: CancellationException) { throw e }
         catch (failure: UpdateException) {
-            if (pending.isOwnedPath(file.absolutePath)) file.delete()
-            InstallOutcome.Error(failure.issue)
+            // Collect the diagnostic before cleanup; deletion outcome completes it.
+            val deleted: Boolean? = if (pending.isOwnedPath(file.absolutePath)) file.delete() else null
+            InstallOutcome.Error(failure.issue, guard?.diagnostics?.copy(deleted = deleted))
         }
         catch (_: Exception) { InstallOutcome.Error(UpdateIssue.INSTALL) }
     }
@@ -205,6 +208,45 @@ class AndroidUpdateBackend(context: Context) : UpdateBackend {
 internal fun pendingSessions(context: Context) = PendingUpdateSession(
     File(context.noBackupFilesDir, "trove-update-session.properties"), File(context.filesDir, "updates"),
 )
+
+/** Install-boundary re-verification failure. `diagnostics.deleted` is null here;
+ * the caller fills it in after cleanup. Null return means all sub-checks passed. */
+internal data class InstallGuardFailure(val issue: UpdateIssue, val diagnostics: InstallDiagnostics)
+
+/** Pure install guard, in order: ownership, then size, then SHA-256. A failed
+ * sub-check stops later file reads, so on ownership failure size and hash are
+ * NOT_CHECKED with no observed values, and on size failure hash is NOT_CHECKED. */
+internal fun verifyInstallGuard(
+    pending: PendingUpdateSession,
+    file: File,
+    release: LatestRelease,
+    checkActive: () -> Unit = {},
+): InstallGuardFailure? {
+    if (!pending.isOwnedPath(file.absolutePath)) {
+        return InstallGuardFailure(UpdateIssue.OWNERSHIP, InstallDiagnostics(
+            ownership = InstallCheck.FAIL, size = InstallCheck.NOT_CHECKED, sha256 = InstallCheck.NOT_CHECKED,
+            expectedSize = release.size, observedSize = null,
+            expectedSha256 = release.sha256, observedSha256 = null, deleted = null,
+        ))
+    }
+    val observedSize = file.length()
+    if (observedSize != release.size) {
+        return InstallGuardFailure(UpdateIssue.VERIFICATION, InstallDiagnostics(
+            ownership = InstallCheck.PASS, size = InstallCheck.FAIL, sha256 = InstallCheck.NOT_CHECKED,
+            expectedSize = release.size, observedSize = observedSize,
+            expectedSha256 = release.sha256, observedSha256 = null, deleted = null,
+        ))
+    }
+    val observedSha256 = sha256(file, checkActive)
+    if (observedSha256 != release.sha256) {
+        return InstallGuardFailure(UpdateIssue.VERIFICATION, InstallDiagnostics(
+            ownership = InstallCheck.PASS, size = InstallCheck.PASS, sha256 = InstallCheck.FAIL,
+            expectedSize = release.size, observedSize = observedSize,
+            expectedSha256 = release.sha256, observedSha256 = observedSha256, deleted = null,
+        ))
+    }
+    return null
+}
 
 /** Single signers may rotate through a verified lineage; multiple signers require exact identity. */
 internal fun compatibleSignerSets(current: Set<String>, candidate: Set<String>, history: Set<String>, multiple: Boolean): Boolean =
