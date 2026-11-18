@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.21 — 2026-11-18
+
+- Search reset and go to top (PR 15): a Reset button in the search row clears the query, restores the sort to Newest and scrolls the list to the top; a go-to-top button appears once the list is scrolled down.
+- Fresh list on refresh (PR 15): pull-to-refresh and the refresh after adding now ask TorBox for a fresh list, so a just-added download appears instead of a cached one.
+- Downloading states (PR 15): torrents in metaDL, stalled and checking-resume-data now show as Downloading with progress instead of "Unknown".
+- Library wiring finished (PR 15): the clutter-file toggle now filters the details sheet, and prefer-words ranking (x265/REMUX) now applies to sorting.
+- Baseline: 411 JVM tests, lint 0 errors.
+
 ## 0.1.20 — 2026-11-18
 
 - Updater install-guard fix (PR 13): the ownership check now compares canonical paths, so in-app updates no longer fail at install; the error screen names the check that failed, with copyable diagnostics.
