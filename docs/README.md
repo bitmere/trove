@@ -1,7 +1,7 @@
 # Documentation index
 
 Start with the root [README](../README.md), [house rules](../AGENTS.md),
-[testing guide](../TESTING.md), and [changelog](../CHANGELOG.md).
+[testing guide](TESTING.md), and [changelog](../CHANGELOG.md).
 Commands in documentation assume the repository root unless stated otherwise.
 
 ## Guides and architecture

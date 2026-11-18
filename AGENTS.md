@@ -1,53 +1,49 @@
 # Trove workflow
 
-- This is an independent repository. Do not edit or depend on sibling
-  checkouts (matrix-launcher, personal-home-tv) to implement
-  features here.
-- Trove is a phone app, not a TV launcher. The 2026 modern Material 3 UI
-  has one primary destination (Downloads), Torrents/Web/Usenet as top subtabs, search
-  field at the top of the list, floating liquid-glass action cluster
-  (Add + Search) bottom-right, Settings behind the avatar. No bottom
-  navigation — Settings is not a primary destination and Add is an
-  action, not navigation.
-- core is Android-free and reusable: provider abstraction, HTTP
-  transport, rate limiting, share classification, models. app contains
-  Android adapters, Compose feature screens, and Keystore credential
-  storage. Keep I/O out of composition and off the main thread; no DI
-  framework for simple wiring; no Classic Views, RecyclerView, or
-  AndroidView wrappers.
-- Release signing is secrets-only in GitHub Actions; local release builds
-  cannot sign. The Settings updater checks GitHub Releases manually.
-- Version comes from version.properties. Increase versionCode for every
-  newly installed artifact. The store title is "Trove – Debrid Library",
-  package app.trove.debrid — never rename either.
-- Collect edits before building. Focused tests first, then the full
-  suite; lint once before a PR. Do not edit app/core sources during
-  builds. A passing JVM suite is not proof of on-device behaviour
-  (player chooser, share target, encrypted storage) — verify on a phone.
-- Play resolves a per-file TorBox `requestdl` direct link for the selected
-  download kind and real file ID, then hands it to the Android `ACTION_VIEW`
-  player chooser with a concrete video MIME derived from the filename.
-  This per-file bearer link goes only to the player the user picks, never
-  to logs, share targets or error messages. The streaming API
-  (`createstream`/`getstreamdata`) is plan-restricted on Essential and is not used.
-  Reconciliation (2026-11-16): staged docs said createstream-only;
-  shipped code uses requestdl. T2 corrects the docs to match the code.
-- The TorBox API key is entered by the user in the app on their phone
-  and stored encrypted on-device. It is never in code, logs, backups, or
-  this repo. Credentials, SDK paths, signing material, and account dumps
-  stay in ignored artifacts.
-- Design v6 (`docs/mockup-v6.html`) is historical only, superseded by the
-  2026 modern UI shipped in 0.1.5. Design: decide tokens first; refuse
-  purple gradients, glassmorphism
-  (except the floating action cluster, which the user explicitly asked
-  for), bento grids, Inter-only type, and eyebrow labels by default.
-  See docs/SKILLS.md for the design skill.
-- Keep the footprint small on low-memory phones: bounded snapshot blur
-  only (API 31+ and non-low-RAM, scrim fallback), no new blur library,
-  no new dependency without a reason. Serve old and new phones.
-- Spec-driven development: user-facing changes travel with an OpenSpec
-  change under openspec/changes/<change>/ (proposal.md, tasks.md,
-  specs/). Tiny test-only cleanups go diff-review only.
-- Never merge, release, push, or open a PR without the user's explicit
-  approval for that exact action. Show the planned changes/diff for
-  review before compiling; fix anything different first, then compile.
+- Trove 0.1.21 is published in the public bitmere/trove GitHub repository
+  with no mirrors. The updater reads GitHub Releases through the GitHub API.
+  GitHub Actions signs releases with the bitmere keys held in Actions secrets.
+  The in-app updater was verified on a device for 0.1.21 after the install
+  guard was fixed.
+- Repo rulesets block direct pushes to main. Every change, including version
+  bumps, goes through a PR with green CI and a squash merge. Never merge,
+  release, push, or open a PR without explicit user approval for that exact
+  action. Show the planned diff for review before compiling and address the
+  review before starting the build.
+- The application ID is `app.trove.debrid` and the store title is
+  “Trove – Debrid Library”. Keep both stable. Read the version from
+  `version.properties` and increase versionCode for every newly installed
+  artifact.
+- Trove supports TorBox, Real-Debrid, AllDebrid, Premiumize, Offcloud, and
+  Debrid-Link. Settings has six groups: Providers, Library, Playback,
+  Appearance, Updates, and Backup.
+- Trove is a Material 3 phone app with one primary destination, Downloads.
+  Keep the Torrents, Web, and Usenet subtabs, search at the top of the list,
+  the floating Add and Search controls at bottom right, and Settings behind
+  the avatar. Keep the UI free of bottom navigation.
+- TorBox playback resolves a per-file `requestdl` link for the selected
+  download kind and actual file ID, then hands it to the Android
+  `ACTION_VIEW` player chooser with a video MIME type derived from the
+  filename. The bearer link goes only to the selected player. Keep it out
+  of logs, share targets, and error messages. The plan-restricted
+  `createstream` API is unused.
+- Keep `core` Android-free and reusable. Keep Android adapters, Compose
+  screens, and Keystore credential storage in `app`. Keep I/O out of
+  composition and off the main thread. Use simple wiring and Compose
+  throughout, without a DI framework, classic Views, RecyclerView, or
+  AndroidView wrappers. Keep the repository independent of sibling checkouts.
+- Users enter provider credentials on-device. Keep them encrypted and out of
+  code, logs, and backups. Keep SDK paths, signing material, and account dumps
+  in ignored artifacts.
+- Decide design tokens first. Design tokens are in `docs/SKILLS.md`. Avoid
+  purple gradients, glassmorphism outside the floating action cluster, bento
+  grids, Inter-only type, and eyebrow labels. Preserve functionality and a
+  small footprint on older and low-memory phones. Use bounded snapshot blur
+  on API 31+ outside low-RAM devices, with a scrim fallback. Keep dependencies
+  small and justify additions.
+- Collect edits before building and keep sources stable during builds. Run
+  focused tests first, then the full suite, and run lint once before a PR.
+  Verify the chooser, share target, and encrypted storage on a phone.
+- Use OpenSpec for user-facing changes. Add a proposal, tasks, and specs
+  under `openspec/changes/<change>/`. Tiny test-only cleanups need diff review.
+  Take design inspiration from GPL-licensed sources, but write all code fresh.

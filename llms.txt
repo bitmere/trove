@@ -24,7 +24,7 @@ Design v6 (`docs/mockup-v6.html`) is a historical reference only.
 - [Distribution](docs/DISTRIBUTION.md): Release signing, Play internal
   app sharing, and the manual GitHub Releases updater.
 - [Skills](docs/SKILLS.md): The skills required to work on this repo.
-- [Testing Guide](TESTING.md): How to run tests, lint, and builds.
+- [Testing Guide](docs/TESTING.md): How to run tests, lint, and builds.
 - [Changelog](CHANGELOG.md): What shipped in each version.
 - [OpenSpec changes](openspec/changes/): Proposals, tasks, and
   specifications for user-facing changes.

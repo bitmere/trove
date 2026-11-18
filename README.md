@@ -233,6 +233,6 @@ export JDK_JAVA_OPTIONS="-Djava.net.preferIPv4Stack=true"
   distribution, design, and diagnostic history.
 - [Changelog](CHANGELOG.md) — what shipped in each version.
 - [House rules](AGENTS.md) — how to work in this repository.
-- [Testing guide](TESTING.md) — how to run the tests.
+- [Testing guide](docs/TESTING.md) — how to run the tests.
 - [OpenSpec changes](openspec/changes/) — proposals, tasks, and
   specifications for each change, kept with the code.
