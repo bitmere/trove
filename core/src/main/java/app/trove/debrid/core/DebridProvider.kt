@@ -13,6 +13,13 @@ interface DebridProvider {
     /** All downloads of every kind this provider holds, newest first. */
     suspend fun listDownloads(): Result<List<DebridDownload>>
 
+    /** Same list, but the provider is asked to bypass any server-side
+     *  list cache. Default is the cached [listDownloads]: only
+     *  providers whose list endpoint caches (TorBox) override this.
+     *  Callers use it only for user-initiated refreshes — a bypassed
+     *  load costs uncached calls against the provider's rate limit. */
+    suspend fun listDownloadsFresh(): Result<List<DebridDownload>> = listDownloads()
+
     /** One download's fresh state (for polling progress). */
     suspend fun getDownload(id: String): Result<DebridDownload>
 

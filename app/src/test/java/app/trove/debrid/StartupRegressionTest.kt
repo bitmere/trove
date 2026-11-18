@@ -124,7 +124,7 @@ class StartupRegressionTest {
     @Test fun `thrown list error stops loading and preserves rows on refresh`() = runTest {
         var fail = false
         val repo = object : TroveRepository by FakeRepository() {
-            override suspend fun listDownloads(provider: app.trove.debrid.core.DebridProvider) =
+            override suspend fun listDownloads(provider: app.trove.debrid.core.DebridProvider, bypassCache: Boolean) =
                 if (fail) throw IllegalStateException("transport failed")
                 else Result.success(listOf(sampleDownload()))
         }

@@ -111,7 +111,16 @@ interface TroveRepository {
         SavedConnection(torboxAccount(), hasTorboxKey(), provider())
     suspend fun validateAndSaveTorboxKey(key: String): Result<DebridAccount>
     fun signOutTorbox()
-    suspend fun listDownloads(provider: DebridProvider): Result<List<DebridDownload>>
+    /** All downloads of every kind this provider holds, newest first.
+     *  When [bypassCache] is true the provider is asked to bypass its
+     *  server-side list cache; only user-initiated refreshes pass true.
+     *  A single method, deliberately NOT a default-delegating pair:
+     *  Kotlin `by` delegation forwards un-overridden methods to the
+     *  delegate, so a default body calling a 1-arg overload would run
+     *  against the delegate and bypass a decorator's override — the
+     *  full-suite gate caught exactly that in StartupRegressionTest. */
+    suspend fun listDownloads(provider: DebridProvider, bypassCache: Boolean = false): Result<List<DebridDownload>>
+
     suspend fun delete(provider: DebridProvider, id: String): Result<Unit>
     suspend fun delete(provider: DebridProvider, download: DebridDownload): Result<Unit> = delete(provider, download.id)
 

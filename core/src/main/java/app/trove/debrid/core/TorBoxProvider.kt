@@ -142,10 +142,19 @@ class TorBoxProvider(
         )
     }.mapError()
 
-    override suspend fun listDownloads(): Result<List<DebridDownload>> = runCatching {
-        val torrents = listKind("/torrents/mylist", DownloadKind.TORRENT)
-        val web = listKind("/webdl/mylist", DownloadKind.WEB)
-        val usenet = runCatching { listKind("/usenet/mylist", DownloadKind.USENET) }
+    override suspend fun listDownloads(): Result<List<DebridDownload>> =
+        listDownloadsInternal(bypassCache = false)
+
+    /** A user-initiated refresh must see a just-added download: TorBox
+     *  caches mylist responses, so the fresh load passes
+     *  `bypass_cache=true` on all three lists. */
+    override suspend fun listDownloadsFresh(): Result<List<DebridDownload>> =
+        listDownloadsInternal(bypassCache = true)
+
+    private suspend fun listDownloadsInternal(bypassCache: Boolean): Result<List<DebridDownload>> = runCatching {
+        val torrents = listKind("/torrents/mylist", DownloadKind.TORRENT, bypassCache = bypassCache)
+        val web = listKind("/webdl/mylist", DownloadKind.WEB, bypassCache = bypassCache)
+        val usenet = runCatching { listKind("/usenet/mylist", DownloadKind.USENET, bypassCache = bypassCache) }
             .getOrElse {
                 if (it is CancellationException || it is DebridError.AuthInvalid) throw it
                 // Usenet is Pro-plan only; Essential accounts get an error
@@ -355,9 +364,10 @@ class TorBoxProvider(
         path: String,
         kind: DownloadKind,
         id: Long? = null,
+        bypassCache: Boolean = false,
     ): List<DebridDownload> {
         val query = mutableMapOf("limit" to "1000", "files" to "true")
-        if (id != null) query["bypass_cache"] = "true"
+        if (id != null || bypassCache) query["bypass_cache"] = "true"
         if (id != null) query["id"] = id.toString()
         val data = call("GET", path, query = query)["data"]
         val items = when (data) {
@@ -442,7 +452,14 @@ class TorBoxProvider(
         val status = when {
             finished -> DownloadStatus.READY
             state in setOf("cached", "completed", "seeding", "uploading") -> DownloadStatus.READY
-            state == "downloading" -> DownloadStatus.DOWNLOADING
+            // TorBox's states also include metaDL (downloading metadata —
+            // every magnet starts here), "stalled (no seeds)" and
+            // checking_resume_data. All three are still trying to
+            // download, so they show the progress row instead of
+            // UNKNOWN; "stalled" is prefix-matched because the server
+            // appends a reason in parentheses.
+            state == "downloading" || state == "metadl" || state == "checking_resume_data" ||
+                state.startsWith("stalled") -> DownloadStatus.DOWNLOADING
             state == "queued" -> DownloadStatus.QUEUED
             state == "paused" -> DownloadStatus.PAUSED
             state.contains("error") || state.contains("fail") -> DownloadStatus.ERROR

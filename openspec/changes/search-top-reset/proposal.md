@@ -46,24 +46,29 @@ of a long result list and no way to reset the search. Add both.
    changed: switching tabs is navigation, not search state.
 2. **"Go to top" scrolls only; it changes no state.** It acts on the
    currently visible tab's list only.
-3. **Placement (recommended):**
+3. **Placement (chosen by the user, 2026-11-18):**
    - Reset: a "Reset" text button in the search row, between the search
      field and the sort icon, visible only while search is dirty
      (`query.isNotBlank() || sort != NEWEST`). It sits next to the two
      things it resets, and it is visible exactly when there is something
      to reset. Cost: the sort icon shifts horizontally when the button
      appears/disappears.
+   - The sort-menu alternative was considered and not chosen.
    - Go to top: a small circular button (48 dp, same tonal treatment as
      the Search button in the cluster) that fades in above the floating
      action cluster when the visible list is scrolled down
      (`firstVisibleItemIndex >= 10`), and fades out at the top. Icon
-     `Icons.Filled.VerticalAlignTop`, label "Go to top". Placed in
+     `Icons.Filled.KeyboardArrowUp`, label "Go to top". (`VerticalAlignTop`
+     was the first choice, but it lives in the extended icons artifact
+     and the app depends only on `material-icons-core`, so the core
+     chevron-up icon is used instead — no new dependency.) Placed in
      `DownloadsScreen`, above the cluster — `FloatingActions` itself is
      untouched.
    - Alternative for reset, if the user prefers zero layout change: a
      "Reset search" item at the bottom of the sort dropdown menu. Same
      behaviour, less discoverable. The user picks one; the code change is
-     the same `resetSearch()` underneath.
+     the same `resetSearch()` underneath. **Not chosen** — the user picked
+     the search-row button on 2026-11-18.
 4. **No new dependency, no new state holder.** One `derivedStateOf` for
    the go-to-top visibility, one conditional button, and
    `LazyListState.animateScrollToItem(0)` on the existing per-tab list
@@ -74,11 +79,17 @@ of a long result list and no way to reset the search. Add both.
 
 - `app/src/main/java/app/trove/debrid/ui/downloads/DownloadsViewModel.kt`
   — add `resetSearch()`: `setQuery("")` + `setSort(DownloadSort.NEWEST)`
-  (reuses the existing persisting sort path).
+  (reuses the existing persisting sort path). Also carries the two
+  deferred wirings folded into this change: `preferWords` and
+  `showClutterFiles` in `DownloadsUiState`, loaded from the repository
+  in `init` and on every `refresh()`, with `visibleDownloads` passing
+  the prefer words into `sortDownloads`.
 - `app/src/main/java/app/trove/debrid/ui/downloads/DownloadsScreen.kt`
   — Reset button in the search row (dirty-only); go-to-top button above
   the floating cluster (scrolled-down-only); `animateScrollToItem(0)`
-  calls via the existing `scope`.
+  calls via the existing `scope`; `visibleByTab` recomputes when
+  `preferWords` changes; the details sheet receives
+  `showClutterFiles` from state.
 - `app/src/main/res/values/strings.xml` — two new strings:
   `reset_search` ("Reset search"), `go_to_top` ("Go to top"). The
   existing `clear_search` is reused unchanged for the X icon.

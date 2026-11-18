@@ -67,7 +67,7 @@ class SeniorRewriteTest {
     @Test fun `sign out cannot be overwritten by a late refresh`() = runTest {
         val base = FakeRepository()
         val repo = object : TroveRepository by base {
-            override suspend fun listDownloads(provider: DebridProvider): Result<List<DebridDownload>> {
+            override suspend fun listDownloads(provider: DebridProvider, bypassCache: Boolean): Result<List<DebridDownload>> {
                 withContext(NonCancellable) { delay(1000) }
                 return Result.success(listOf(sampleDownload()))
             }

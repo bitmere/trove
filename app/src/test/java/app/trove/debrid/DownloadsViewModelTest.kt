@@ -1,7 +1,9 @@
 package app.trove.debrid
 
 import app.trove.debrid.core.DownloadKind
+import app.trove.debrid.core.DownloadSort
 import app.trove.debrid.core.DownloadStatus
+import app.trove.debrid.data.defaultPreferWords
 import app.trove.debrid.ui.downloads.DownloadsViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CompletableDeferred
@@ -386,6 +388,66 @@ class DownloadsViewModelTest {
         assertNull(vm.state.value.error)
         vm.consumePlayUrl()
         assertNull(vm.state.value.playUrl)
+    }
+
+    @Test
+    fun `reset clears query, restores newest and persists it`() = runTest {
+        val repo = FakeRepository(
+            provider = FakeProvider(downloads = mutableListOf(sampleDownload(id = "1"))),
+        )
+        val vm = DownloadsViewModel(repo)
+        advanceUntilIdle()
+        vm.setSort(DownloadSort.OLDEST)
+        vm.setQuery("dune")
+        advanceUntilIdle()
+        assertEquals(DownloadSort.OLDEST, vm.state.value.sort)
+        assertEquals(DownloadSort.OLDEST, repo.savedSort)
+
+        vm.resetSearch()
+        advanceUntilIdle()
+        assertEquals("", vm.state.value.query)
+        assertEquals(DownloadSort.NEWEST, vm.state.value.sort)
+        assertEquals(DownloadSort.NEWEST, repo.savedSort)
+    }
+
+    @Test
+    fun `reset is a no-op when search is already clean`() = runTest {
+        val repo = FakeRepository()
+        val vm = DownloadsViewModel(repo)
+        advanceUntilIdle()
+        vm.resetSearch()
+        advanceUntilIdle()
+        assertEquals("", vm.state.value.query)
+        assertEquals(DownloadSort.NEWEST, vm.state.value.sort)
+        assertEquals(DownloadSort.NEWEST, repo.savedSort)
+    }
+
+    @Test
+    fun `prefer words rank matching downloads first`() = runTest {
+        val repo = FakeRepository(
+            provider = FakeProvider(downloads = mutableListOf(
+                sampleDownload(id = "1", name = "Dune Part Two 2024 1080p"),
+                sampleDownload(id = "2", name = "Dune Part Two 2024 x265"),
+            )),
+        )
+        val vm = DownloadsViewModel(repo)
+        advanceUntilIdle()
+        assertEquals(defaultPreferWords, vm.state.value.preferWords)
+        // Same date on both rows, so only the prefer word decides the order.
+        assertEquals(listOf("2", "1"), vm.visibleDownloads(vm.state.value).map { it.id })
+    }
+
+    @Test
+    fun `show clutter files loads into state and follows settings changes`() = runTest {
+        val repo = FakeRepository()
+        val vm = DownloadsViewModel(repo)
+        advanceUntilIdle()
+        assertFalse(vm.state.value.showClutterFiles)
+
+        repo.savedShowClutterFiles = true
+        vm.refresh()
+        advanceUntilIdle()
+        assertTrue(vm.state.value.showClutterFiles)
     }
 
     @Test

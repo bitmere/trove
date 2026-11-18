@@ -3,15 +3,20 @@ package app.trove.debrid.ui.downloads
 import app.trove.debrid.R
 import androidx.compose.ui.res.stringResource
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.spring
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -38,6 +43,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.ui.res.painterResource
 import androidx.compose.material.icons.filled.Check
 import app.trove.debrid.core.DownloadSort
@@ -56,6 +62,7 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -63,6 +70,7 @@ import androidx.compose.ui.graphics.rememberGraphicsLayer
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.unit.dp
 import app.trove.debrid.ui.theme.TroveSpace
+import app.trove.debrid.ui.theme.TroveElevation
 import app.trove.debrid.core.DebridDownload
 import app.trove.debrid.core.DownloadKind
 import app.trove.debrid.core.DownloadStatus
@@ -102,6 +110,10 @@ fun DownloadsScreen(
     }
     val selectedTab = DownloadKind.entries[pagerState.currentPage]
     val listState = listStates.getValue(selectedTab)
+    // Go to top appears only once the visible tab is scrolled down.
+    val showGoToTop by remember(listState) {
+        derivedStateOf { listState.firstVisibleItemIndex >= 10 }
+    }
     // The pager owns selection for both gestures and animated tab clicks.
     // Do not drive it back from state.tab: that would interrupt a swipe.
     LaunchedEffect(pagerState, viewModel) {
@@ -132,7 +144,7 @@ fun DownloadsScreen(
     val counts = remember(state.downloads) {
         state.downloads.groupBy { it.kind }.mapValues { it.value.size }
     }
-    val visibleByTab = remember(state.downloads, state.query, state.sort) {
+    val visibleByTab = remember(state.downloads, state.query, state.sort, state.preferWords) {
         DownloadKind.entries.associateWith { viewModel.visibleDownloads(state, it) }
     }
     val visible = visibleByTab.getValue(selectedTab)
@@ -268,6 +280,14 @@ fun DownloadsScreen(
                     colors = SearchBarDefaults.colors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
                     modifier = Modifier.weight(1f),
                 ) {}
+                if (state.query.isNotBlank() || state.sort != DownloadSort.NEWEST) {
+                    TextButton(onClick = {
+                        viewModel.resetSearch()
+                        scope.launch { listState.animateScrollToItem(0) }
+                    }) {
+                        Text(stringResource(R.string.reset_search))
+                    }
+                }
                 DownloadSortMenu(state.sort, viewModel::setSort)
             }
 
@@ -290,7 +310,7 @@ fun DownloadsScreen(
                     else -> {
                         PullToRefreshBox(
                             isRefreshing = state.refreshing,
-                            onRefresh = viewModel::refresh,
+                            onRefresh = { viewModel.refresh(fresh = true) },
                             modifier = Modifier.fillMaxSize(),
                         ) {
                             if (pageDownloads.isEmpty()) {
@@ -346,13 +366,45 @@ fun DownloadsScreen(
                 .padding(end = TroveSpace.page, bottom = TroveSpace.page),
         )
 
+        // Scrolls only; no state change. Directly above the floating cluster:
+        // page padding + cluster height (48 dp Search + 12 dp gap + 56 dp Add).
+        AnimatedVisibility(
+            visible = showGoToTop,
+            enter = fadeIn(),
+            exit = fadeOut(),
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(end = TroveSpace.page, bottom = TroveSpace.page + 48.dp + TroveSpace.compact + 56.dp),
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(48.dp)
+                    .shadow(TroveElevation.floating, CircleShape, ambientColor = MaterialTheme.colorScheme.scrim.copy(alpha = 0.14f))
+                    .clip(CircleShape)
+                    .border(1.dp, MaterialTheme.colorScheme.outlineVariant, CircleShape)
+                    .background(MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.92f), CircleShape),
+                contentAlignment = Alignment.Center,
+            ) {
+                IconButton(
+                    onClick = { scope.launch { listState.animateScrollToItem(0) } },
+                    modifier = Modifier.size(48.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.KeyboardArrowUp,
+                        contentDescription = stringResource(R.string.go_to_top),
+                        tint = MaterialTheme.colorScheme.onSurface,
+                    )
+                }
+            }
+        }
+
     }
     }
 
     state.filePicker?.let { download ->
         DownloadDetailsSheet(
             download = download, state = state, sheetState = detailsSheetState,
-            dismissing = dismissingForPlayback,
+            dismissing = dismissingForPlayback, showClutterFiles = state.showClutterFiles,
             onClose = {
                 if (state.resolvingDownload != null && download.files.isEmpty()) {
                     viewModel.dismissFilePicker()

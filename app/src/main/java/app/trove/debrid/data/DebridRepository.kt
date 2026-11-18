@@ -534,9 +534,10 @@ class DebridRepository(
         }
     }
 
-    override suspend fun listDownloads(provider: DebridProvider): Result<List<DebridDownload>> =
+    override suspend fun listDownloads(provider: DebridProvider, bypassCache: Boolean): Result<List<DebridDownload>> =
         withContext(ioDispatcher) {
-            provider.listDownloads().map { downloads ->
+            val result = if (bypassCache) provider.listDownloadsFresh() else provider.listDownloads()
+            result.map { downloads ->
                 filterExcluded(downloads, readReleaseWords(KEY_EXCLUDE_WORDS, defaultExcludeWords))
             }
         }

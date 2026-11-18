@@ -402,6 +402,46 @@ class TorBoxProviderTest {
     }
 
     @Test
+    fun `metaDL stalled and checking_resume_data map to downloading with progress`() {
+        val states = listOf("metaDL", "stalled (no seeds)", "checking_resume_data")
+        val (p, _) = provider { request ->
+            val rows = states.mapIndexed { i, state ->
+                """{"id":$i,"download_state":"$state","progress":0.37,"eta":900,"seeds":3,"peers":5,"download_speed":8000}"""
+            }.joinToString(",", "[", "]")
+            HttpResponse(200, envelope(if (request.url.contains("/torrents/")) rows else "[]"))
+        }
+        val list = kotlinx.coroutines.runBlocking { p.listDownloads() }.getOrThrow()
+        assertEquals(3, list.size)
+        for (row in list) {
+            assertEquals(DownloadStatus.DOWNLOADING, row.status)
+            assertEquals(0.37f, row.progress, 0.001f)
+            assertEquals(900L, row.etaSeconds)
+            assertEquals(3, row.seeds)
+            assertEquals(5, row.peers)
+            assertEquals(8_000L, row.downloadSpeedBytesPerSec)
+        }
+    }
+
+    @Test
+    fun `fresh list load bypasses the cache on all three lists and normal load does not`() {
+        val (freshProvider, freshTransport) = provider {
+            HttpResponse(200, envelope("[]"))
+        }
+        kotlinx.coroutines.runBlocking { freshProvider.listDownloadsFresh() }.getOrThrow()
+        val freshLists = freshTransport.requests.filter { it.url.contains("/mylist") }
+        assertEquals(3, freshLists.size)
+        assertTrue(freshLists.all { it.url.contains("bypass_cache=true") })
+
+        val (cachedProvider, cachedTransport) = provider {
+            HttpResponse(200, envelope("[]"))
+        }
+        kotlinx.coroutines.runBlocking { cachedProvider.listDownloads() }.getOrThrow()
+        val cachedLists = cachedTransport.requests.filter { it.url.contains("/mylist") }
+        assertEquals(3, cachedLists.size)
+        assertTrue(cachedLists.none { it.url.contains("bypass_cache") })
+    }
+
+    @Test
     fun `missing null zero and negative stats remain unavailable`() {
         for (fields in listOf("", ",\"eta\":null,\"download_speed\":null", ",\"eta\":0,\"download_speed\":0", ",\"eta\":-1,\"download_speed\":-1,\"seeds\":-1,\"peers\":-1")) {
             val (p, _) = provider { request ->
