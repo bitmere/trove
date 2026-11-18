@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.19 — 2026-11-18
+
+- Multi-provider support (PR 11): Real-Debrid, AllDebrid, Premiumize, Offcloud and Debrid-Link join TorBox behind one library — per-provider sign-in with instant switching, and multi-service Add with a cross-service cache check.
+- Library features: clean titles with episode + quality, clutter-file hiding with a toggle, multi-select batch delete, release preferences (exclude CAM/TS, prefer x265/REMUX), clipboard magnet offer on open, launcher shortcut, password-encrypted backup & restore, and themes including pure-black OLED.
+- Polish fixes: Stable/Beta channel alignment in Settings, player-picker retry, TalkBack announcements, and small layout fixes.
+- README rewrite: install, TorBox setup, library use, playback and updating, all checked against the shipped code.
+- Baseline: 396 JVM tests, lint 0 errors.
+
 ## 0.1.18 — 2026-11-18
 
 - Trove moved to the bitmere GitHub account. Signed APKs are published through [GitHub Releases](https://github.com/bitmere/trove/releases).
