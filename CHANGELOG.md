@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.20 — 2026-11-18
+
+- Updater install-guard fix (PR 13): the ownership check now compares canonical paths, so in-app updates no longer fail at install; the error screen names the check that failed, with copyable diagnostics.
+- Settings reorganized into six groups (PR 13): Providers, Library, Playback, Appearance, Updates and Backup, each opening its own page.
+- Web links recognized (PR 13): TorBox hoster-list parsing fixed — Rapidgator, 1Fichier and other hoster links now detect as web downloads instead of "hoster isn't supported".
+- Baseline: 405 JVM tests, lint 0 errors.
+
 ## 0.1.19 — 2026-11-18
 
 - Multi-provider support (PR 11): Real-Debrid, AllDebrid, Premiumize, Offcloud and Debrid-Link join TorBox behind one library — per-provider sign-in with instant switching, and multi-service Add with a cross-service cache check.
