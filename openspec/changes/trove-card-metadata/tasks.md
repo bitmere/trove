@@ -1,0 +1,7 @@
+- [x] Investigate card, provider/model, TorBox schema and metadata sources.
+- [x] Record keyless resolution decision and visual tokens before feature code.
+- [x] Implement local release parsing and conservative cached Cinemeta resolution.
+- [x] Hydrate list without delaying display; render poster/title/year/type.
+- [x] Add synthetic parser, fake-HTTP/cache and Compose header tests.
+- [x] Present source change review before compilation (Git metadata absent).
+- [ ] Focused tests, full JVM suite, lint; phone checks after source review.

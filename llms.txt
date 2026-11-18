@@ -1,0 +1,56 @@
+# Trove
+
+> Multi-provider debrid library for Android. One Downloads UI over
+> TorBox, Real-Debrid, AllDebrid, Premiumize, Offcloud and Debrid-Link —
+> in that build order. v1 ships TorBox only, as the reference provider.
+> 2026 modern Material 3 UI, Downloads as the primary destination,
+> Settings behind the avatar, no bottom nav, floating liquid-glass action cluster
+> (Add + Search), share-from-any-browser with auto-detect.
+
+Version 0.1.18 / code 18.
+Design v6 (`docs/mockup-v6.html`) is a historical reference only.
+
+## AI Handover & Architecture Map
+- [Documentation Index](docs/README.md): Guides, provider notes,
+  distribution, and the skills this repo uses.
+- [Detailed AI Reference](docs/llms-full.txt): Preserved technical
+  reference; check version-specific claims against current sources.
+- [House Rules](AGENTS.md): Workflow, design, and safety rules. They
+  take precedence over conflicting historical guidance.
+- [Architecture](docs/ARCHITECTURE.md): Modules, provider abstraction,
+  screens, and data flow.
+- [Providers](docs/PROVIDERS.md): Multi-provider plan, per-provider
+  capabilities, and the DMM research basis.
+- [Distribution](docs/DISTRIBUTION.md): Release signing, Play internal
+  app sharing, and the manual GitHub Releases updater.
+- [Skills](docs/SKILLS.md): The skills required to work on this repo.
+- [Testing Guide](TESTING.md): How to run tests, lint, and builds.
+- [Changelog](CHANGELOG.md): What shipped in each version.
+- [OpenSpec changes](openspec/changes/): Proposals, tasks, and
+  specifications for user-facing changes.
+- [App Module](app/src/main/java/app/trove/debrid): Compose UI,
+  ViewModels, repository, and Keystore credential storage.
+- [Core Module](core/src/main/java/app/trove/debrid/core): Android-free
+  pure Kotlin — providers, transport, rate limiting, share classifier.
+
+## Key Subsystems & Source Files
+- [Downloads Screen](app/src/main/java/app/trove/debrid/ui/downloads/DownloadsScreen.kt): The one primary destination. Torrents/Web/Usenet top subtabs, search field, download cards, pull-to-refresh, floating glass action cluster.
+- [Downloads ViewModel](app/src/main/java/app/trove/debrid/ui/downloads/DownloadsViewModel.kt): List state, refresh (keeps rows composed, no full-screen flash), account label, Play handling.
+- [Add Sheet](app/src/main/java/app/trove/debrid/ui/add/AddSheet.kt): Add magnet / torrent / link with live cache check.
+- [Settings](app/src/main/java/app/trove/debrid/ui/settings/SettingsScreen.kt): TorBox API key entry (masked), Test & Save, sign-out. Key stored encrypted on-device.
+- [Glass & Backdrop](app/src/main/java/app/trove/debrid/ui/Glass.kt): Floating glass action cluster. [BackdropCapture](app/src/main/java/app/trove/debrid/ui/BackdropCapture.kt): bounded snapshot blur (API 31+, non-low-RAM, scrim fallback).
+- [Repository](app/src/main/java/app/trove/debrid/data/DebridRepository.kt): Validates and saves the TorBox key, exposes the account, main-safe.
+- [TorBox Provider](core/src/main/java/app/trove/debrid/core/TorBoxProvider.kt): mylist, synchronous torrent creation, async web/Usenet creates, checkcached, hosters, per-file requestdl, user/me, delete. Token-bucket rate limits. Play uses the selected kind and real file ID; its bearer link goes only to the chosen ACTION_VIEW player with a concrete video MIME derived from the filename, never logs, share targets or error messages. createstream/getstreamdata are plan-restricted on Essential and unused.
+- [HTTP Transport](core/src/main/java/app/trove/debrid/core/OkHttpTransport.kt): Blocking OkHttp calls moved onto an IO dispatcher, cancellable.
+- [Share Classifier](core/src/main/java/app/trove/debrid/core/ShareClassifier.kt): Magnet to torrent, .torrent to torrent, .nzb to Usenet, other links to web download checked against supported hosters.
+- [Main Activity](app/src/main/java/app/trove/debrid/MainActivity.kt): NavHost (downloads/settings), predictive back, share target.
+
+## Development & Build Commands
+- Run unit tests: `./gradlew testDebugUnitTest :core:test` (JDK 17, Android SDK platform 36; set JAVA_HOME, ANDROID_HOME, and JDK_JAVA_OPTIONS=-Djava.net.preferIPv4Stack=true)
+- Lint (once before a PR): `./gradlew lint`
+- Debug APK: `./gradlew assembleDebug`
+- Release APK: secrets-only GitHub Actions signing; local release builds cannot sign.
+- Local debug install: `adb install -r app/build/outputs/apk/debug/app-debug.apk`
+- Updates: Stable by default, Beta includes prereleases. Check manually in Settings.
+  Signed APKs: https://github.com/bitmere/trove/releases. The bitmere key requires
+  a clean install from older signatures. See Distribution.

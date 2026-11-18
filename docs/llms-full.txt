@@ -1,0 +1,86 @@
+# Trove — detailed AI reference
+
+## Identity
+
+Trove — Debrid Library. Multi-provider debrid Android app, TorBox
+first. Package `app.trove.debrid`, store title "Trove – Debrid
+Library". Version 0.1.18, versionCode 18 (2026-11-18). Repository bitmere/trove, main branch. CI on push to main + PRs
+(`testDebugUnitTest`, `:core:test`, lint, assembleDebug).
+
+## Stack
+
+Gradle 8.13, AGP 8.13.2, Kotlin 2.2.20, compileSdk 36, minSdk 26,
+targetSdk 34. Compose BOM 2026.03.00 (UI 1.10.5), navigation-compose
+2.9.8. OkHttp + Gson in :core. EncryptedSharedPreferences
+(security-crypto 1.1.0-alpha07, deprecated upstream) for the TorBox
+key. No DI framework, no Classic Views, no analytics/ads/trackers.
+Manifest requests only INTERNET and ACCESS_NETWORK_STATE. Only network
+destination is https://api.torbox.app/v1/api.
+
+## Module map
+
+- :core (Android-free): `DebridProvider` (interface), `TorBoxProvider`
+  (mylist x3 kinds, synchronous torrent creation, async web/Usenet creates,
+  checkcached, hosters, per-file requestdl, user/me, delete; token-bucket ~5 req/s +
+  50/25-per-hour create budgets; 401 to AuthInvalid, 429 to
+  RateLimited), `OkHttpTransport` (IO dispatcher, cancellable),
+  `RateLimiter`, `ShareClassifier` (magnet to torrent, .torrent to
+  torrent, .nzb to Usenet, other link to web), `Models`, `DebridError`.
+- :app: `MainActivity` (NavHost downloads/settings, share target),
+  `AppContainer` (hand wiring), `DebridRepository` (validate + save
+  key, main-safe, Result boundary), `KeystoreCredentialStore`,
+  Downloads screen + ViewModel, Add sheet + ViewModel, Settings
+  screen + ViewModel, `Glass` (floating action cluster), `BackdropCapture`
+  (bounded snapshot blur), `Theme`.
+
+## Design (current)
+
+2026 modern Material 3 UI (shipped in 0.1.5). One primary destination (Downloads). No bottom nav.
+mockup-v6.html is a historical design reference only, superseded 2026-11-15.
+Torrents/Web/Usenet as top subtabs. Search field at top of list.
+Floating liquid-glass action cluster (Add + Search) bottom-right.
+Settings behind the avatar. Play via ACTION_VIEW chooser with a concrete video MIME derived from the filename.
+Play resolves a per-file TorBox requestdl link for the selected kind and real
+file ID. This bearer link goes only to the chosen player, never logs, share
+targets or error messages. createstream/getstreamdata are plan-restricted on
+Essential and unused.
+Share target auto-detects the link kind.
+
+## History
+
+- 0.1.0 (2026-11-15): first build. 37 tests, lint 0 errors. Release
+  Historical debug-signed build; current signing is Actions-only.
+- 0.1.1 (2026-11-15): fixed Test & Save crash (main-thread network +
+  broken Result boundary), Settings back navigation (NavHost,
+  predictive back, no unconditional refresh), true backdrop blur
+  (bounded snapshot, API 31+/non-low-RAM, scrim fallback). 50 tests,
+  lint 0 errors (historical baseline).
+- History note (2026-11-16): the 0.1.1 Play, card alignment and stale
+  backdrop issues were fixed in 0.1.2/0.1.3. The later blank-screen saga
+  was resolved in 0.1.13, confirmed on device on 2026-11-16.
+- 0.1.14 baseline: 107 JVM tests, lint 0 errors. T1 changed CI and
+  signing without a version bump. Signing is secrets-only in GitHub
+  Actions; local release builds cannot sign. The manual updater uses
+  https://github.com/bitmere/trove/releases with Stable as the default and
+  Beta as an opt-in. The signing key change requires a clean install from
+  older signatures and clears local settings and the saved API key.
+
+## Rules that have bitten before
+
+- Compose UI 1.10.5: `GraphicsLayer` is in
+  `androidx.compose.ui.graphics.layer`, `drawLayer` likewise;
+  `rememberGraphicsLayer` is in `androidx.compose.ui.graphics`;
+  `positionInRoot()` was removed, use `localToRoot(Offset.Zero)`;
+  `drawContent()` lives on `ContentDrawScope`, not `DrawScope` — inside
+  `layer.record { }` use the labelled receiver
+  `this@drawWithContent.drawContent()`.
+- `kotlinx.coroutines.Job` has `invokeOnCompletion`, not
+  `invokeOnCancellation`. Coroutine thread names get " @coroutine#N"
+  appended.
+- Haze 2.1.0 is incompatible (needs minCompileSdk 37; Trove is 36).
+- The repo's gradle.properties must never contain the VM proxy lines;
+  the proxy lives only in ~/.gradle/gradle.properties. CI fails on
+  `hatch-egress-proxy` if the lines leak in.
+- Preserve the Gradle wrapper executable bit. For T2 leave an uncommitted
+  diff; no branch, commit, push, tag, release or version change.
+- Working docs (fix plans, briefs) stay local and are never pushed.

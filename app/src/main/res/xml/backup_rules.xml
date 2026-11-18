@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<full-backup-content>
+    <!-- Encrypted credentials must never be backed up (and are useless
+         without the device Keystore key anyway). -->
+    <exclude domain="sharedpref" path="trove_credentials.xml" />
+</full-backup-content>

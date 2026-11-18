@@ -1,0 +1,240 @@
+# Manual, separately approved releases only. Signing material exists only in Actions secrets.
+# TROVE_RELEASE_CERT_SHA256 is the full public certificate fingerprint approved from rotation evidence.
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing approved version tag, e.g. v0.1.15'
+        required: true
+        type: string
+      prerelease:
+        description: 'Publish as an explicit beta/prerelease'
+        required: true
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: trove-release-publication
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    outputs:
+      source_sha: ${{ steps.source.outputs.source_sha }}
+    env:
+      RELEASE_TAG: ${{ inputs.tag }}
+      TROVE_PRERELEASE: ${{ inputs.prerelease }}
+      TROVE_RELEASE_CERT_SHA256: ${{ vars.TROVE_RELEASE_CERT_SHA256 }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Set release work directory
+        run: echo "RELEASE_WORK=$RUNNER_TEMP/trove-release" >> "$GITHUB_ENV"
+      - name: Require main-controlled workflow
+        env:
+          DISPATCH_REF: ${{ github.ref }}
+        run: test "$DISPATCH_REF" = refs/heads/main
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate approved tag and main ancestry
+        id: source
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          git show-ref --verify "refs/tags/$RELEASE_TAG"
+          git -c credential.helper='!gh auth git-credential' fetch origin main
+          SOURCE_SHA=$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          git merge-base --is-ancestor "$SOURCE_SHA" origin/main
+          mkdir -p "$RELEASE_WORK"
+          cp tools/release_gate.py "$RELEASE_WORK/release_gate.py"
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tools -p 'test_release_gate.py'
+          git checkout --detach "$SOURCE_SHA"
+          echo "SOURCE_SHA=$SOURCE_SHA" >> "$GITHUB_ENV"
+          echo "source_sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
+      - name: Validate version, channel and reviewed notes
+        run: python3 "$RELEASE_WORK/release_gate.py" prepare
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+      - name: Install release Android SDK
+        run: sdkmanager 'platforms;android-36' 'build-tools;36.0.0'
+      - uses: gradle/actions/setup-gradle@v3
+        with:
+          cache-read-only: true
+      - name: Verify toolchain
+        run: |
+          test -x ./gradlew
+          java -version
+          test -d "$ANDROID_HOME/platforms/android-36"
+          test -d "$ANDROID_HOME/build-tools"
+          find "$ANDROID_HOME/build-tools" -mindepth 2 -maxdepth 2 -name apksigner -executable -print -quit | grep -q .
+          find "$ANDROID_HOME/build-tools" -mindepth 2 -maxdepth 2 -name aapt -executable -print -quit | grep -q .
+      - name: Clean keyless tests, lint and debug build
+        run: |
+          ./gradlew --no-daemon clean :app:testDebugUnitTest :core:test :app:lint :app:lintRelease :app:assembleDebug
+      - name: Upload validation reports on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trove-release-validation-reports
+          path: |
+            app/build/reports/tests/
+            app/build/test-results/
+            core/build/reports/tests/
+            core/build/test-results/
+            app/build/reports/lint-results*
+          if-no-files-found: warn
+          retention-days: 7
+
+  release:
+    needs: [validate]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ inputs.tag }}
+      TROVE_PRERELEASE: ${{ inputs.prerelease }}
+      TROVE_RELEASE_CERT_SHA256: ${{ vars.TROVE_RELEASE_CERT_SHA256 }}
+      VALIDATED_SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Set release work directory
+        run: echo "RELEASE_WORK=$RUNNER_TEMP/trove-release" >> "$GITHUB_ENV"
+      - name: Require main-controlled workflow
+        env:
+          DISPATCH_REF: ${{ github.ref }}
+        run: test "$DISPATCH_REF" = refs/heads/main
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate approved tag and main ancestry
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          git show-ref --verify "refs/tags/$RELEASE_TAG"
+          git -c credential.helper='!gh auth git-credential' fetch origin main
+          SOURCE_SHA=$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          git merge-base --is-ancestor "$SOURCE_SHA" origin/main
+          test "$SOURCE_SHA" = "$VALIDATED_SOURCE_SHA"
+          mkdir -p "$RELEASE_WORK"
+          cp tools/release_gate.py "$RELEASE_WORK/release_gate.py"
+          git checkout --detach "$SOURCE_SHA"
+          echo "SOURCE_SHA=$SOURCE_SHA" >> "$GITHUB_ENV"
+      - name: Validate version, channel and reviewed notes
+        run: python3 "$RELEASE_WORK/release_gate.py" prepare
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+      - name: Install release Android SDK
+        run: sdkmanager 'platforms;android-36' 'build-tools;36.0.0'
+      - uses: gradle/actions/setup-gradle@v3
+        with:
+          cache-disabled: true
+      - name: Check signing configuration
+        env:
+          KEYSTORE: ${{ secrets.TROVE_KEYSTORE_BASE64 }}
+          PROPS: ${{ secrets.TROVE_KEYSTORE_PROPERTIES }}
+        run: |
+          python3 - <<'PYTHON'
+          import os, runpy
+          gate = runpy.run_path(os.environ['RELEASE_WORK'] + '/release_gate.py')
+          for name, value in [('TROVE_KEYSTORE_BASE64', 'KEYSTORE'),
+                              ('TROVE_KEYSTORE_PROPERTIES', 'PROPS')]:
+              gate['require'](bool(os.environ.get(value, '').strip()),
+                              name + ' is missing; configure it before the first release dispatch')
+          gate['cert_pin'](os.environ.get('TROVE_RELEASE_CERT_SHA256', ''))
+          PYTHON
+      - name: Recover existing immutable release APK before considering a build
+        id: recover
+        run: python3 "$RELEASE_WORK/release_gate.py" recover
+      - name: Restore ephemeral signing material
+        if: steps.recover.outputs.reuse != 'true'
+        env:
+          KEYSTORE: ${{ secrets.TROVE_KEYSTORE_BASE64 }}
+          PROPS: ${{ secrets.TROVE_KEYSTORE_PROPERTIES }}
+        run: |
+          umask 077
+          python3 - <<'PYTHON'
+          import base64, os, pathlib
+          work = pathlib.Path(os.environ['RELEASE_WORK'])
+          (work / 'release.jks').write_bytes(base64.b64decode(''.join(os.environ['KEYSTORE'].split()), validate=True))
+          # Preserve Java Properties syntax, including escaped keys and CRLF.
+          # Last duplicate wins. Two newlines terminate a trailing continuation.
+          props = os.environ['PROPS']
+          props += '\n\nstoreFile=' + str(work / 'release.jks') + '\n'
+          # Properties.load(InputStream) uses Latin-1; encode Unicode as Java escapes.
+          escaped = ''.join(c if ord(c) < 128 else ''.join(
+              '\\u%04x' % int.from_bytes(c.encode('utf-16-be')[i:i+2], 'big')
+              for i in range(0, len(c.encode('utf-16-be')), 2)) for c in props)
+          (work / 'keystore.properties').write_text(escaped, encoding='ascii')
+          PYTHON
+      - name: Build optimized signed release once
+        if: steps.recover.outputs.reuse != 'true'
+        run: |
+          ./gradlew --no-daemon --no-configuration-cache --no-build-cache :app:assembleRelease "-Ptrove.keystore.properties=$RELEASE_WORK/keystore.properties"
+          test -s app/build/outputs/mapping/release/mapping.txt
+          cp app/build/outputs/apk/release/app-release.apk "$RELEASE_WORK/$APK_NAME"
+      - name: Verify exact artifact, full signer and monotonic publication
+        run: python3 "$RELEASE_WORK/release_gate.py" verify
+      - name: Retain exact verified optimized bytes
+        uses: actions/upload-artifact@v4
+        with:
+          name: trove-release-apk
+          path: |
+            ${{ runner.temp }}/trove-release/Trove-v*.apk
+            ${{ runner.temp }}/trove-release/Trove-v*.apk.sha256
+          if-no-files-found: error
+          retention-days: 7
+      - name: Recheck remote approved tag and main before publication
+        run: |
+          set -euo pipefail
+          git -c credential.helper='!gh auth git-credential' fetch origin main
+          git -c credential.helper='!gh auth git-credential' fetch --force origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+          test "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" = "$SOURCE_SHA"
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          git merge-base --is-ancestor "$SOURCE_SHA" origin/main
+      - name: Publish or verify GitHub Release
+        run: python3 "$RELEASE_WORK/release_gate.py" publish
+      - name: Verify public GitHub Release assets and signer
+        env:
+          GH_TOKEN: ''
+          GITHUB_TOKEN: ''
+        run: python3 "$RELEASE_WORK/release_gate.py" anonymous
+      - name: Upload validation reports on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trove-release-packaging-reports
+          path: |
+            app/build/reports/tests/
+            app/build/test-results/
+            core/build/reports/tests/
+            core/build/test-results/
+            app/build/reports/lint-results*
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Remove temporary signing files
+        if: always()
+        run: rm -f "$RELEASE_WORK/release.jks" "$RELEASE_WORK/keystore.properties"
