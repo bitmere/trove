@@ -196,7 +196,7 @@ class UpdateViewModel(
                 is InstallOutcome.Error -> {
                     operation = null
                     val retry = pair.takeIf { outcome.issue in setOf(UpdateIssue.INSTALL, UpdateIssue.PREVIOUS_SESSION, UpdateIssue.SETTINGS) }
-                    mutable.value = UpdateUiState.Error(outcome.issue, retry)
+                    mutable.value = UpdateUiState.Error(outcome.issue, retry, outcome.diagnostics?.toString())
                 }
             }
         }

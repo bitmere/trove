@@ -78,6 +78,16 @@
     <string name="provider_signed_in">Signed in</string>
     <string name="provider_not_signed_in">Not signed in</string>
     <string name="providers_title">Providers</string>
+    <string name="settings_back">Back to settings</string>
+    <string name="settings_group_providers_summary">Sign in and choose your active provider</string>
+    <string name="settings_group_library">Library</string>
+    <string name="settings_group_library_summary">Clutter files, clipboard offers and release preferences</string>
+    <string name="settings_group_playback">Playback</string>
+    <string name="settings_group_playback_summary">Default video player</string>
+    <string name="settings_group_appearance">Appearance</string>
+    <string name="settings_group_appearance_summary">Theme mode and accent colour</string>
+    <string name="settings_group_updates_summary">Check for updates and choose a channel</string>
+    <string name="settings_group_backup_summary">Back up and restore settings</string>
     <string name="rd_checking_token">Checking token…</string>
     <string name="rd_token_failed">Token didn\'t work</string>
     <string name="rd_token_saved">Token saved on this device</string>
@@ -191,6 +201,7 @@
     <string name="update_error_truncated">The update download size did not match the server’s reported size. The download was deleted. Try again.</string>
     <string name="update_error_digest">The update did not match the published SHA-256 hash. The download was deleted. Try again.</string>
     <string name="update_error_hash">The update did not match the published hash or size. The download was deleted. Try again.</string>
+    <string name="update_error_ownership">Trove could not confirm this update file is its own download. Nothing was installed. Try again.</string>
     <string name="update_error_package">This APK does not match the expected Trove package and newer version. It cannot be installed as this update.</string>
     <string name="update_error_signer">This APK uses a different signing identity. An upgrade cannot proceed. See the clean-install instructions.</string>
     <string name="update_error_install">Android could not install the update. Try again to retry installation.</string>

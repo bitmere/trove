@@ -169,6 +169,22 @@ class UpdateViewModelTest {
         assertEquals(UpdateIssue.VERIFICATION, (vm.state.value as UpdateUiState.Error).issue)
         vm.install(); advanceUntilIdle(); assertEquals(0, backend.installs)
     }
+    @Test fun installOwnershipErrorSurfacesDiagnosticsAndNeverOffersInstall() = runTest(dispatcher) {
+        val diagnostics = InstallDiagnostics(
+            InstallCheck.FAIL, InstallCheck.NOT_CHECKED, InstallCheck.NOT_CHECKED,
+            3, null, "a".repeat(64), null, null,
+        )
+        val backend = Backend().apply { granted = true; outcome = InstallOutcome.Error(UpdateIssue.OWNERSHIP, diagnostics) }
+        val vm = model(backend)
+        vm.check(); advanceUntilIdle(); vm.download(); advanceUntilIdle(); vm.install(); advanceUntilIdle()
+        val error = vm.state.value as UpdateUiState.Error
+        assertEquals(UpdateIssue.OWNERSHIP, error.issue)
+        assertEquals(diagnostics.toString(), error.detail)
+        assertNull(error.retryInstall)
+        vm.install(); advanceUntilIdle()
+        assertEquals(1, backend.installs)
+    }
+
     @Test fun downloadIssuesExposeOnlyTypedDiagnosticsAndNeverOfferInstall() = runTest(dispatcher) {
         for (issue in listOf(UpdateIssue.EMPTY, UpdateIssue.TRUNCATED, UpdateIssue.DIGEST_MISMATCH)) {
             val diagnostics = UpdateDiagnostics(2, 3, "a".repeat(64), UpdateFraming.CONTENT_LENGTH, 200, 3)

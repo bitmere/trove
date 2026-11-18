@@ -42,4 +42,27 @@ class PendingUpdateSessionTest {
         record.writeText("x".repeat(4097)); assertNull(store().load())
         record.writeText("id=broken"); assertNull(store().load())
     }
+    @Test fun symlinkedFilesAncestorRoundTrip() {
+        // Android filesDir lives under /data/user/0, a symlink to /data/data.
+        val real = File(temporary.root, "real").apply { mkdirs() }
+        val alias = File(temporary.root, "alias")
+        java.nio.file.Files.createSymbolicLink(alias.toPath(), real.toPath())
+        val updatesDir = File(alias, "updates").apply { mkdirs() }
+        val session = PendingUpdateSession(File(temporary.root, "record"), updatesDir)
+        val file = File(updatesDir, "fixture.apk").apply { writeText("abc") }
+        assertNotEquals(file.absolutePath, file.canonicalPath)
+        assertTrue(session.isOwnedPath(file.absolutePath))
+        session.save(7, 21, file, "operation")
+        assertTrue(session.matches(7, 21, file.absolutePath, "operation"))
+        assertNotNull(PendingUpdateSession(File(temporary.root, "record"), updatesDir).load())
+    }
+    @Test fun rejectsLeafSymlinkPointingOutsideUpdates() {
+        val updatesDir = File(temporary.root, "updates").apply { mkdirs() }
+        val outside = File(temporary.root, "outside.apk").apply { writeText("abc") }
+        val link = File(updatesDir, "evil.apk")
+        java.nio.file.Files.createSymbolicLink(link.toPath(), outside.toPath())
+        val session = store()
+        assertFalse(session.isOwnedPath(link.absolutePath))
+        assertTrue(runCatching { session.save(7, 21, link, "operation") }.isFailure)
+    }
 }

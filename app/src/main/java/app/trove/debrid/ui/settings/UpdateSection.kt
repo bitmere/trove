@@ -206,6 +206,7 @@ private fun issueString(issue: UpdateIssue): Int = when (issue) {
     UpdateIssue.TRUNCATED -> R.string.update_error_truncated
     UpdateIssue.DIGEST_MISMATCH -> R.string.update_error_digest
     UpdateIssue.VERIFICATION -> R.string.update_error_hash
+    UpdateIssue.OWNERSHIP -> R.string.update_error_ownership
     UpdateIssue.PACKAGE -> R.string.update_error_package
     UpdateIssue.SIGNER -> R.string.update_error_signer
     UpdateIssue.INSTALL -> R.string.update_error_install
