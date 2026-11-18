@@ -12,6 +12,7 @@ import app.trove.debrid.core.sortDownloads
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import app.trove.debrid.data.TroveRepository
+import app.trove.debrid.data.defaultPreferWords
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -36,6 +37,10 @@ data class DownloadsUiState(
     val tab: DownloadKind = DownloadKind.TORRENT,
     val query: String = "",
     val sort: DownloadSort = DownloadSort.NEWEST,
+    /** Release words that rank matching downloads first; loaded from Settings. */
+    val preferWords: List<String> = defaultPreferWords,
+    /** When true the details sheet shows clutter files (.nfo, samples, covers). */
+    val showClutterFiles: Boolean = false,
     val error: String? = null,
     val loadError: String? = null,
     val authenticationRequired: Boolean = false,
@@ -72,14 +77,23 @@ class DownloadsViewModel(
     init {
         viewModelScope.launch {
             val savedSort = repository.loadDownloadSort()
+            val preferWords = repository.loadPreferWords()
+            val showClutterFiles = repository.loadShowClutterFiles()
             if (!sortChanged) _state.update { it.copy(sort = savedSort) }
+            _state.update { it.copy(preferWords = preferWords, showClutterFiles = showClutterFiles) }
         }
         refresh()
     }
 
-    fun refresh() = refresh(showIndicator = true)
+    fun refresh() = refresh(showIndicator = true, fresh = false)
 
-    fun refresh(showIndicator: Boolean) {
+    /** `fresh` bypasses the provider's server-side list cache and is
+     *  only for user-initiated refreshes (pull-to-refresh, after Add):
+     *  every fresh load costs uncached calls against the provider's
+     *  rate limit. It is required (no default) on this overload so the
+     *  no-arg entry above stays the only overload that adapts to
+     *  `() -> Unit` for `viewModel::refresh` references. */
+    fun refresh(showIndicator: Boolean = true, fresh: Boolean) {
         refreshJob?.cancel()
         val version = ++refreshVersion
         // Set feedback synchronously, then do all account/Keystore reads in
@@ -90,6 +104,12 @@ class DownloadsViewModel(
             try {
                 val connection = repository.loadConnection()
                 if (version != refreshVersion) return@launch
+                // Cheap prefs reads: keep prefer words and the clutter toggle
+                // current after the user changes them in Settings.
+                val preferWords = repository.loadPreferWords()
+                val showClutterFiles = repository.loadShowClutterFiles()
+                if (version != refreshVersion) return@launch
+                _state.update { it.copy(preferWords = preferWords, showClutterFiles = showClutterFiles) }
                 val provider = connection.provider
                 val accountLabel = connection.account?.label?.substringAfter('(')?.trimEnd(')')
                 if (libraryProvider !== provider) {
@@ -113,7 +133,7 @@ class DownloadsViewModel(
                     }
                     return@launch
                 }
-                val list = repository.listDownloads(provider).getOrThrow()
+                val list = repository.listDownloads(provider, bypassCache = fresh).getOrThrow()
                 if (version != refreshVersion) return@launch
                 libraryProvider = provider
                 val currentNames = list.associate { (it.kind to it.id) to it.name }
@@ -158,7 +178,7 @@ class DownloadsViewModel(
 
     fun onAdded(kind: DownloadKind) {
         _state.update { it.copy(addedConfirmation = kind) }
-        refresh(showIndicator = false)
+        refresh(showIndicator = false, fresh = true)
     }
 
     fun consumeAddedConfirmation() {
@@ -181,12 +201,19 @@ class DownloadsViewModel(
         }
     }
 
+    /** Back to the default search: empty query, Newest first (persisted).
+     *  The tab is navigation, not search state, so it is left alone. */
+    fun resetSearch() {
+        setQuery("")
+        setSort(DownloadSort.NEWEST)
+    }
+
     /** Each pager page filters its own kind, including while it is offscreen. */
     fun visibleDownloads(state: DownloadsUiState, tab: DownloadKind = state.tab): List<DebridDownload> {
         val byTab = state.downloads.filter { it.kind == tab }
         val q = state.query.trim()
         val filtered = if (q.isEmpty()) byTab else byTab.filter { it.name.contains(q, ignoreCase = true) }
-        return sortDownloads(filtered, state.sort)
+        return sortDownloads(filtered, state.sort, state.preferWords)
     }
 
     fun openDownload(download: DebridDownload) {

@@ -11,6 +11,7 @@ import app.trove.debrid.core.DebridError
 import app.trove.debrid.core.DebridProvider
 import app.trove.debrid.core.DebridService
 import app.trove.debrid.core.DownloadKind
+import app.trove.debrid.core.DownloadSort
 import app.trove.debrid.core.DownloadStatus
 import app.trove.debrid.core.ProviderCapabilities
 import app.trove.debrid.core.ShareClassifier
@@ -126,6 +127,10 @@ class FakeRepository(
 ) : TroveRepository {
     var savedExcludeWords = defaultExcludeWords
     var savedPreferWords = defaultPreferWords
+    var savedSort = DownloadSort.NEWEST
+
+    override suspend fun loadDownloadSort() = savedSort
+    override suspend fun saveDownloadSort(sort: DownloadSort) { savedSort = sort }
 
     override suspend fun loadExcludeWords() = savedExcludeWords
     override suspend fun saveExcludeWords(words: List<String>) {
@@ -322,7 +327,7 @@ class FakeRepository(
         if (selectedService == DebridService.TORBOX) selectedService = activeService()
     }
 
-    override suspend fun listDownloads(provider: DebridProvider) = provider.listDownloads()
+    override suspend fun listDownloads(provider: DebridProvider, bypassCache: Boolean) = provider.listDownloads()
     override suspend fun delete(provider: DebridProvider, id: String) = provider.delete(id)
 
     override suspend fun deleteMany(provider: DebridProvider, downloads: List<DebridDownload>) =
