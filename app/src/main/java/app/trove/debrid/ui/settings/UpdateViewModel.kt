@@ -11,6 +11,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import app.trove.debrid.core.update.UpdateChannel
 import android.content.SharedPreferences
+import androidx.core.content.edit
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -51,12 +52,36 @@ class UpdateViewModel(
     )
     val channel = selectedChannel.asStateFlow()
 
+    private var restoringChannel = false
+
     fun selectChannel(value: UpdateChannel) {
-        if (value == selectedChannel.value || (busy() && mutable.value != UpdateUiState.Checking)) return
+        if (restoringChannel || value == selectedChannel.value ||
+            (busy() && mutable.value != UpdateUiState.Checking)
+        ) return
+        resetChannelCheck()
+        preferences?.edit { putString("channel", value.name) }
+        selectedChannel.value = value
+    }
+
+    internal suspend fun restoreChannel(value: UpdateChannel) {
+        if (value == selectedChannel.value) return
+        check(!busy() || mutable.value == UpdateUiState.Checking)
+        restoringChannel = true
+        try {
+            resetChannelCheck()
+            withContext(io) {
+                // Raw Editor API is intentional: the commit() result is checked.
+                check(preferences?.edit()?.putString("channel", value.name)?.commit() != false)
+            }
+            selectedChannel.value = value
+        } finally {
+            restoringChannel = false
+        }
+    }
+
+    private fun resetChannelCheck() {
         job?.cancel()
         job = null
-        preferences?.edit()?.putString("channel", value.name)?.apply()
-        selectedChannel.value = value
         mutable.value = UpdateUiState.Idle
     }
 
@@ -79,7 +104,7 @@ class UpdateViewModel(
             }
         }
     }
-    private fun busy() = job?.isActive == true || mutable.value is UpdateUiState.Installing || mutable.value is UpdateUiState.WaitingForConfirmation
+    private fun busy() = restoringChannel || job?.isActive == true || mutable.value is UpdateUiState.Installing || mutable.value is UpdateUiState.WaitingForConfirmation
 
     fun check() {
         if (busy()) return

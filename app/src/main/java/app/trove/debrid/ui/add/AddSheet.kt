@@ -22,11 +22,13 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -35,9 +37,14 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import app.trove.debrid.ui.theme.TroveSpace
+import app.trove.debrid.core.CacheState
 import app.trove.debrid.core.ClassifiedShare
+import app.trove.debrid.core.DebridService
 import app.trove.debrid.ui.downloads.formatSize
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.CancellationException
@@ -139,16 +146,41 @@ fun AddSheet(
                 Text(text = detectionLine(classified, state), color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             if (readingFile) androidx.compose.material3.LinearProgressIndicator(Modifier.fillMaxWidth())
-            if (state.checking) {
-                Text(text = stringResource(R.string.checking_cache), color = MaterialTheme.colorScheme.onSurfaceVariant)
+            val cached = state.cached
+            val cacheStatus = when {
+                state.checking -> stringResource(R.string.checking_cache)
+                cached != null && !state.showServicePicker -> stringResource(R.string.cached_result, cached.name.orEmpty(), formatSize(cached.sizeBytes))
+                else -> null
             }
-            state.cached?.let { cached ->
+            if (cacheStatus != null) {
                 Text(
-                    text = stringResource(R.string.cached_result, cached.name.orEmpty(), formatSize(cached.sizeBytes)),
-                    color = MaterialTheme.colorScheme.primary,
+                    cacheStatus,
+                    modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                    color = if (state.checking) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.primary,
                 )
             }
-            state.error?.let { error ->
+            if (state.showServicePicker) {
+                Column(verticalArrangement = Arrangement.spacedBy(TroveSpace.small)) {
+                    Text(stringResource(R.string.add_choose_service), style = MaterialTheme.typography.titleSmall)
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(TroveSpace.small)) {
+                        state.cacheResults.forEach { result ->
+                            val service = stringResource(result.service.nameResource)
+                            val status = stringResource(when (result.state) {
+                                CacheState.CACHED -> R.string.cache_state_cached
+                                CacheState.NOT_CACHED -> R.string.cache_state_not_cached
+                                CacheState.UNKNOWN -> R.string.cache_state_unknown
+                            })
+                            FilterChip(
+                                selected = state.selectedService == result.service,
+                                onClick = { viewModel.selectService(result.service) },
+                                label = { Text("$service · $status") },
+                                enabled = !state.adding && !readingFile && !closing,
+                            )
+                        }
+                    }
+                }
+            }
+            (state.errorResource?.let { stringResource(it) } ?: state.error)?.let { error ->
                 Feedback(error, error = true)
             }
 
@@ -160,7 +192,7 @@ fun AddSheet(
             ) {
                 Box(Modifier.padding(end = TroveSpace.small).size(TroveSpace.page), contentAlignment = Alignment.Center) {
                     if (state.adding) CircularProgressIndicator(
-                        color = MaterialTheme.colorScheme.onPrimary,
+                        color = LocalContentColor.current,
                         modifier = Modifier.size(TroveSpace.page),
                         strokeWidth = 2.dp,
                     )
@@ -171,6 +203,16 @@ fun AddSheet(
         }
     }
 }
+
+private val DebridService.nameResource: Int
+    get() = when (this) {
+        DebridService.TORBOX -> R.string.torbox
+        DebridService.REAL_DEBRID -> R.string.real_debrid
+        DebridService.ALLDEBRID -> R.string.all_debrid
+        DebridService.PREMIUMIZE -> R.string.premiumize
+        DebridService.OFFCLOUD -> R.string.offcloud
+        DebridService.DEBRID_LINK -> R.string.debrid_link
+    }
 
 private val ClassifiedShare.isAddable: Boolean
     get() = when (this) {
@@ -187,7 +229,7 @@ private val ClassifiedShare.isAddable: Boolean
 @Composable
 private fun detectionLine(classified: ClassifiedShare, state: AddUiState): String = when (classified) {
     is ClassifiedShare.Magnet -> stringResource(R.string.detected_magnet) +
-        (if (state.cached != null) stringResource(R.string.cached_suffix) else "") +
+        (if (state.cached != null && !state.showServicePicker) stringResource(R.string.cached_suffix) else "") +
         (if (classified.infoHashHex == null) stringResource(R.string.unreadable_hash) else "")
     is ClassifiedShare.TorrentFile -> stringResource(R.string.detected_torrent, classified.fileName)
     is ClassifiedShare.Nzb -> stringResource(R.string.detected_nzb, classified.fileName)

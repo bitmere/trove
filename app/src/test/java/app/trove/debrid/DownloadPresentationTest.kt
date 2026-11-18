@@ -1,11 +1,26 @@
 package app.trove.debrid
 
+import app.trove.debrid.core.MediaMetadata
 import app.trove.debrid.ui.downloads.baseFileName
+import app.trove.debrid.ui.downloads.downloadCoverSubtitle
 import app.trove.debrid.ui.downloads.formatSize
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class DownloadPresentationTest {
+    @Test fun `cover subtitle orders year localized type episode and quality`() {
+        val identity = MediaMetadata("The Bear", 2022, "series")
+        assertEquals("2022 · Series · S02E05 · 1080p",
+            downloadCoverSubtitle(identity, "Series", "S02E05", "1080p"))
+        assertEquals("2022 · Series", downloadCoverSubtitle(identity, "Series", null, null))
+    }
+
+    @Test fun `cover subtitle omits missing parts`() {
+        val identity = MediaMetadata("The Bear", null, null)
+        assertEquals("", downloadCoverSubtitle(identity, null, null, null))
+        assertEquals("S02E05 · 1080p", downloadCoverSubtitle(identity, null, "S02E05", "1080p"))
+    }
+
     @Test fun `header identity uses parsed fallback or resolved metadata`() {
         val row = sampleDownload().copy(name = "Baththa.2026.1080p.WEB-Rip.HEVC-GROUP.mkv")
         assertEquals(app.trove.debrid.core.MediaMetadata("Baththa", 2026, null),

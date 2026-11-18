@@ -20,6 +20,30 @@ class MediaMetadataTest {
         assertEquals("", parseMediaName("magnet:?xt=synthetic").title)
     }
 
+    @Test fun `normalizes episode tokens and finds quality after source tags`() {
+        assertEquals(ReleaseDetails("S02E05", "1080p"),
+            parseReleaseDetails("The.Bear.s02e05.WEB-DL.1080P.720p.mkv"))
+        assertEquals(ReleaseDetails("S02E05", null), parseReleaseDetails("The_Bear_2x05.mkv"))
+        assertEquals(ReleaseDetails(null, "720p"), parseReleaseDetails("Film.[720p].mkv"))
+        assertEquals(ReleaseDetails(null, "480p"), parseReleaseDetails("Film.480p.BluRay.mkv"))
+        assertEquals(ReleaseDetails(null, "1080i"), parseReleaseDetails("Film.1080i.mkv"))
+    }
+
+    @Test fun `normalizes 4K and 2160p to the same quality`() {
+        assertEquals(ReleaseDetails(null, "2160p"), parseReleaseDetails("Film.2160p.mkv"))
+        assertEquals(ReleaseDetails(null, "2160p"), parseReleaseDetails("Film.4K.mkv"))
+    }
+
+    @Test fun `omits season only tokens and ignores source tags URLs and magnets`() {
+        val empty = ReleaseDetails(null, null)
+        assertEquals(empty, parseReleaseDetails("The.Bear.Season 2.mkv"))
+        assertEquals(empty, parseReleaseDetails("The.Bear.S02.mkv"))
+        assertEquals(empty, parseReleaseDetails("Film.mkv"))
+        assertEquals(empty, parseReleaseDetails("Film.WEB-DL.BluRay.mkv"))
+        assertEquals(empty, parseReleaseDetails("https://example.invalid/Show.S02E05.1080p.mkv"))
+        assertEquals(empty, parseReleaseDetails("magnet:?dn=Show.S02E05.1080p.mkv"))
+    }
+
     private class FakeHttp : HttpTransport {
         val requests = mutableListOf<HttpRequest>()
         var status = 200

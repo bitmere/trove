@@ -13,6 +13,11 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.unit.dp
 import app.trove.debrid.core.*
 import app.trove.debrid.ui.theme.TroveSpace
@@ -28,10 +33,14 @@ internal fun DownloadDetailsSheet(
     onPlay: (String) -> Unit,
     onPlayWith: (String) -> Unit,
     onDelete: () -> Unit,
+    showClutterFiles: Boolean = false,
 ) {
+    val visibleFiles = remember(download.files, showClutterFiles) {
+        if (showClutterFiles) download.files else download.files.filterNot { isClutterFile(it.name) }
+    }
     val busy = state.resolvingDownload != null || state.playUrl != null || dismissing
     val canClose = !busy || (state.resolvingDownload != null && download.files.isEmpty() && !dismissing)
-    val ready = download.status == DownloadStatus.READY && download.files.isNotEmpty()
+    val ready = download.status == DownloadStatus.READY && visibleFiles.isNotEmpty()
     ModalBottomSheet(
         onDismissRequest = { if (canClose) onClose() }, sheetState = sheetState,
         sheetGesturesEnabled = canClose,
@@ -48,21 +57,27 @@ internal fun DownloadDetailsSheet(
                         style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     DownloadTransfer(download)
                     state.error?.let { app.trove.debrid.ui.Feedback(it, error = true) }
-                    if (busy && download.files.isEmpty()) LinearProgressIndicator(Modifier.fillMaxWidth())
-                    else if (!ready) Text(
-                        if (download.status != DownloadStatus.READY) stringResource(R.string.play_when_ready)
+                    if (busy && download.files.isEmpty()) {
+                        val preparing = stringResource(R.string.preparing)
+                        LinearProgressIndicator(Modifier.fillMaxWidth().semantics {
+                            liveRegion = LiveRegionMode.Polite
+                            stateDescription = preparing
+                        })
+                    } else if (!ready) Text(
+                        if (visibleFiles.isEmpty() && download.files.isNotEmpty()) stringResource(R.string.no_files)
+                        else if (download.status != DownloadStatus.READY) stringResource(R.string.play_when_ready)
                         else stringResource(R.string.no_files),
                         style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
             item {
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(TroveSpace.small)) {
-                    Button(onClick = { download.files.firstOrNull()?.let { onPlay(it.id) } }, enabled = ready && !busy) {
+                    Button(onClick = { visibleFiles.firstOrNull()?.let { onPlay(it.id) } }, enabled = ready && !busy) {
                         if (busy) PlaybackSpinner() else Icon(Icons.Filled.PlayArrow, null)
                         Spacer(Modifier.width(TroveSpace.small))
-                        Text(if (busy) stringResource(R.string.preparing) else if (download.files.size > 1) stringResource(R.string.play_first) else stringResource(R.string.play))
+                        Text(if (busy) stringResource(R.string.preparing) else if (visibleFiles.size > 1) stringResource(R.string.play_first) else stringResource(R.string.play))
                     }
-                    TextButton(onClick = { download.files.firstOrNull()?.let { onPlayWith(it.id) } }, enabled = ready && !busy) {
+                    TextButton(onClick = { visibleFiles.firstOrNull()?.let { onPlayWith(it.id) } }, enabled = ready && !busy) {
                         Text(stringResource(R.string.play_with))
                     }
                     TextButton(onClick = onDelete, enabled = !busy,
@@ -70,10 +85,10 @@ internal fun DownloadDetailsSheet(
                     TextButton(onClick = onClose, enabled = canClose) { Text(stringResource(R.string.close)) }
                 }
             }
-            if (download.files.isNotEmpty()) item {
-                Text(stringResource(R.string.files_count, download.files.size), style = MaterialTheme.typography.titleMedium)
+            if (visibleFiles.isNotEmpty()) item {
+                Text(stringResource(R.string.files_count, visibleFiles.size), style = MaterialTheme.typography.titleMedium)
             }
-            items(download.files, key = { it.id }) { file ->
+            items(visibleFiles, key = { it.id }) { file ->
                 Surface(shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.surfaceContainerHigh) {
                     Row(Modifier.fillMaxWidth().padding(TroveSpace.medium), verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(TroveSpace.compact)) {
@@ -84,8 +99,17 @@ internal fun DownloadDetailsSheet(
                         }
                         FilledTonalIconButton(onClick = { onPlay(file.id) }, enabled = ready && !busy,
                             modifier = Modifier.size(48.dp)) {
-                            if (state.resolvingFileId == file.id) PlaybackSpinner()
-                            else Icon(Icons.Filled.PlayArrow, contentDescription = stringResource(R.string.play_file, baseFileName(file.name)))
+                            val playFile = stringResource(R.string.play_file, baseFileName(file.name))
+                            if (state.resolvingFileId == file.id) {
+                                val preparing = stringResource(R.string.preparing_player)
+                                PlaybackSpinner(Modifier.semantics {
+                                    contentDescription = playFile
+                                    liveRegion = LiveRegionMode.Polite
+                                    stateDescription = preparing
+                                })
+                            } else {
+                                Icon(Icons.Filled.PlayArrow, contentDescription = playFile)
+                            }
                         }
                         Box {
                             var showActions by remember { mutableStateOf(false) }

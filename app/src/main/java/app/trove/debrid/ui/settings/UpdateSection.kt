@@ -107,13 +107,14 @@ fun UpdateSection(
     }
     Surface(shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.surfaceContainerLow) {
         Column(Modifier.fillMaxWidth().padding(TroveSpace.medium), verticalArrangement = Arrangement.spacedBy(TroveSpace.small)) {
-            ListItem(
-                headlineContent = { Text(stringResource(R.string.update_title)) },
-                supportingContent = { Text(stringResource(R.string.version, currentVersion)) },
-                colors = ListItemDefaults.colors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
-            )
+            Column(Modifier.fillMaxWidth().heightIn(min = 72.dp).padding(vertical = TroveSpace.small),
+                verticalArrangement = Arrangement.Center) {
+                Text(stringResource(R.string.update_title), style = MaterialTheme.typography.bodyLarge)
+                Text(stringResource(R.string.version, currentVersion), style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
             Text(stringResource(R.string.update_channel))
-            Row {
+            Row(horizontalArrangement = Arrangement.spacedBy(TroveSpace.small)) {
                 UpdateChannel.entries.forEach { candidate ->
                     val label = if (candidate == UpdateChannel.STABLE) R.string.update_stable else R.string.update_beta
                     val enabled = state !is UpdateUiState.Downloading && state !is UpdateUiState.Installing &&
@@ -184,13 +185,13 @@ fun UpdateSection(
                 modifier = Modifier.fillMaxWidth().heightIn(max = 360.dp).testTag("update_notes_scroll")
                     .verticalScroll(notesScroll).focusRequester(notesContent).focusable())
         },
-        confirmButton = { TextButton(onClick = { notesOpen = false }) { Text(stringResource(R.string.update_close)) } },
+        confirmButton = { TextButton(onClick = { notesOpen = false }) { Text(stringResource(R.string.close)) } },
     )
     if (cleanOpen && showCleanHelp) AlertDialog(
         onDismissRequest = { cleanOpen = false },
         title = { Text(stringResource(R.string.update_clean_title)) },
         text = { Text(stringResource(R.string.update_clean_body), Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState())) },
-        confirmButton = { TextButton(onClick = { cleanOpen = false }) { Text(stringResource(R.string.update_close)) } },
+        confirmButton = { TextButton(onClick = { cleanOpen = false }) { Text(stringResource(R.string.close)) } },
     )
 }
 

@@ -2,9 +2,17 @@ package app.trove.debrid.ui.downloads
 
 import app.trove.debrid.core.DebridDownload
 import app.trove.debrid.core.DownloadStatus
+import app.trove.debrid.core.MediaMetadata
 import java.util.Locale
 
 fun formatCount(count: Int): String = count.toString()
+
+fun downloadCoverSubtitle(
+    identity: MediaMetadata,
+    localizedType: String?,
+    episode: String?,
+    quality: String?,
+): String = listOfNotNull(identity.year?.toString(), localizedType, episode, quality).joinToString(" · ")
 
 data class DownloadProgress(
     val fraction: Float,
