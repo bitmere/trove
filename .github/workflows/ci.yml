@@ -31,7 +31,7 @@ jobs:
         run: python3 scripts/check-senior-rewrite.py
       - name: Upload test and lint reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: trove-ci-reports
           path: |

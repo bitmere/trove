@@ -89,7 +89,7 @@ jobs:
           ./gradlew --no-daemon clean :app:testDebugUnitTest :core:test :app:lint :app:lintRelease :app:assembleDebug
       - name: Upload validation reports on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: trove-release-validation-reports
           path: |
@@ -199,7 +199,7 @@ jobs:
       - name: Verify exact artifact, full signer and monotonic publication
         run: python3 "$RELEASE_WORK/release_gate.py" verify
       - name: Retain exact verified optimized bytes
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: trove-release-apk
           path: |
@@ -224,7 +224,7 @@ jobs:
         run: python3 "$RELEASE_WORK/release_gate.py" anonymous
       - name: Upload validation reports on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: trove-release-packaging-reports
           path: |
