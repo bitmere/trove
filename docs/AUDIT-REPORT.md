@@ -1,7 +1,7 @@
 # Trove release-path audit — 2026-11-17
 
 This report records the pre-migration release path. The current signing and
-public GitHub Release contract is documented in [Distribution](docs/DISTRIBUTION.md).
+public GitHub Release contract is documented in [Distribution](DISTRIBUTION.md).
 
 Historical scope: every step/job in `.github/workflows/release.yml`, every function in
 `tools/release_gate.py`, its tests, and the release signing configuration in
