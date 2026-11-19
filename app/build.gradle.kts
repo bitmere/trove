@@ -2,7 +2,6 @@ import java.util.Properties
 
 plugins {
     alias(libs.plugins.android.application)
-    alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
 }
 
@@ -63,7 +62,7 @@ tasks.configureEach {
 
 android {
     namespace = "app.trove.debrid"
-    compileSdk = 36
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "app.trove.debrid"
