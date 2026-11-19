@@ -5,3 +5,7 @@ build/
 local.properties
 *.iml
 .DS_Store
+# Append to .gitignore at apply time (same lines as Matrix).
+# Shared hook config is committed; local consent + cache stay local.
+.impeccable/*
+!.impeccable/config.json

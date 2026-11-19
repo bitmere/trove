@@ -47,3 +47,11 @@
 - Use OpenSpec for user-facing changes. Add a proposal, tasks, and specs
   under `openspec/changes/<change>/`. Tiny test-only cleanups need diff review.
   Take design inspiration from GPL-licensed sources, but write all code fresh.
+# Append to AGENTS.md at apply time (same shape as Matrix).
+- Impeccable design skill: linked from `vendor/impeccable` (submodule) into
+  `.agents/skills/impeccable`; product context in `PRODUCT.md`, design system
+  in `DESIGN.md`. Run the Impeccable review passes on UI changes and the
+  detector before calling UI work done. The design hook (`.codex/hooks.json`,
+  `.impeccable/config.json`) covers `.kt` files via `detector.extensions`.
+  Skill resolution order: project-local skills first, then user-level skills,
+  then the ai-config repo index as reference only; never use a stale skill.
