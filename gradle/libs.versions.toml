@@ -1,11 +1,11 @@
 [versions]
-agp = "8.13.2"
+agp = "9.1.1"
 kotlin = "2.2.20"
 composeBom = "2026.03.00"
 activityCompose = "1.12.4"
 lifecycleViewmodelCompose = "2.9.4"
 navigationCompose = "2.9.8"
-coreKtx = "1.17.0"
+coreKtx = "1.19.1"
 coroutines = "1.9.0"
 okhttp = "4.12.1"
 gson = "2.11.0"
@@ -33,6 +33,5 @@ compose-ui-test-manifest = { module = "androidx.compose.ui:ui-test-manifest" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
-kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
 kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
 kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }

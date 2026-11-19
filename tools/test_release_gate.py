@@ -589,7 +589,7 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn('cp tools/release_gate.py', self.workflow[:first_checkout])
 
     def test_sdk_and_signing_cache_cleanup_and_publication_order(self):
-        self.assertEqual(self.workflow.count("sdkmanager 'platforms;android-36' 'build-tools;36.0.0'"), 2)
+        self.assertEqual(self.workflow.count("sdkmanager 'platforms;android-37.0' 'build-tools;36.0.0'"), 2)
         self.assertIn('cache-disabled: true', self.workflow)
         self.assertIn('--no-configuration-cache --no-build-cache', self.workflow)
         self.assertIn('if: always()\n        run: rm -f', self.workflow)

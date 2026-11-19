@@ -72,7 +72,7 @@ jobs:
         with:
           packages: platform-tools
       - name: Install release Android SDK
-        run: sdkmanager 'platforms;android-36' 'build-tools;36.0.0'
+        run: sdkmanager 'platforms;android-37.0' 'build-tools;36.0.0'
       - uses: gradle/actions/setup-gradle@v3
         with:
           cache-read-only: true
@@ -80,7 +80,7 @@ jobs:
         run: |
           test -x ./gradlew
           java -version
-          test -d "$ANDROID_HOME/platforms/android-36"
+          test -d "$ANDROID_HOME/platforms/android-37.0"
           test -d "$ANDROID_HOME/build-tools"
           find "$ANDROID_HOME/build-tools" -mindepth 2 -maxdepth 2 -name apksigner -executable -print -quit | grep -q .
           find "$ANDROID_HOME/build-tools" -mindepth 2 -maxdepth 2 -name aapt -executable -print -quit | grep -q .
@@ -148,7 +148,7 @@ jobs:
         with:
           packages: platform-tools
       - name: Install release Android SDK
-        run: sdkmanager 'platforms;android-36' 'build-tools;36.0.0'
+        run: sdkmanager 'platforms;android-37.0' 'build-tools;36.0.0'
       - uses: gradle/actions/setup-gradle@v3
         with:
           cache-disabled: true
