@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.24 — 2026-11-19
+
+- Core bundle (PR 27): API-layer and viewport paging (no more 1000-item cap), metadata enrichment (details sheet, durable metadata cache, candidate picker, TMDB opt-in), library performance fixes, provider-account unification, and test reorganization.
+- Cleaner release pages (PR 26): the SHA-256 now lives in the release notes instead of a separate .sha256 file; the updater reads it from the notes, with the sidecar as fallback for older releases.
+- Baseline: 808 JVM tests, lint 0 errors.
+
 ## 0.1.23 — 2026-11-19
 
 - Kotlin 2.2.20 → 2.4.21 (PR 24): the Kotlin compiler and plugins move to 2.4.21, replacing Dependabot PR 18 (closed by Dependabot after the toolchain upgrade removed the `kotlin-android` plugin entry it was bumping).
