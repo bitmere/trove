@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.23 — 2026-11-19
+
+- Kotlin 2.2.20 → 2.4.21 (PR 24): the Kotlin compiler and plugins move to 2.4.21, replacing Dependabot PR 18 (closed by Dependabot after the toolchain upgrade removed the `kotlin-android` plugin entry it was bumping).
+- Baseline: 649 JVM tests, lint 0 errors.
+
 ## 0.1.22 — 2026-11-19
 
 - OkHttp 4.12.0 → 4.12.1 (PR 21): the compromised-CA blocklist for CVE-2026-111943 — certificates from a widely-trusted CA whose private keys leaked are now rejected.
