@@ -17,3 +17,10 @@ object TroveElevation {
     val card = 1.dp
     val floating = 6.dp
 }
+
+object TroveSize {
+    val outline = 1.dp
+    val control = 48.dp
+    val floatingAction = 56.dp
+    val downloadsBottomPadding = 212.dp
+}

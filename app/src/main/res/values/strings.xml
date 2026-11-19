@@ -78,6 +78,9 @@
     <string name="rd_token_empty">Paste your Real-Debrid API token first</string>
     <string name="rd_token_note">Device-code sign-in is coming later — paste an API token for now.</string>
     <string name="provider_active">Active</string>
+    <string name="provider_active_detail">Active provider</string>
+    <string name="provider_set_active">Set active</string>
+    <string name="provider_tile_description">Provider initial %1$s</string>
     <string name="provider_signed_in">Signed in</string>
     <string name="provider_not_signed_in">Not signed in</string>
     <string name="providers_title">Providers</string>

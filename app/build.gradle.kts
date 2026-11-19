@@ -72,6 +72,8 @@ android {
         versionName = publicVersion
     }
 
+    testOptions.unitTests.isIncludeAndroidResources = true
+
     buildFeatures {
         buildConfig = true
         compose = true
@@ -132,6 +134,9 @@ dependencies {
     implementation(libs.gson)
     implementation(libs.security.crypto)
     testImplementation(libs.junit)
+    testImplementation(libs.robolectric)
+    testImplementation(platform(libs.compose.bom))
+    testImplementation(libs.compose.ui.test.junit4)
     testImplementation(libs.coroutines.core)
     testImplementation(libs.coroutines.test)
     debugImplementation(libs.compose.ui.test.manifest)
