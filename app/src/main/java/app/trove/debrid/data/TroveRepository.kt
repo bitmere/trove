@@ -10,6 +10,7 @@ import app.trove.debrid.core.DebridDownload
 import app.trove.debrid.core.DebridProvider
 import app.trove.debrid.core.DebridService
 import app.trove.debrid.core.DownloadKind
+import app.trove.debrid.core.LibrarySnapshot
 import app.trove.debrid.core.ServiceCacheResult
 import app.trove.debrid.core.StreamUrl
 import app.trove.debrid.core.checkCachedEverywhere as coreCheckCachedEverywhere
@@ -63,6 +64,9 @@ data class DownloadPage(
  *  without an Android Context. The production implementation is
  *  [DebridRepository]. */
 interface TroveRepository {
+    suspend fun loadLibrarySnapshot(): LibrarySnapshot? = null
+    suspend fun saveLibrarySnapshot(snapshot: LibrarySnapshot) = Unit
+
     suspend fun loadTheme(): ThemePreference = ThemePreference()
     suspend fun saveTheme(theme: ThemePreference) = Unit
 

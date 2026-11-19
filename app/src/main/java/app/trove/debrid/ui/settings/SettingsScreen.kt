@@ -2,6 +2,7 @@ package app.trove.debrid.ui.settings
 
 import app.trove.debrid.core.DebridService
 import app.trove.debrid.core.PlayerComponent
+import app.trove.debrid.data.debridServiceOrder
 import app.trove.debrid.R
 import androidx.activity.compose.BackHandler
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
@@ -17,6 +18,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -30,6 +33,7 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.unit.dp
+import app.trove.debrid.ui.theme.TroveSize
 import app.trove.debrid.ui.theme.TroveSpace
 import app.trove.debrid.ui.Feedback
 
@@ -53,7 +57,12 @@ fun SettingsScreen(viewModel: SettingsViewModel, updateViewModel: UpdateViewMode
     // Destination survives rotation as its entry name; system back returns to the root list.
     var destinationName by rememberSaveable { mutableStateOf<String?>(null) }
     val destination = destinationName?.let { name -> SettingsDestination.entries.firstOrNull { it.name == name } }
-    BackHandler(enabled = destination != null) { destinationName = null }
+    var selectedProvider by rememberSaveable { mutableStateOf<DebridService?>(null) }
+    val providerDetail = selectedProvider?.let(providerSectionDescriptors::getValue)
+    val backFromDestination = {
+        if (selectedProvider != null) selectedProvider = null else destinationName = null
+    }
+    BackHandler(enabled = destination != null, onBack = backFromDestination)
     if (showPlayers) {
         DefaultPlayerDialog(state, onSelect = {
             viewModel.setDefaultPlayer(it)
@@ -85,20 +94,39 @@ fun SettingsScreen(viewModel: SettingsViewModel, updateViewModel: UpdateViewMode
         Scaffold(
             modifier = modifier.safeDrawingPadding(),
             topBar = {
-                TopAppBar(title = { Text(stringResource(destination.titleRes)) }, navigationIcon = {
-                    IconButton(onClick = { destinationName = null }) {
+                TopAppBar(title = { Text(stringResource(providerDetail?.title ?: destination.titleRes)) }, navigationIcon = {
+                    IconButton(onClick = backFromDestination) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.settings_back))
                     }
                 }, windowInsets = WindowInsets(0, 0, 0, 0))
             },
         ) { insets ->
+            val groupScroll = rememberScrollState()
+            val detailScroll = key(selectedProvider) { rememberScrollState() }
             Column(
-                Modifier.fillMaxSize().padding(insets).verticalScroll(rememberScrollState())
+                Modifier.fillMaxSize().padding(insets)
+                    .verticalScroll(if (providerDetail == null) groupScroll else detailScroll)
                     .imePadding().padding(horizontal = TroveSpace.page, vertical = TroveSpace.medium),
                 verticalArrangement = Arrangement.spacedBy(TroveSpace.medium),
             ) {
                 when (destination) {
-                    SettingsDestination.PROVIDERS -> ProvidersContent(state, canEdit, viewModel)
+                    SettingsDestination.PROVIDERS -> if (providerDetail == null) {
+                        ProvidersContent(state) { selectedProvider = it }
+                    } else {
+                        val service = providerDetail.service
+                        if (providerDetail.hasKey(state)) {
+                            if (state.activeService == service) {
+                                Text(stringResource(R.string.provider_active_detail),
+                                    style = MaterialTheme.typography.labelLarge)
+                            } else {
+                                FilledTonalButton(
+                                    onClick = { viewModel.setActiveProvider(service) },
+                                    enabled = canEdit && !state.anyProviderSaving,
+                                ) { Text(stringResource(R.string.provider_set_active)) }
+                            }
+                        }
+                        ProviderSection(state, canEdit, viewModel, providerDetail)
+                    }
                     SettingsDestination.LIBRARY -> LibraryContent(state, canEdit, viewModel)
                     SettingsDestination.PLAYBACK -> PlaybackContent(state, canEdit) {
                         viewModel.refreshPlayers()
@@ -126,20 +154,8 @@ private fun GroupRow(group: SettingsDestination, onClick: () -> Unit) {
 }
 
 @Composable
-private fun ProvidersContent(state: SettingsUiState, canEdit: Boolean, viewModel: SettingsViewModel) {
-    ProviderList(
-        state,
-        canEdit && !state.anyProviderSaving,
-        viewModel::setActiveProvider,
-    )
-    HorizontalDivider()
-    ProviderSection(state, canEdit, viewModel, providerSectionDescriptors.getValue(DebridService.TORBOX))
-    HorizontalDivider()
-    ProviderSection(state, canEdit, viewModel, providerSectionDescriptors.getValue(DebridService.REAL_DEBRID))
-    ProviderSection(state, canEdit, viewModel, providerSectionDescriptors.getValue(DebridService.ALLDEBRID))
-    ProviderSection(state, canEdit, viewModel, providerSectionDescriptors.getValue(DebridService.PREMIUMIZE))
-    ProviderSection(state, canEdit, viewModel, providerSectionDescriptors.getValue(DebridService.OFFCLOUD))
-    ProviderSection(state, canEdit, viewModel, providerSectionDescriptors.getValue(DebridService.DEBRID_LINK))
+private fun ProvidersContent(state: SettingsUiState, onOpen: (DebridService) -> Unit) {
+    ProviderList(state, onOpen)
     if (COMING_SOON_SERVICES.isNotEmpty()) {
         HorizontalDivider()
         Text(stringResource(R.string.more_providers), style = MaterialTheme.typography.titleMedium)
@@ -413,55 +429,49 @@ private fun PlaybackContent(state: SettingsUiState, canEdit: Boolean, onShowPlay
 }
 
 @Composable
-private fun ProviderList(state: SettingsUiState, canEdit: Boolean, onSelect: (DebridService) -> Unit) {
-    Text(stringResource(R.string.providers_title), style = MaterialTheme.typography.titleLarge)
-    Column(Modifier.selectableGroup()) {
-        val supportedServices = listOf(
-            DebridService.TORBOX,
-            DebridService.REAL_DEBRID,
-            DebridService.ALLDEBRID,
-            DebridService.PREMIUMIZE,
-            DebridService.OFFCLOUD,
-            DebridService.DEBRID_LINK,
-        )
-        val services = (supportedServices + state.accounts.map { it.service }).distinct()
-        services.forEach { service ->
-            val account = state.accounts.firstOrNull { it.service == service }
+private fun ProviderList(state: SettingsUiState, onOpen: (DebridService) -> Unit) {
+    Column {
+        debridServiceOrder.forEach { service ->
             val record = state.providerAccount(service)
             val signedIn = record.hasKey
             val label = record.accountLabel
-            val selected = signedIn && state.activeService == service
-            val enabled = signedIn && canEdit
+            val active = signedIn && state.activeService == service
+            val name = stringResource(providerSectionDescriptors.getValue(service).title)
+            val initial = name.take(1)
+            val tileDescription = stringResource(R.string.provider_tile_description, initial)
+            val colors = MaterialTheme.colorScheme
             ListItem(
-                headlineContent = {
-                    Text(when (service) {
-                        DebridService.TORBOX -> stringResource(R.string.torbox)
-                        DebridService.REAL_DEBRID -> stringResource(R.string.real_debrid)
-                        DebridService.ALLDEBRID -> stringResource(R.string.all_debrid)
-                        DebridService.PREMIUMIZE -> stringResource(R.string.premiumize)
-                        DebridService.OFFCLOUD -> stringResource(R.string.offcloud)
-                        DebridService.DEBRID_LINK -> stringResource(R.string.debrid_link)
-                        else -> account?.label.orEmpty()
-                    })
-                },
-                supportingContent = {
-                    Column {
-                        Text(stringResource(if (signedIn) R.string.provider_signed_in else R.string.provider_not_signed_in))
-                        if (signedIn && label != null) Text(label)
+                leadingContent = {
+                    Surface(
+                        modifier = Modifier.size(TroveSize.control)
+                            .semantics { contentDescription = tileDescription },
+                        shape = MaterialTheme.shapes.medium,
+                        color = if (active) colors.primaryContainer else colors.surfaceContainer,
+                        contentColor = if (active) colors.onPrimaryContainer else colors.onSurface,
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Text(initial, style = MaterialTheme.typography.headlineSmall)
+                        }
                     }
+                },
+                headlineContent = { Text(name) },
+                supportingContent = {
+                    val status = stringResource(
+                        if (signedIn) R.string.provider_signed_in else R.string.provider_not_signed_in,
+                    )
+                    Text(if (signedIn && label != null) "$status · $label" else status)
                 },
                 trailingContent = {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        if (selected) {
+                        if (active) {
                             Text(stringResource(R.string.provider_active), style = MaterialTheme.typography.labelMedium)
                             Spacer(Modifier.width(TroveSpace.small))
                         }
-                        RadioButton(selected = selected, onClick = null, enabled = enabled)
+                        Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null)
                     }
                 },
-                modifier = Modifier.selectable(selected, enabled = enabled, role = Role.RadioButton) {
-                    onSelect(service)
-                },
+                modifier = Modifier.testTag("provider_row_${service.name}")
+                    .clickable(role = Role.Button) { onOpen(service) },
             )
         }
     }

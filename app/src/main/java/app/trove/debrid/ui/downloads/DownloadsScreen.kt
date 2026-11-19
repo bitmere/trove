@@ -3,20 +3,15 @@ package app.trove.debrid.ui.downloads
 import app.trove.debrid.R
 import androidx.compose.ui.res.stringResource
 
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.spring
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -43,7 +38,6 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Clear
-import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.ui.res.painterResource
 import androidx.compose.material.icons.filled.Check
 import app.trove.debrid.core.DownloadSort
@@ -62,8 +56,6 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -71,7 +63,7 @@ import androidx.compose.ui.graphics.rememberGraphicsLayer
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.unit.dp
 import app.trove.debrid.ui.theme.TroveSpace
-import app.trove.debrid.ui.theme.TroveElevation
+import app.trove.debrid.ui.theme.TroveSize
 import app.trove.debrid.core.DebridDownload
 import app.trove.debrid.core.DownloadKind
 import app.trove.debrid.core.DownloadStatus
@@ -174,6 +166,12 @@ fun DownloadsScreen(
         if (savedQuery.isNotBlank() && state.query.isBlank()) {
             viewModel.setQuery(savedQuery)
         }
+    }
+    val anchorAccount = viewModel.currentAccountIdentity()
+    var offeredSavedAnchor by remember { mutableStateOf(false) }
+    LaunchedEffect(anchorAccount) {
+        if (anchorAccount == null || offeredSavedAnchor) return@LaunchedEffect
+        offeredSavedAnchor = true
         val kind = savedAnchorKind?.let { runCatching { DownloadKind.valueOf(it) }.getOrNull() }
         val sort = savedAnchorSort?.let { runCatching { DownloadSort.valueOf(it) }.getOrNull() }
         val id = savedAnchorId
@@ -370,14 +368,14 @@ fun DownloadsScreen(
                 // without it, the anchor is dropped and the list stays
                 // at the top.
                 val pendingAnchor = state.pendingAnchor
-                LaunchedEffect(pendingAnchor, pageDownloads, tabState.endReached) {
+                LaunchedEffect(pendingAnchor, pageDownloads, state.sort, state.query, tabState.endReached, tabState.pageLoading) {
                     val anchor = pendingAnchor ?: return@LaunchedEffect
                     if (anchor.kind != tab) return@LaunchedEffect
                     val index = viewModel.anchorRowIndex(anchor)
                     if (index != null) {
                         tabListState.scrollToItem(index)
                         viewModel.consumePendingAnchor()
-                    } else if (tabState.endReached) {
+                    } else if (tabState.endReached && !tabState.pageLoading) {
                         viewModel.consumePendingAnchor()
                     }
                 }
@@ -411,7 +409,7 @@ fun DownloadsScreen(
                             } else {
                                 LazyColumn(
                                     state = listStates.getValue(tab),
-                                    contentPadding = PaddingValues(start = TroveSpace.medium, end = TroveSpace.medium, top = TroveSpace.small, bottom = 200.dp),
+                                    contentPadding = PaddingValues(start = TroveSpace.medium, end = TroveSpace.medium, top = TroveSpace.small, bottom = TroveSize.downloadsBottomPadding),
                                     verticalArrangement = Arrangement.spacedBy(TroveSpace.compact),
                                     modifier = Modifier.fillMaxSize().onGloballyPositioned {
                                         listPositions[tab] = it.localToRoot(Offset.Zero)
@@ -464,44 +462,13 @@ fun DownloadsScreen(
             } else {
                 null
             },
+            goToTopVisible = showGoToTop,
+            onGoToTop = { scope.launch { listState.animateScrollToItem(0) } },
             onSearchPositioned = { searchPosInRoot = it },
             modifier = Modifier
                 .align(Alignment.BottomEnd)
                 .padding(end = TroveSpace.page, bottom = TroveSpace.page),
         )
-
-        // Scrolls only; no state change. Directly above the floating cluster:
-        // page padding + cluster height (48 dp Search + 12 dp gap + 56 dp Add).
-        AnimatedVisibility(
-            visible = showGoToTop,
-            enter = fadeIn(),
-            exit = fadeOut(),
-            modifier = Modifier
-                .align(Alignment.BottomEnd)
-                .padding(end = TroveSpace.page, bottom = TroveSpace.page + 48.dp + TroveSpace.compact + 56.dp),
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(48.dp)
-                    .shadow(TroveElevation.floating, CircleShape, ambientColor = MaterialTheme.colorScheme.scrim.copy(alpha = 0.14f))
-                    .clip(CircleShape)
-                    .border(1.dp, MaterialTheme.colorScheme.outlineVariant, CircleShape)
-                    .background(MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.92f), CircleShape),
-                contentAlignment = Alignment.Center,
-            ) {
-                IconButton(
-                    onClick = { scope.launch { listState.animateScrollToItem(0) } },
-                    modifier = Modifier.size(48.dp),
-                ) {
-                    Icon(
-                        imageVector = Icons.Filled.KeyboardArrowUp,
-                        contentDescription = stringResource(R.string.go_to_top),
-                        tint = MaterialTheme.colorScheme.onSurface,
-                    )
-                }
-            }
-        }
-
     }
     }
 

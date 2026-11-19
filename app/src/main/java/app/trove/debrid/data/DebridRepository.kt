@@ -17,6 +17,8 @@ import app.trove.debrid.core.DebridService
 import app.trove.debrid.core.DownloadKind
 import app.trove.debrid.core.DownloadRef
 import app.trove.debrid.core.HttpTransport
+import app.trove.debrid.core.LibraryDiskCache
+import app.trove.debrid.core.LibrarySnapshot
 import app.trove.debrid.core.MetadataDiskCache
 import app.trove.debrid.core.OkHttpTransport
 import app.trove.debrid.core.ShareClassifier
@@ -53,6 +55,7 @@ class DebridRepository(
     private val transport: HttpTransport = OkHttpTransport(),
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val metadataDiskCache: MetadataDiskCache? = null,
+    private val libraryDiskCache: LibraryDiskCache? = null,
 ) : TroveRepository {
 
     /** Primary entry point for tests and manual wiring: both parts
@@ -63,12 +66,14 @@ class DebridRepository(
         transport: HttpTransport = OkHttpTransport(),
         ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
         metadataDiskCache: MetadataDiskCache? = null,
+        libraryDiskCache: LibraryDiskCache? = null,
     ) : this(
         ProviderAccountRegistry(prefs, credentialStore, transport),
         PreferencesStore(prefs, ioDispatcher),
         transport,
         ioDispatcher,
         metadataDiskCache,
+        libraryDiskCache,
     )
 
     /** Production entry point: accounts live in "trove_accounts". */
@@ -83,6 +88,7 @@ class DebridRepository(
         transport,
         ioDispatcher,
         MetadataDiskCache(File(context.filesDir, "metadata")),
+        LibraryDiskCache(File(context.filesDir, "library-cache")),
     )
 
     companion object {
@@ -196,6 +202,13 @@ class DebridRepository(
     // ---- Accounts + provider registry (delegated) ----
 
     override fun accounts(): List<DebridAccount> = registry.accounts()
+
+    override suspend fun loadLibrarySnapshot(): LibrarySnapshot? =
+        withContext(ioDispatcher) { libraryDiskCache?.load() }
+
+    override suspend fun saveLibrarySnapshot(snapshot: LibrarySnapshot) {
+        withContext(ioDispatcher) { libraryDiskCache?.save(snapshot) }
+    }
 
     override suspend fun loadConnection(): SavedConnection = withContext(ioDispatcher) {
         registry.loadConnection()

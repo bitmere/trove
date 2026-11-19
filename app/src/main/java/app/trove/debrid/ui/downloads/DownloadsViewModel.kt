@@ -9,6 +9,7 @@ import app.trove.debrid.core.DownloadKind
 import app.trove.debrid.core.DownloadRef
 import app.trove.debrid.core.DownloadSort
 import app.trove.debrid.core.DownloadStatus
+import app.trove.debrid.core.LibrarySnapshot
 import app.trove.debrid.core.MediaCandidate
 import app.trove.debrid.core.MediaMetadata
 import app.trove.debrid.data.DownloadPage
@@ -128,6 +129,11 @@ class DownloadsViewModel(
     private var refreshJob: Job? = null
     private var refreshVersion = 0
     private var libraryProvider: DebridProvider? = null
+    // A restored prefix can be shorter than its saved server offset.
+    // Revalidate page 0 before appending so no uncached rows are skipped.
+    private val cachedTabs = mutableSetOf<DownloadKind>()
+    private var snapshotJob: Job? = null
+    private val snapshotWrites = Mutex()
     private var fileLookupJob: Job? = null
     private var playbackJob: Job? = null
     private var pageJobs = mutableMapOf<DownloadKind, Job>()
@@ -154,7 +160,7 @@ class DownloadsViewModel(
                 schedulePreparation(debounced = searchDebouncePending)
             }
         }
-        refresh()
+        refreshLibrary(showIndicator = true, fresh = false, restoreSnapshot = true)
     }
 
     fun refresh() = refresh(showIndicator = true, fresh = false)
@@ -170,8 +176,12 @@ class DownloadsViewModel(
      *  to 0, end-reached cleared) and reloads page 0 of the visible
      *  tab only; other tabs reload page 0 on first visit. Loaded rows
      *  stay visible until page 0 replaces them. */
-    fun refresh(showIndicator: Boolean = true, fresh: Boolean) {
+    fun refresh(showIndicator: Boolean = true, fresh: Boolean) =
+        refreshLibrary(showIndicator, fresh, restoreSnapshot = false)
+
+    private fun refreshLibrary(showIndicator: Boolean, fresh: Boolean, restoreSnapshot: Boolean) {
         refreshJob?.cancel()
+        cachedTabs.clear()
         cancelPageJobs()
         fullSyncJob?.cancel()
         fullSyncTab = null
@@ -191,6 +201,9 @@ class DownloadsViewModel(
                 if (version != refreshVersion) return@launch
                 _state.update { it.copy(preferWords = preferWords, showClutterFiles = showClutterFiles) }
                 val provider = connection.provider
+                val snapshot = if (restoreSnapshot && provider != null) readLibrarySnapshot() else null
+                if (version != refreshVersion) return@launch
+                val restored = provider != null && snapshot != null && restoreLibrary(provider, snapshot)
                 val accountLabel = connection.account?.label?.substringAfter('(')?.trimEnd(')')
                 if (libraryProvider !== provider) {
                     libraryProvider = null
@@ -223,7 +236,7 @@ class DownloadsViewModel(
                 }
                 libraryProvider = provider
                 _state.update { it.copy(signedOut = false, accountLabel = accountLabel) }
-                resetPagination(keepRows = true, currentTab = _state.value.tab)
+                if (!restored) resetPagination(keepRows = true, currentTab = _state.value.tab)
                 launchPage(provider, _state.value.tab, offset = 0, bypassCache = fresh,
                     version = version, replace = true)
             } catch (e: CancellationException) {
@@ -239,6 +252,58 @@ class DownloadsViewModel(
                     )
                 }
                 schedulePreparation(debounced = false)
+            }
+        }
+    }
+
+    private suspend fun readLibrarySnapshot(): LibrarySnapshot? =
+        try {
+            repository.loadLibrarySnapshot()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            null
+        }
+
+    private fun restoreLibrary(provider: DebridProvider, snapshot: LibrarySnapshot): Boolean {
+        if (snapshot.service != provider.service) return false
+        val tabs = freshPagedStates() + snapshot.tabs.mapValues { (_, tab) ->
+            PagedTabState(tab.rows, tab.nextOffset, tab.endReached, visited = true)
+        }
+        val rows = tabs.values.flatMap { it.loaded }
+        if (rows.isEmpty()) return false
+        // Set the provider before publishing so the refresh keeps these rows.
+        libraryProvider = provider
+        cachedTabs.addAll(snapshot.tabs.keys)
+        _state.update { it.copy(downloads = rows, pagedByTab = tabs, loading = false, refreshing = true) }
+        schedulePreparation(debounced = false)
+        return true
+    }
+
+    private fun scheduleSnapshotSave(provider: DebridProvider) {
+        snapshotJob?.cancel()
+        val tabs = _state.value.pagedByTab
+        snapshotJob = viewModelScope.launch {
+            delay(500)
+            val snapshot = LibrarySnapshot(
+                provider.service,
+                System.currentTimeMillis(),
+                tabs.filterValues { it.visited || it.loaded.isNotEmpty() }.mapValues { (_, tab) ->
+                    LibrarySnapshot.Tab(
+                        tab.loaded.take(LibrarySnapshot.MAX_ROWS_PER_TAB),
+                        tab.endReached,
+                        tab.nextOffset,
+                    )
+                },
+            )
+            snapshotWrites.withLock {
+                try {
+                    repository.saveLibrarySnapshot(snapshot)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    // The live library is already published.
+                }
             }
         }
     }
@@ -279,6 +344,7 @@ class DownloadsViewModel(
         fullSyncJob?.cancel()
         fullSyncTab = null
         ++refreshVersion
+        cachedTabs.clear()
         _state.update { it.copy(sort = sort, pendingAnchor = null) }
         resetPagination(keepRows = true, currentTab = _state.value.tab)
         schedulePreparation(debounced = false)
@@ -309,7 +375,13 @@ class DownloadsViewModel(
     fun loadNextPage(tab: DownloadKind = _state.value.tab) {
         val provider = libraryProvider ?: return
         val current = _state.value.pagedByTab[tab] ?: PagedTabState()
-        if (current.pageLoading || current.endReached) return
+        if (current.pageLoading) return
+        if (tab in cachedTabs) {
+            launchPage(provider, tab, offset = 0, bypassCache = false,
+                version = refreshVersion, replace = true)
+            return
+        }
+        if (current.endReached) return
         launchPage(provider, tab, offset = current.nextOffset, bypassCache = false,
             version = refreshVersion, replace = false)
     }
@@ -323,7 +395,8 @@ class DownloadsViewModel(
     private fun ensureTabLoaded(tab: DownloadKind) {
         val provider = libraryProvider ?: return
         val current = _state.value.pagedByTab[tab] ?: PagedTabState()
-        if (current.visited) {
+        if (tab in cachedTabs && current.pageLoading) return
+        if (current.visited && tab !in cachedTabs) {
             if (_state.value.query.isNotBlank()) ensureFullSync(tab)
             return
         }
@@ -344,7 +417,7 @@ class DownloadsViewModel(
         fullSyncJob = viewModelScope.launch {
             while (version == refreshVersion) {
                 val current = _state.value.pagedByTab[tab] ?: return@launch
-                if (current.endReached || current.pageError != null) return@launch
+                if (tab in cachedTabs || current.endReached || current.pageError != null) return@launch
                 if (current.pageLoading) {
                     delay(50)
                     continue
@@ -459,6 +532,8 @@ class DownloadsViewModel(
                 metadataOverrides = state.metadataOverrides.filterKeys(keep),
             )
         }
+        cachedTabs.remove(tab)
+        scheduleSnapshotSave(provider)
         schedulePreparation(debounced = false)
         if (offset == 0 && _state.value.query.isNotBlank()) ensureFullSync(tab)
         // Rows that still lack metadata after the publish need

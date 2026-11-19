@@ -3,6 +3,11 @@ package app.trove.debrid.ui
 import app.trove.debrid.R
 import androidx.compose.ui.res.stringResource
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
@@ -13,18 +18,20 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.unit.dp
+import app.trove.debrid.ui.theme.TroveElevation
+import app.trove.debrid.ui.theme.TroveSize
 import app.trove.debrid.ui.theme.TroveSpace
 
 /** Search and Add in the thumb zone. Search retains the optional
@@ -39,17 +46,42 @@ fun FloatingActions(
     /** Reports the Search button's position in root coordinates, so
      *  the captured backdrop can be aligned behind it. */
     onSearchPositioned: ((Offset) -> Unit)? = null,
+    goToTopVisible: Boolean = false,
+    onGoToTop: () -> Unit = {},
 ) {
     Column(
         modifier = modifier,
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
+        AnimatedVisibility(
+            visible = goToTopVisible,
+            enter = fadeIn() + expandVertically(),
+            exit = fadeOut() + shrinkVertically(),
+        ) {
+            Box(Modifier.padding(bottom = TroveSpace.medium)) {
+                IconButton(
+                    onClick = onGoToTop,
+                    modifier = Modifier
+                        .size(TroveSize.control)
+                        .shadow(TroveElevation.floating, CircleShape, ambientColor = MaterialTheme.colorScheme.scrim.copy(alpha = 0.14f))
+                        .clip(CircleShape)
+                        .border(TroveSize.outline, MaterialTheme.colorScheme.outlineVariant, CircleShape)
+                        .background(MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.92f)),
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.KeyboardArrowUp,
+                        contentDescription = stringResource(R.string.go_to_top),
+                        tint = MaterialTheme.colorScheme.onSurface,
+                    )
+                }
+            }
+        }
         Box(
             modifier = Modifier
-                .size(48.dp)
-                .shadow(app.trove.debrid.ui.theme.TroveElevation.floating, CircleShape, ambientColor = androidx.compose.material3.MaterialTheme.colorScheme.scrim.copy(alpha = 0.14f))
+                .size(TroveSize.control)
+                .shadow(TroveElevation.floating, CircleShape, ambientColor = MaterialTheme.colorScheme.scrim.copy(alpha = 0.14f))
                 .clip(CircleShape)
-                .border(1.dp, androidx.compose.material3.MaterialTheme.colorScheme.outlineVariant, CircleShape)
+                .border(TroveSize.outline, MaterialTheme.colorScheme.outlineVariant, CircleShape)
                 .then(
                     if (onSearchPositioned != null) {
                         Modifier.onGloballyPositioned { onSearchPositioned(it.localToRoot(Offset.Zero)) }
@@ -68,34 +100,34 @@ fun FloatingActions(
                         .matchParentSize()
                         .graphicsLayer { renderEffect = searchBackdrop.blurEffect }
                         .backdropImage(searchBackdrop.layer, searchBackdrop.offset,
-                            surfaceColor = androidx.compose.material3.MaterialTheme.colorScheme.surfaceContainerHigh,
+                            surfaceColor = MaterialTheme.colorScheme.surfaceContainerHigh,
                             isCurrent = searchBackdrop.isCurrent),
                 )
             } else {
                 Box(
                     modifier = Modifier
                         .matchParentSize()
-                        .background(androidx.compose.material3.MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.92f), CircleShape),
+                        .background(MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.92f), CircleShape),
                 )
             }
             IconButton(
                 onClick = onSearch,
-                modifier = Modifier.size(48.dp),
+                modifier = Modifier.size(TroveSize.control),
             ) {
                 Icon(
                     imageVector = Icons.Filled.Search,
                     contentDescription = stringResource(R.string.search),
-                    tint = androidx.compose.material3.MaterialTheme.colorScheme.onSurface,
+                    tint = MaterialTheme.colorScheme.onSurface,
                 )
             }
         }
         Box(modifier = Modifier.padding(top = TroveSpace.compact)) {
             androidx.compose.material3.FloatingActionButton(
                 onClick = onAdd,
-                modifier = Modifier.size(56.dp),
+                modifier = Modifier.size(TroveSize.floatingAction),
                 shape = CircleShape,
-                containerColor = androidx.compose.material3.MaterialTheme.colorScheme.primary,
-                contentColor = androidx.compose.material3.MaterialTheme.colorScheme.onPrimary,
+                containerColor = MaterialTheme.colorScheme.primary,
+                contentColor = MaterialTheme.colorScheme.onPrimary,
             ) {
                 Icon(
                     imageVector = Icons.Filled.Add,
