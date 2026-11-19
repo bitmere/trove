@@ -1,0 +1,17 @@
+{
+  "detector": {
+    "extensions": [
+      {
+        "engine": "text",
+        "ext": ".kt"
+      }
+    ]
+  },
+  "hook": {
+    "enabled": true,
+    "limits": {
+      "maxFindings": 5,
+      "maxChars": 8000
+    }
+  }
+}
