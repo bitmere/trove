@@ -204,7 +204,6 @@ jobs:
           name: trove-release-apk
           path: |
             ${{ runner.temp }}/trove-release/Trove-v*.apk
-            ${{ runner.temp }}/trove-release/Trove-v*.apk.sha256
           if-no-files-found: error
           retention-days: 7
       - name: Recheck remote approved tag and main before publication

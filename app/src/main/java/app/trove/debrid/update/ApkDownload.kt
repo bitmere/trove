@@ -163,6 +163,11 @@ class ApkDownload(private val stream: UpdateStream, private val beforeDownload: 
     }
 
     internal suspend fun checksum(release: LatestRelease): String {
+        if (release.sha256.isNotEmpty()) {
+            if (!UpdatePolicy.isHash(release.sha256)) throw UpdateException(UpdateIssue.MANIFEST)
+            return release.sha256
+        }
+        if (release.checksumUrl.isEmpty()) throw UpdateException(UpdateIssue.ASSETS)
         val name = "Trove-${release.tag}.apk"
         if (!UpdatePolicy.isAssetUrl(release.checksumUrl, release.tag, "$name.sha256")) {
             throw UpdateException(UpdateIssue.ASSETS)

@@ -30,6 +30,36 @@ class ApkDownloadTest {
         var closed = false
         override fun close() { input.close(); closed = true }
     }
+    @Test fun checksumReturnsNotesHashWithoutNetwork() = runTest {
+        val download = ApkDownload(UpdateStream { throw AssertionError("Unexpected checksum fetch") })
+        assertEquals(release.sha256, download.checksum(release))
+    }
+
+    @Test fun checksumFallsBackToStrictSidecar() = runTest {
+        val name = release.apkUrl.substringAfterLast('/')
+        val legacy = release.copy(sha256 = "")
+        val download = ApkDownload(UpdateStream {
+            assertEquals(legacy.checksumUrl, it.url)
+            Connection(input = body("${release.sha256}  $name\n"))
+        })
+        assertEquals(release.sha256, download.checksum(legacy))
+        val invalid = ApkDownload(UpdateStream { Connection(input = body("${release.sha256} $name \n")) })
+        val result = runCatching { invalid.checksum(legacy) }
+        assertEquals(UpdateIssue.ASSETS, (result.exceptionOrNull() as UpdateException).issue)
+    }
+
+    @Test fun checksumRejectsInvalidNotesHashWithoutNetwork() = runTest {
+        val download = ApkDownload(UpdateStream { throw AssertionError("Unexpected checksum fetch") })
+        val result = runCatching { download.checksum(release.copy(sha256 = release.sha256.uppercase())) }
+        assertEquals(UpdateIssue.MANIFEST, (result.exceptionOrNull() as UpdateException).issue)
+    }
+
+    @Test fun checksumRejectsMissingHashSourceWithoutNetwork() = runTest {
+        val download = ApkDownload(UpdateStream { throw AssertionError("Unexpected checksum fetch") })
+        val result = runCatching { download.checksum(release.copy(sha256 = "", checksumUrl = "")) }
+        assertEquals(UpdateIssue.ASSETS, (result.exceptionOrNull() as UpdateException).issue)
+    }
+
     @Test fun streamsKnownHashWithUnknownSizeAndCloses() = runTest {
         val connection = Connection()
         val file = ApkDownload(UpdateStream { assertEquals(release.apkUrl, it.url); connection }).download(temporary.root, release) { bytes, total ->
