@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.25 — 2026-11-19
+
+- Floating controls (PR 29): the go-to-top button moves into the floating action cluster, sharing its center line with Search and Add (16dp gap above Search), so it no longer overlaps Search; the cluster design is unchanged.
+- Library restore on cold start (PR 29): the last-loaded library is saved to disk and restored instantly when the app reopens, then refreshed in the background — no more full-screen spinner after minimize/reopen; offline cold start keeps the cached rows.
+- Providers as a visual list (PR 29): one row per provider with an initial-letter tile and signed-in status at a glance; tapping a provider opens its sign-in and details.
+- Baseline: 582 JVM tests, lint 0 errors.
+
 ## 0.1.24 — 2026-11-19
 
 - Core bundle (PR 27): API-layer and viewport paging (no more 1000-item cap), metadata enrichment (details sheet, durable metadata cache, candidate picker, TMDB opt-in), library performance fixes, provider-account unification, and test reorganization.
