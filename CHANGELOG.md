@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.26 — 2026-11-19
+
+- Impeccable design setup (PR 31): the Impeccable design skill/CLI is vendored into the repo (vendor submodule, Codex hooks, design docs) so UI work is reviewed against the same design checks; no app code changed.
+- Baseline: 582 JVM tests, lint 0 errors.
+
 ## 0.1.25 — 2026-11-19
 
 - Floating controls (PR 29): the go-to-top button moves into the floating action cluster, sharing its center line with Search and Add (16dp gap above Search), so it no longer overlaps Search; the cluster design is unchanged.
