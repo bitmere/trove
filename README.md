@@ -49,8 +49,8 @@ the Play Store.
 
 1. Open [Trove on GitHub Releases](https://github.com/bitmere/trove/releases)
    on your phone and download the latest `Trove-v<version>.apk`.
-   Each release also has a `.sha256` sidecar file with the APK's SHA-256
-   checksum, so you can verify the download if you want to.
+   New release pages list just the APK as a release asset. Use the SHA-256
+   in the release notes to verify your download.
 2. Open the APK. Android may ask you to allow installs from the browser
    first — allow it for the browser you downloaded from, then install.
 3. Open Trove and connect your TorBox account (see

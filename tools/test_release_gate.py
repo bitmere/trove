@@ -35,6 +35,37 @@ class PublicationGateTest(unittest.TestCase):
             with self.subTest(props=props, tag=tag), self.assertRaises(ValueError):
                 gate.metadata_values(props, notes, tag, 'true')
 
+    def test_reserved_sha256_marker(self):
+        for marker in ('SHA-256:', '  SHA-256: ' + 'a' * 64):
+            changelog = self.changelog.replace('- Manual updater', marker)
+            with self.subTest(marker=marker), self.assertRaisesRegex(ValueError, 'Reserved SHA-256 marker'):
+                gate.metadata_values(self.props, changelog, 'v0.1.15', 'true')
+
+    def test_sha256_notes_helpers(self):
+        notes = self.meta['notes']
+        sha = 'a' * 64
+        hashed = gate.notes_with_sha256(notes, sha)
+        self.assertTrue(hashed.endswith(f'SHA-256: {sha}\nAndroid-Version-Code: 15\n'))
+        self.assertIsNone(gate.sha256_from_notes(notes))
+        self.assertEqual(gate.sha256_from_notes(hashed.replace('\n', '\r\n')), sha)
+        with self.assertRaisesRegex(ValueError, 'already contain'):
+            gate.notes_with_sha256(hashed, sha)
+        for invalid in ('', sha[:-1], sha.upper(), sha + ' '):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, 'Invalid SHA-256 digest'):
+                gate.notes_with_sha256(notes, invalid)
+        with self.assertRaisesRegex(ValueError, 'Android-Version-Code'):
+            gate.notes_with_sha256('Notes only', sha)
+
+    def test_malformed_notes_hashes_fail_closed(self):
+        line = 'SHA-256: ' + 'a' * 64
+        trailer = 'Android-Version-Code: 15'
+        for prefix in (line[:-1], line.replace('a', 'A'), line + ' ', ' ' + line,
+                       line.replace(': ', ':  '), 'SHA-256:', f'{line}\n{line}', f'{line}\nNotes'):
+            with self.subTest(prefix=prefix), self.assertRaises(ValueError):
+                gate.sha256_from_notes(f'{prefix}\n{trailer}\n')
+        with self.assertRaisesRegex(ValueError, 'trailer'):
+            gate.sha256_from_notes(f'{line}\n{trailer}\nExtra')
+
     def test_channel_is_explicit_dispatch_boolean_without_release_channel_property(self):
         for channel, expected in [('true', True), ('false', False)]:
             self.assertEqual(gate.metadata_values(self.props, self.changelog, 'v0.1.15', channel)['prerelease'], expected)
@@ -162,10 +193,9 @@ class ReleaseLifecycleTest(unittest.TestCase):
         self.name = gate.filename(self.meta['versionName'])
         (self.work / self.name).write_bytes(b'synthetic-apk')
         self.sha = gate.digest(self.work / self.name)
-        (self.work / (self.name + '.sha256')).write_text(f'{self.sha}  {self.name}\n')
         (self.work / 'approved.txt').write_text(f'{(self.work / self.name).stat().st_size} {self.sha}\n')
         self.release = dict(id=123, tag_name=self.tag, target_commitish=self.source,
-                            name='Trove ' + self.tag, body=self.meta['notes'],
+                            name='Trove ' + self.tag, body=gate.notes_with_sha256(self.meta['notes'], self.sha),
                             draft=True, prerelease=True, assets=[],
                             html_url=f'{gate.RELEASES}/untagged-fixture')
         self.present = True
@@ -209,7 +239,7 @@ class ReleaseLifecycleTest(unittest.TestCase):
         if path == root + '/123' and method == 'PATCH':
             self.assertEqual(payload, {'draft': False, 'prerelease': self.meta['prerelease'],
                                        'make_latest': 'false' if self.meta['prerelease'] else 'true'})
-            self.assertEqual(len(self.release['assets']), 2)
+            self.assertEqual(len(self.release['assets']), 1)
             self.release.update(payload, html_url=f'{gate.RELEASES}/tag/{self.tag}')
             return copy.deepcopy(self.release)
         raise AssertionError((method, path))
@@ -218,9 +248,8 @@ class ReleaseLifecycleTest(unittest.TestCase):
         gate.publish_release(self.meta, self.tag, self.source, self.work)
 
     def add_untagged_assets(self):
-        for name in (self.name, self.name + '.sha256'):
-            asset = self.add_asset(name, (self.work / name).read_bytes())
-            asset['browser_download_url'] = f'{gate.RELEASES}/download/untagged-fd2fa925072f63caf707/{name}'
+        asset = self.add_asset(self.name, (self.work / self.name).read_bytes())
+        asset['browser_download_url'] = f'{gate.RELEASES}/download/untagged-fd2fa925072f63caf707/{self.name}'
         return self.release['assets']
 
     def test_validate_assets_accepts_untagged_urls_only_for_drafts(self):
@@ -241,7 +270,7 @@ class ReleaseLifecycleTest(unittest.TestCase):
         self.assertIsNone(self.server('repos/bitmere/trove/releases/tags/' + self.tag))
         self.publish()
         self.assertFalse(self.release['draft'])
-        self.assertEqual([a['name'] for a in self.release['assets']], [self.name, self.name + '.sha256'])
+        self.assertEqual([a['name'] for a in self.release['assets']], [self.name])
         self.assertFalse(any(method == 'POST' and path.endswith('/releases') for method, path, _ in self.calls))
         self.assertEqual(sum(method == 'PATCH' for method, _, _ in self.calls), 1)
         self.assertFalse(any(method == 'DELETE' for method, _, _ in self.calls))
@@ -249,6 +278,7 @@ class ReleaseLifecycleTest(unittest.TestCase):
     def test_create_captures_id_and_published_rerun_is_read_only(self):
         self.present = False
         self.publish()
+        self.assertEqual(gate.sha256_from_notes(self.release['body']), self.sha)
         self.calls.clear()
         self.publish()
         self.assertTrue(all(method == 'GET' for method, _, _ in self.calls))
@@ -265,12 +295,12 @@ class ReleaseLifecycleTest(unittest.TestCase):
             self.publish()
         self.assertFalse(self.release['draft'])
 
-    def test_partial_upload_reuses_exact_apk(self):
+    def test_existing_draft_upload_reuses_exact_apk(self):
         self.add_asset(self.name, (self.work / self.name).read_bytes())
         gate.recover(self.meta, self.tag, self.source, self.work)
         self.assertEqual((self.work / 'output').read_text(), 'reuse=true\n')
         self.publish()
-        self.assertEqual(sum(method == 'POST' for method, _, _ in self.calls), 1)
+        self.assertEqual(sum(method == 'POST' for method, _, _ in self.calls), 0)
 
     def test_existing_divergent_asset_is_never_overwritten_or_published(self):
         self.add_asset(self.name, b'different')
@@ -294,29 +324,47 @@ class ReleaseLifecycleTest(unittest.TestCase):
     def test_recovery_bootstrap_and_incomplete_draft(self):
         gate.recover(self.meta, self.tag, self.source, self.work)
         self.assertEqual((self.work / 'output').read_text(), 'reuse=false\n')
-        self.add_asset(self.name + '.sha256', (self.work / (self.name + '.sha256')).read_bytes())
-        with self.assertRaisesRegex(ValueError, 'no APK'):
+        self.add_asset('unexpected.zip', b'unexpected')
+        with self.assertRaisesRegex(ValueError, 'Unexpected release asset'):
             gate.recover(self.meta, self.tag, self.source, self.work)
+        self.assertEqual((self.work / 'output').read_text(), 'reuse=false\n')
 
     def test_published_recovery_never_rebuilds_missing_apk(self):
         self.release.update(draft=False, html_url=f'{gate.RELEASES}/tag/{self.tag}')
         with self.assertRaisesRegex(ValueError, 'refusing rebuild'):
             gate.recover(self.meta, self.tag, self.source, self.work)
 
-    def test_recover_draft_and_published_apk_checks_companion(self):
+    def test_recover_draft_and_published_apk_checks_notes_hash(self):
         apk = self.work / self.name
-        sidecar = self.work / (self.name + '.sha256')
-        self.add_asset(apk.name, apk.read_bytes())
+        asset = self.add_asset(apk.name, apk.read_bytes())
+        for draft in (True, False):
+            with self.subTest(draft=draft):
+                self.release.update(draft=draft, html_url=f'{gate.RELEASES}/tag/{self.tag}')
+                gate.recover(self.meta, self.tag, self.source, self.work)
+                original = self.blobs[asset['id']]
+                self.blobs[asset['id']] = bytes(asset['size'])
+                with self.assertRaisesRegex(ValueError, 'Recovered notes SHA-256 mismatch'):
+                    gate.recover(self.meta, self.tag, self.source, self.work)
+                self.blobs[asset['id']] = original
+
+    def test_recover_hashless_draft_but_reject_hashless_published_release(self):
+        self.release['body'] = self.meta['notes']
+        self.add_asset(self.name, (self.work / self.name).read_bytes())
         gate.recover(self.meta, self.tag, self.source, self.work)
         self.assertEqual((self.work / 'output').read_text(), 'reuse=true\n')
         self.release.update(draft=False, html_url=f'{gate.RELEASES}/tag/{self.tag}')
-        with self.assertRaisesRegex(ValueError, 'missing checksum'):
+        with self.assertRaisesRegex(ValueError, 'Published release missing notes SHA-256'):
             gate.recover(self.meta, self.tag, self.source, self.work)
-        asset = self.add_asset(sidecar.name, sidecar.read_bytes())
-        gate.recover(self.meta, self.tag, self.source, self.work)
-        self.blobs[asset['id']] = bytes(asset['size'])
-        with self.assertRaisesRegex(ValueError, 'checksum mismatch'):
-            gate.recover(self.meta, self.tag, self.source, self.work)
+
+    def test_publish_rejects_missing_or_mismatched_notes_hash_before_writes(self):
+        for draft in (True, False):
+            for body in (self.meta['notes'], gate.notes_with_sha256(self.meta['notes'], '0' * 64)):
+                with self.subTest(draft=draft, body=body):
+                    self.release.update(draft=draft, body=body, html_url=f'{gate.RELEASES}/tag/{self.tag}')
+                    with self.assertRaisesRegex(ValueError, 'Release notes/title mismatch'):
+                        self.publish()
+                    self.assertTrue(all(method == 'GET' for method, _, _ in self.calls))
+        gate.download_asset.assert_not_called()
 
     def test_new_stable_release_is_promoted_to_latest(self):
         self.present = False
@@ -347,7 +395,8 @@ class ReleaseLifecycleTest(unittest.TestCase):
                 self.publish()
 
     def test_malformed_and_duplicate_assets_rejected(self):
-        good = dict(id=1, name=self.name, size=5, state='uploaded')
+        good = dict(id=1, name=self.name, size=5, state='uploaded',
+                    browser_download_url=f'{gate.RELEASES}/download/{self.tag}/{self.name}')
         for assets in ([None], [good, good], [dict(good, id=None)], [dict(good, state='starter')],
                        [dict(good, size=0)], [dict(good, name=None)]):
             with self.subTest(assets=assets):
@@ -406,20 +455,33 @@ class ReleaseLifecycleTest(unittest.TestCase):
     def test_public_assets_metadata_and_download_are_required(self):
         self.publish()
         apk = self.work / self.name
-        def fetch(url, limit, dest=None):
-            if dest is None:
-                return (self.work / (self.name + '.sha256')).read_bytes()
+        def fetch(url, limit, dest):
+            self.assertEqual(url, f'{gate.RELEASES}/download/{self.tag}/{self.name}')
+            self.assertEqual(limit, apk.stat().st_size)
             dest.write_bytes(apk.read_bytes())
         with patch.object(gate, 'public_json', side_effect=[self.release, [self.release]]), \
-             patch.object(gate, 'public_fetch', side_effect=fetch):
-            gate.verify_public(self.meta, self.tag, self.source, self.work)
-        for changes in ({'draft': True}, {'prerelease': False}, {'body': 'wrong'}, {'assets': []}):
+             patch.object(gate, 'public_fetch', side_effect=fetch) as download:
+            gate.anonymous(self.meta, self.tag, self.source, self.work)
+        download.assert_called_once()
+        for changes in ({'draft': True}, {'prerelease': False}, {'body': 'wrong'}, {'assets': []},
+                        {'body': gate.notes_with_sha256(self.meta['notes'], '0' * 64)}):
             with patch.object(gate, 'public_json', return_value=dict(self.release, **changes)), \
+                 patch.object(gate, 'public_fetch', side_effect=AssertionError('Unexpected download')), \
                  self.assertRaises(ValueError):
                 gate.verify_public(self.meta, self.tag, self.source, self.work)
         with patch.object(gate, 'public_json', return_value=self.release), \
-             patch.object(gate, 'public_fetch', return_value=b'wrong'), \
-             self.assertRaisesRegex(ValueError, 'Public checksum differs'):
+             patch.object(gate, 'public_fetch', side_effect=lambda url, limit, dest: dest.write_bytes(bytes(limit))), \
+             self.assertRaisesRegex(ValueError, 'Public APK differs'):
+            gate.verify_public(self.meta, self.tag, self.source, self.work)
+
+    def test_public_release_with_sidecar_is_rejected(self):
+        self.publish()
+        self.add_asset(self.name + '.sha256', f'{self.sha}  {self.name}\n'.encode())
+        with self.assertRaisesRegex(ValueError, 'Unexpected release asset'):
+            gate.validate_assets(self.release['assets'], self.tag, draft=False)
+        with patch.object(gate, 'public_json', return_value=self.release), \
+             patch.object(gate, 'public_fetch', side_effect=AssertionError('Unexpected download')), \
+             self.assertRaisesRegex(ValueError, 'Unexpected release asset'):
             gate.verify_public(self.meta, self.tag, self.source, self.work)
 
     def test_anonymous_verification_retries_and_fails_closed(self):

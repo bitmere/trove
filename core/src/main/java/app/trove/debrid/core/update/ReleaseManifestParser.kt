@@ -12,6 +12,8 @@ class InvalidReleaseAssets : IllegalArgumentException()
 object ReleaseManifestParser {
     private val codeLine = Regex("Android-Version-Code: ([1-9][0-9]*)")
 
+    private val hashLine = Regex("SHA-256: ([0-9a-f]{64})")
+
     fun parse(text: String, channel: UpdateChannel): List<LatestRelease> {
         require(text.toByteArray(Charsets.UTF_8).size <= UpdatePolicy.MAX_MANIFEST_BYTES)
         return JsonReader(StringReader(text)).use { reader ->
@@ -67,6 +69,11 @@ object ReleaseManifestParser {
         val lines = fields.getValue("body").replace("\r\n", "\n").trimEnd('\n').split('\n')
         require(lines.count { it.trimStart().startsWith("Android-Version-Code") } == 1)
         val code = requireNotNull(codeLine.matchEntire(lines.last())).groupValues[1].toLong()
+        val hashCount = lines.count { it.trimStart().startsWith("SHA-256:") }
+        val hash = if (hashCount == 0) "" else {
+            require(hashCount == 1 && lines.size >= 2)
+            requireNotNull(hashLine.matchEntire(lines[lines.lastIndex - 1])).groupValues[1]
+        }
         val name = "Trove-$tag.apk"
         fun asset(expected: String, sizeRange: LongRange): Pair<String, Long> {
             val match = assets.singleOrNull { it["name"] == expected } ?: throw InvalidReleaseAssets()
@@ -79,8 +86,12 @@ object ReleaseManifestParser {
         }
         val (apk, size) = asset(name, 1..UpdatePolicy.MAX_APK_BYTES)
         val checksumSize = (67 + name.length).toLong()
-        val (checksum) = asset("$name.sha256", checksumSize..checksumSize)
-        return LatestRelease(tag.drop(1), code, apk, "", lines.dropLast(1).joinToString("\n").trimEnd(), size, tag, checksum)
+        val checksumName = "$name.sha256"
+        val checksumUrl = if (assets.any { it["name"] == checksumName }) {
+            asset(checksumName, checksumSize..checksumSize).first
+        } else ""
+        val notes = lines.dropLast(1 + hashCount).joinToString("\n").trimEnd()
+        return LatestRelease(tag.drop(1), code, apk, hash, notes, size, tag, checksumUrl)
     }
 
     private fun JsonReader.readFields(read: (String) -> Unit) {
