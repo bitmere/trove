@@ -59,6 +59,8 @@ def metadata_values(props, changelog, tag, channel):
     require(match and match[1].strip(), 'Missing reviewed changelog entry')
     require(not any(line.lstrip().startswith('Android-Version-Code') for line in match[1].splitlines()),
             'Reserved Android-Version-Code marker in changelog')
+    require(not any(line.lstrip().startswith('SHA-256:') for line in match[1].split('\n')),
+            'Reserved SHA-256 marker in changelog')
     notes = f'{match[1].strip()}\n\n{WARNING}\n\nAndroid-Version-Code: {raw_code}\n'
     return dict(versionName=version, versionCode=int(raw_code), prerelease=channel == 'true', notes=notes)
 
@@ -124,7 +126,7 @@ def api_list(path):
     raise ValueError('GitHub API pagination limit exceeded')
 
 
-def validate_release(release, meta, tag, source):
+def validate_release(release, meta, tag, source, expected_sha=None):
     require(isinstance(release, dict), 'Invalid release response')
     require(type(release.get('id')) is int and release['id'] > 0, 'Invalid release ID')
     require(type(release.get('draft')) is bool and type(release.get('prerelease')) is bool,
@@ -133,8 +135,11 @@ def validate_release(release, meta, tag, source):
     require(release.get('tag_name') == tag and release['prerelease'] == meta['prerelease'],
             'Release tag/channel mismatch')
     body = release.get('body')
-    require(release.get('name') == f'Trove {tag}' and isinstance(body, str)
-            and body.replace('\r\n', '\n').rstrip('\n') == meta['notes'].rstrip('\n'), 'Release notes/title mismatch')
+    require(release.get('name') == f'Trove {tag}' and isinstance(body, str), 'Release notes/title mismatch')
+    sha = sha256_from_notes(body) if expected_sha is None else expected_sha
+    expected_notes = meta['notes'] if sha is None else notes_with_sha256(meta['notes'], sha)
+    require(body.replace('\r\n', '\n').rstrip('\n') == expected_notes.replace('\r\n', '\n').rstrip('\n'),
+            'Release notes/title mismatch')
     if not release['draft']:
         require(release.get('html_url') == f'{RELEASES}/tag/{tag}', 'Unexpected release URL')
     require(run('git', 'rev-parse', f'refs/tags/{tag}^{{commit}}') == source, 'Release source mismatch')
@@ -153,8 +158,7 @@ def validate_assets(assets, tag, *, draft):
     for asset in assets:
         require(isinstance(asset, dict), 'Invalid release asset')
         name = asset.get('name')
-        require(name in (apk, apk + '.sha256'), 'Unexpected release asset')
-        size_limit = MAX_APK if name == apk else 67 + len(apk)
+        require(name == apk, 'Unexpected release asset')
         url = asset.get('browser_download_url')
         prefix = f'{RELEASES}/download/'
         draft_pattern = re.escape(prefix) + r'untagged-[A-Za-z0-9]+' + re.escape(f'/{name}')
@@ -163,8 +167,7 @@ def validate_assets(assets, tag, *, draft):
                 'Unexpected browser download URL')
         require(type(asset.get('id')) is int and asset['id'] > 0
                 and isinstance(asset.get('name'), str) and asset['name']
-                and type(asset.get('size')) is int and 0 < asset['size'] <= size_limit
-                and (name == apk or asset['size'] == size_limit)
+                and type(asset.get('size')) is int and 0 < asset['size'] <= MAX_APK
                 and asset.get('state') == 'uploaded', 'Invalid or incomplete release asset; refusing replacement')
         require(asset['name'] not in names and asset['id'] not in ids, 'Duplicate release asset')
         names.add(asset['name'])
@@ -172,7 +175,7 @@ def validate_assets(assets, tag, *, draft):
     return assets
 
 
-def release_state(meta, tag, source):
+def release_state(meta, tag, source, expected_sha=None):
     # GET-by-tag is documented for published releases; drafts can have an
     # untagged HTML URL despite the correct pending tag_name. Enumerate all pages.
     releases = api_list(f'{repository()}/releases')
@@ -181,12 +184,12 @@ def release_state(meta, tag, source):
     require(len(matches) <= 1, 'Ambiguous releases for tag; refusing publication')
     if not matches:
         return None
-    release = validate_release(matches[0], meta, tag, source)
+    release = validate_release(matches[0], meta, tag, source, expected_sha)
     return dict(release, assets=release_assets(release))
 
 
-def release_by_id(release_id, meta, tag, source):
-    release = validate_release(api(f'{repository()}/releases/{release_id}'), meta, tag, source)
+def release_by_id(release_id, meta, tag, source, expected_sha=None):
+    release = validate_release(api(f'{repository()}/releases/{release_id}'), meta, tag, source, expected_sha)
     require(release['id'] == release_id, 'Release ID changed')
     return dict(release, assets=release_assets(release))
 
@@ -209,12 +212,10 @@ def recover(meta, tag, source, work):
         local = work / apk['name']
         download_asset(apk, local)
         verify_apk(meta, local)
-        checksum = next((a for a in release['assets'] if a['name'] == local.name + '.sha256'), None)
-        require(release['draft'] or checksum is not None, 'Published release missing checksum')
-        if checksum:
-            sidecar = work / ('recovered-' + checksum['name'])
-            download_asset(checksum, sidecar)
-            require(sidecar.read_bytes() == checksum_bytes(local), 'Recovered checksum mismatch')
+        sha = sha256_from_notes(release['body'])
+        require(release['draft'] or sha is not None, 'Published release missing notes SHA-256')
+        if sha is not None:
+            require(sha == digest(local), 'Recovered notes SHA-256 mismatch')
     elif release:
         require(release['draft'], 'Published release missing APK; refusing rebuild')
         require(not release['assets'], 'Draft has assets but no APK; refusing divergent rebuild')
@@ -266,23 +267,25 @@ def check_assets(release, names, work):
 
 
 def publish_release(meta, tag, source, work):
+    apk, size, sha = approved_artifact(meta, work)
+    expected_notes = notes_with_sha256(meta['notes'], sha)
     check_history(meta, tag)
-    release = release_state(meta, tag, source)
+    release = release_state(meta, tag, source, sha)
     if release is None:
         try:
             created = api(f'{repository()}/releases', 'POST', dict(
                 tag_name=tag, target_commitish=source, name=f'Trove {tag}',
-                body=meta['notes'], draft=True, prerelease=meta['prerelease']))
+                body=expected_notes, draft=True, prerelease=meta['prerelease']))
         except APIError:
             # Creation can succeed server-side even if the response is lost.
-            release = release_state(meta, tag, source)
+            release = release_state(meta, tag, source, sha)
             if release is None:
                 raise
         else:
-            created = validate_release(created, meta, tag, source)
+            created = validate_release(created, meta, tag, source, sha)
             require(created['draft'], 'Create did not return a draft')
-            release = release_by_id(created['id'], meta, tag, source)
-    names = (filename(meta['versionName']), filename(meta['versionName']) + '.sha256')
+            release = release_by_id(created['id'], meta, tag, source, sha)
+    names = (apk.name,)
     for name in names:
         if any(a['name'] == name for a in release['assets']):
             check_assets(release, (name,), work)
@@ -291,15 +294,15 @@ def publish_release(meta, tag, source, work):
             # Address uploads and edits by ID, never by a tag or HTML pseudo-tag.
             api(f'https://uploads.github.com/{repository()}/releases/{release["id"]}/assets?name={quote(name)}',
                 'POST', upload=work / name)
-    release = release_by_id(release['id'], meta, tag, source)
+    release = release_by_id(release['id'], meta, tag, source, sha)
     check_assets(release, names, work)  # Read back exact uploaded bytes before un-drafting.
     if release['draft']:
         check_history(meta, tag)
-        approved_artifact(meta, work)
+        require(approved_artifact(meta, work) == (apk, size, sha), 'Approved APK changed')
         settings = {'draft': False, 'prerelease': meta['prerelease'],
                     'make_latest': 'false' if meta['prerelease'] else 'true'}
         api(f'{repository()}/releases/{release["id"]}', 'PATCH', settings)
-        published = release_by_id(release['id'], meta, tag, source)
+        published = release_by_id(release['id'], meta, tag, source, sha)
         require(not published['draft'], 'Release remains draft after publication')
         check_assets(published, names, work)
         (work / 'promoted').touch()
@@ -313,6 +316,28 @@ def version_code(body):
     match = re.fullmatch(r'Android-Version-Code: ([1-9][0-9]{0,18})', lines[-1])
     require(match is not None and int(match[1]) <= 2**63 - 1, 'Invalid Android-Version-Code trailer')
     return int(match[1])
+
+
+def sha256_from_notes(body):
+    require(isinstance(body, str), 'Invalid release body')
+    lines = body.replace('\r\n', '\n').rstrip('\n').split('\n')
+    count = sum(line.lstrip().startswith('SHA-256:') for line in lines)
+    if count == 0:
+        return None
+    version_code(body)
+    match = re.fullmatch(r'SHA-256: ([0-9a-f]{64})', lines[-2]) if len(lines) >= 2 else None
+    require(count == 1 and match is not None, 'Invalid SHA-256 line in release notes')
+    return match[1]
+
+
+def notes_with_sha256(notes, sha):
+    require(isinstance(sha, str) and re.fullmatch(r'[0-9a-f]{64}', sha), 'Invalid SHA-256 digest')
+    version_code(notes)
+    require(sha256_from_notes(notes) is None, 'Release notes already contain SHA-256')
+    body = notes.replace('\r\n', '\n')
+    stripped = body.rstrip('\n')
+    prefix, separator, trailer = stripped.rpartition('\n')
+    return f'{prefix}{separator}SHA-256: {sha}\n{trailer}' + body[len(stripped):]
 
 
 def check_history(meta, tag):
@@ -336,17 +361,11 @@ def check_history(meta, tag):
     require(published_target or meta['versionCode'] > highest, 'New release must increase Android versionCode')
 
 
-def checksum_bytes(apk):
-    return f'{digest(apk)}  {apk.name}\n'.encode('ascii')
-
-
 def approved_artifact(meta, work):
     apk = work / filename(meta['versionName'])
     size, sha = (work / 'approved.txt').read_text().split()
     require(0 < int(size) <= MAX_APK and apk.stat().st_size == int(size) and digest(apk) == sha,
             'Approved APK changed')
-    require((work / (apk.name + '.sha256')).read_bytes() == f'{sha}  {apk.name}\n'.encode('ascii'),
-            'Approved checksum changed')
     return apk, int(size), sha
 
 
@@ -389,14 +408,12 @@ def public_json(url):
 
 def verify_public(meta, tag, source, work):
     apk, size, sha = approved_artifact(meta, work)
-    release = validate_release(public_json(f'{PUBLIC_API}/tags/{tag}'), meta, tag, source)
+    release = validate_release(public_json(f'{PUBLIC_API}/tags/{tag}'), meta, tag, source, sha)
     require(not release['draft'], 'Public release is a draft')
     assets = {a['name']: a for a in validate_assets(release.get('assets'), tag, draft=release['draft'])}
-    sidecar = apk.name + '.sha256'
-    require(set(assets) == {apk.name, sidecar} and assets[apk.name]['size'] == size,
+    require(set(assets) == {apk.name} and assets[apk.name]['size'] == size,
             'Public release asset names or sizes differ')
-    require(public_fetch(assets[sidecar]['browser_download_url'], assets[sidecar]['size'])
-            == (work / sidecar).read_bytes(), 'Public checksum differs')
+    require(sha256_from_notes(release['body']) == sha, 'Public notes SHA-256 differs')
     dest = work / ('public-' + apk.name)
     public_fetch(assets[apk.name]['browser_download_url'], size, dest)
     require(dest.stat().st_size == size and digest(dest) == sha, 'Public APK differs')
@@ -447,10 +464,8 @@ def main():
         verify_apk(meta, apk)
         check_history(meta, tag)
         sha = digest(apk)
-        (work / (apk.name + '.sha256')).write_bytes(checksum_bytes(apk))
         (work / 'approved.txt').write_text(f'{apk.stat().st_size} {sha}\n')
     elif args.command == 'publish':
-        approved_artifact(meta, work)
         publish_release(meta, tag, source, work)
     else:
         anonymous(meta, tag, source, work)

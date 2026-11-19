@@ -1,6 +1,6 @@
 # Trove distribution
 
-Signed APKs and their checksum files are published at
+Signed APKs are published at
 [Trove GitHub Releases](https://github.com/bitmere/trove/releases).
 
 In Settings, tap **Check for updates**. Stable is the default and uses the
@@ -37,11 +37,12 @@ with DN `CN=Trove, O=Trove, C=IN`. GitHub Actions signs the optimized APK.
 Validation runs without signing credentials.
 
 The non-empty changelog entry becomes the release notes, followed by the
-clean-install guidance and one terminal `Android-Version-Code: <positive decimal>`
-line. Reserve that line for the workflow. Each release contains
-`Trove-v<versionName>.apk` and its `.sha256` sibling. The sidecar contains
-64 lowercase hex characters, two spaces, the exact APK basename, and a
-terminal LF.
+clean-install guidance, a `SHA-256: <64 lowercase hex>` line, and one terminal
+`Android-Version-Code: <positive decimal>` line. Reserve both markers for the
+release gate. New release pages list only `Trove-v<versionName>.apk` as a
+release asset. The updater reads the SHA-256 from the release notes and falls
+back to the `.sha256` sidecar for previously published releases that still
+carry one (0.1.18–0.1.23).
 
 The gate reconciles existing drafts and published releases by ID. It verifies
 the approved bytes before publishing, sets approved stable releases as latest,

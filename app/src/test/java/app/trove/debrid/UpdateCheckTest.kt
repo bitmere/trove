@@ -14,18 +14,29 @@ class UpdateCheckTest {
     private val hash = "a".repeat(64)
     private val stable = UpdateChannel.STABLE
     private val beta = UpdateChannel.BETA
-    private fun fixture(version: String, code: Long, prerelease: Boolean): String {
+    private fun fixture(
+        version: String,
+        code: Long,
+        prerelease: Boolean,
+        notesHash: String? = null,
+        sidecar: Boolean = true,
+    ): String {
         val tag = "v$version"
         val name = "Trove-$tag.apk"
         val releases = "https://github.com/bitmere/trove/releases"
         val url = "$releases/download/$tag/$name"
-        return """{"tag_name":"$tag","name":"Trove $tag","body":"Notes\nAndroid-Version-Code: $code",
+        val hashLine = notesHash?.let { """SHA-256: $it\n""" }.orEmpty()
+        val checksumAsset = """,{"name":"$name.sha256","state":"uploaded","size":${67 + name.length},"browser_download_url":"$url.sha256"}"""
+        return """{"tag_name":"$tag","name":"Trove $tag","body":"Notes\n${hashLine}Android-Version-Code: $code",
             "draft":false,"prerelease":$prerelease,"html_url":"$releases/tag/$tag","assets":[
-            {"name":"$name","state":"uploaded","size":3,"browser_download_url":"$url"},
-            {"name":"$name.sha256","state":"uploaded","size":${67 + name.length},"browser_download_url":"$url.sha256"}]}"""
+            {"name":"$name","state":"uploaded","size":3,"browser_download_url":"$url"}${if (sidecar) checksumAsset else ""}]}"""
     }
 
-    private fun checker(badChecksum: Boolean = false, response: (HttpRequest) -> HttpResponse): UpdateCheck {
+    private fun checker(
+        badChecksum: Boolean = false,
+        expectChecksumFetch: Boolean = true,
+        response: (HttpRequest) -> HttpResponse,
+    ): UpdateCheck {
         val transport = object : HttpTransport {
             override suspend fun execute(request: HttpRequest): HttpResponse {
                 assertEquals(UPDATE_NO_CACHE_HEADERS, request.headers)
@@ -33,6 +44,7 @@ class UpdateCheckTest {
             }
         }
         return UpdateCheck(transport, ApkDownload(UpdateStream { request ->
+            assertTrue("Unexpected checksum fetch", expectChecksumFetch)
             assertEquals(UPDATE_NO_CACHE_HEADERS, request.headers)
             assertTrue(request.url.startsWith("https://github.com/bitmere/trove/releases/download/"))
             val basename = request.url.substringAfterLast('/').removeSuffix(".sha256")
@@ -55,6 +67,28 @@ class UpdateCheckTest {
         val result = check.check(19, stable) as UpdateCheckResult.Available
         assertEquals(hash, result.release.sha256)
         assertEquals(UpdateCheckResult.UpToDate, check.check(20, stable))
+    }
+
+    @Test fun offersNotesHashWithoutFetchingChecksum() = runTest {
+        val check = checker(expectChecksumFetch = false) {
+            HttpResponse(200, fixture("0.2.0", 20, false, notesHash = hash, sidecar = false))
+        }
+        val result = check.check(19, stable) as UpdateCheckResult.Available
+        assertEquals(hash, result.release.sha256)
+    }
+
+    @Test fun malformedNotesHashFailsEvenWithSidecar() = runTest {
+        val check = checker(expectChecksumFetch = false) {
+            HttpResponse(200, fixture("0.2.0", 20, false, notesHash = hash.dropLast(1)))
+        }
+        assertEquals(UpdateCheckResult.Error(UpdateIssue.MANIFEST), check.check(19, stable))
+    }
+
+    @Test fun missingHashSourceFailsWithoutFetchingChecksum() = runTest {
+        val check = checker(expectChecksumFetch = false) {
+            HttpResponse(200, fixture("0.2.0", 20, false, sidecar = false))
+        }
+        assertEquals(UpdateCheckResult.Error(UpdateIssue.ASSETS), check.check(19, stable))
     }
 
     @Test fun betaUsesHighestCodeAcrossPagesAndChannels() = runTest {
