@@ -11,6 +11,7 @@ import app.trove.debrid.core.DownloadStatus
 import app.trove.debrid.data.TroveRepository
 import app.trove.debrid.data.defaultPreferWords
 import app.trove.debrid.ui.downloads.DownloadsViewModel
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -24,6 +25,7 @@ import kotlinx.coroutines.test.setMain
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotSame
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -155,6 +157,59 @@ class DownloadsViewModelTest {
         advanceUntilIdle()
         assertEquals("https://example.com/play/abc123", vm.state.value.playUrl)
         assertNull(vm.state.value.filePicker)
+    }
+
+    @Test
+    fun `play still works on a download replaced by a sort`() = runTest {
+        val provider = FakeProvider(downloads = mutableListOf(sampleDownload(fileCount = 1)))
+        val vm = viewModel(FakeRepository(provider = provider))
+        advanceUntilIdle()
+        val captured = vm.state.value.downloads.first()
+        // A sort republishes fresh instances, as production deserialization
+        // does: same (kind, id), different object.
+        provider.downloads = provider.downloads.map { it.copy() }.toMutableList()
+        vm.setSort(DownloadSort.OLDEST)
+        advanceUntilIdle()
+        val republished = vm.state.value.downloads.first()
+        assertNotSame(captured, republished)
+        assertEquals(captured.id, republished.id)
+        // The card's tap lambda still captures the pre-sort instance, and
+        // the screen gates Play on isCurrentDownload — the tap must still
+        // reach the download it was aimed at.
+        assertTrue(vm.isCurrentDownload(captured))
+        if (vm.isCurrentDownload(captured)) vm.play(captured)
+        advanceUntilIdle()
+        assertEquals(provider.playUrl, vm.state.value.playUrl)
+    }
+
+    @Test
+    fun `cancelled file lookup clears the resolving state`() = runTest {
+        val provider = FakeProvider(downloads = mutableListOf(sampleDownload(fileCount = 0)))
+        provider.getDownloadFailure = CancellationException("lookup cancelled")
+        val vm = viewModel(FakeRepository(provider = provider))
+        advanceUntilIdle()
+        vm.openDownload(vm.state.value.downloads.first())
+        advanceUntilIdle()
+        // Without the finally, the rethrown cancellation skipped the
+        // clearing update and resolvingDownload stuck, disabling Play.
+        assertNull(vm.state.value.resolvingDownload)
+        assertNull(vm.state.value.playUrl)
+    }
+
+    @Test
+    fun `cancelled playback clears the resolving state`() = runTest {
+        val provider = FakeProvider(downloads = mutableListOf(sampleDownload(fileCount = 1)))
+        provider.throwOnStreamUrl = CancellationException("playback cancelled")
+        val vm = viewModel(FakeRepository(provider = provider))
+        advanceUntilIdle()
+        val download = vm.state.value.downloads.first()
+        vm.playFile(download, "1")
+        advanceUntilIdle()
+        // Without the finally, the rethrown cancellation skipped the fold
+        // and resolvingDownload/resolvingFileId stuck, disabling Play.
+        assertNull(vm.state.value.resolvingDownload)
+        assertNull(vm.state.value.resolvingFileId)
+        assertNull(vm.state.value.playUrl)
     }
 
     @Test

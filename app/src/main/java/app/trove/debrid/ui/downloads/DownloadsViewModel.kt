@@ -786,23 +786,35 @@ class DownloadsViewModel(
         }
     }
 
-    /** A click or sheet animation can finish after the library has been replaced. */
+    /** A click or sheet animation can finish after the library has been replaced.
+     *  Sorts and refreshes republish fresh instances of the same downloads, so
+     *  identity is structural, not referential: a tap captured before a sort
+     *  must still reach the download it was aimed at. But a row from a
+     *  replacement account must not count as current even when its (kind, id)
+     *  collides with the old row's — the records differ, so `==` keeps the
+     *  account-switch guard that `===` used to provide. */
     internal fun isCurrentDownload(download: DebridDownload): Boolean {
         val current = _state.value
-        return current.filePicker === download || current.downloads.any { it === download }
+        return current.filePicker == download ||
+            current.downloads.any { it == download }
     }
 
     private fun loadFiles(download: DebridDownload, autoPlay: Boolean) {
-        _state.update { it.copy(resolvingDownload = download.kind to download.id,
+        val key = download.kind to download.id
+        _state.update { it.copy(resolvingDownload = key,
             filePicker = if (autoPlay) it.filePicker else download, error = null) }
         val source = libraryProvider
         fileLookupJob = viewModelScope.launch {
+            // Auto-play hands the resolving state to playFile: the lookup's
+            // own completion must not clear it from under the playback job.
+            var handedOffToPlayback = false
             try {
                 val provider = requireCurrentProvider(source)
                 val detail = provider.getDownload(app.trove.debrid.core.DownloadRef(download.kind, download.id)).getOrThrow()
                 ensureActive()
                 if (autoPlay && detail.files.isNotEmpty()) {
                     _state.update { it.copy(resolvingDownload = null) }
+                    handedOffToPlayback = true
                     play(detail)
                 }
                 else {
@@ -819,6 +831,14 @@ class DownloadsViewModel(
                 ensureActive()
                 _state.update { it.copy(resolvingDownload = null, error = userMessage(e, "Couldn't load download files"),
                     authenticationRequired = e is DebridError.AuthInvalid) }
+            } finally {
+                // A cancelled lookup rethrew before the clearing update, which
+                // left resolvingDownload stuck and the Play button disabled.
+                // Clear only this lookup's key: a newer lookup for another
+                // download, or a handed-off playback, keeps its own state.
+                if (!handedOffToPlayback) {
+                    _state.update { s -> if (s.resolvingDownload == key) s.copy(resolvingDownload = null) else s }
+                }
             }
         }
     }
@@ -839,30 +859,41 @@ class DownloadsViewModel(
             error = null, playUrl = null, authenticationRequired = false) }
         val source = libraryProvider
         playbackJob = viewModelScope.launch {
-            val result = try {
-                val provider = requireCurrentProvider(source)
-                repository.play(provider, download, fileId).mapCatching { stream ->
-                    val uri = URI(stream.url)
-                    require(uri.scheme in listOf("https", "http") && !uri.host.isNullOrBlank())
-                    stream
-                }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                Result.failure(e)
-            }
-            ensureActive()
-            result.exceptionOrNull()?.let { if (it is CancellationException) throw it }
-            result.fold(
-                onSuccess = { _state.update { s -> s.copy(playUrl = it.url, askEveryTime = askEveryTime, playFileName = download.files.first { file -> file.id == fileId }.name,
-                    resolvingDownload = null, resolvingFileId = null) } },
-                onFailure = { e ->
-                    _state.update {
-                        it.copy(resolvingDownload = null, resolvingFileId = null, error = userMessage(e, "Couldn't start playback"),
-                            authenticationRequired = e is DebridError.AuthInvalid)
+            val key = download.kind to download.id
+            try {
+                val result = try {
+                    val provider = requireCurrentProvider(source)
+                    repository.play(provider, download, fileId).mapCatching { stream ->
+                        val uri = URI(stream.url)
+                        require(uri.scheme in listOf("https", "http") && !uri.host.isNullOrBlank())
+                        stream
                     }
-                },
-            )
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Result.failure(e)
+                }
+                ensureActive()
+                result.exceptionOrNull()?.let { if (it is CancellationException) throw it }
+                result.fold(
+                    onSuccess = { _state.update { s -> s.copy(playUrl = it.url, askEveryTime = askEveryTime, playFileName = download.files.first { file -> file.id == fileId }.name,
+                        resolvingDownload = null, resolvingFileId = null) } },
+                    onFailure = { e ->
+                        _state.update {
+                            it.copy(resolvingDownload = null, resolvingFileId = null, error = userMessage(e, "Couldn't start playback"),
+                                authenticationRequired = e is DebridError.AuthInvalid)
+                        }
+                    },
+                )
+            } finally {
+                // A cancelled playback rethrew before the fold, which left
+                // resolvingDownload stuck and the Play button disabled.
+                // Clear only this playback's key and file: a newer playback
+                // keeps its own state.
+                _state.update { s ->
+                    if (s.resolvingDownload == key && s.resolvingFileId == fileId) s.copy(resolvingDownload = null, resolvingFileId = null) else s
+                }
+            }
         }
     }
 
