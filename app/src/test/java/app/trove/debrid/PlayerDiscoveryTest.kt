@@ -50,4 +50,14 @@ class PlayerDiscoveryTest {
             assertFalse("Playback must not expose the bearer link", playback.contains(forbidden))
         }
     }
+
+    @Test
+    fun `type comes from filename even for extensionless signed URLs`() {
+        assertEquals("video/x-matroska", playbackMimeType("Folder/Movie.MKV"))
+        assertEquals("video/mp4", playbackMimeType("episode.m4v"))
+        assertEquals("video/mp2t", playbackMimeType("movie.m2ts"))
+        assertEquals("video/webm", playbackMimeType("clip.webm"))
+        assertEquals("video/*", playbackMimeType(null))
+        assertEquals("video/*", playbackMimeType("unknown"))
+    }
 }

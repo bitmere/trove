@@ -47,8 +47,8 @@ class AllDebridProvider(
 
     override suspend fun validateAccount(): Result<AccountInfo> = runCatching {
         val user = call("GET", "/v4/user").get("user") as? JsonObject ?: throw unreadableResponse()
-        val premium = user.value("isPremium") == "true"
-        AccountInfo(user.value("username"), premium, if (premium) "Premium" else "Free")
+        val premium = user.optNonBlankString("isPremium") == "true"
+        AccountInfo(user.optNonBlankString("username"), premium, if (premium) "Premium" else "Free")
     }.mapError()
 
     override suspend fun listDownloads(): Result<List<DebridDownload>> = runCatching {
@@ -58,7 +58,7 @@ class AllDebridProvider(
                 "POST", "/v4/magnet/files",
                 multipart = magnets.map { MultipartPart("id[]", null, it.id.toByteArray(), "text/plain") },
             ).objects("magnets").mapNotNull { magnet ->
-                magnet.value("id")?.let { id -> id to magnet.files().map { it.second } }
+                magnet.optNonBlankString("id")?.let { id -> id to magnet.files().map { it.second } }
             }.toMap()
         } catch (e: CancellationException) {
             throw e
@@ -66,7 +66,7 @@ class AllDebridProvider(
             emptyMap()
         }
         val links = savedLinks().map { (link, entry) ->
-            webDownload(link, entry.value("filename"), entry.long("size"), entry.epochMs("date"))
+            webDownload(link, entry.optNonBlankString("filename"), entry.optLong("size"), entry.epochMs("date"))
         }
         val torrents = magnets.map { it.copy(files = filesByMagnet[it.id].orEmpty()) }
         (torrents + links).sortedByDescending { it.createdAtEpochMs ?: Long.MIN_VALUE }
@@ -75,7 +75,7 @@ class AllDebridProvider(
     override suspend fun getDownload(id: String): Result<DebridDownload> = runCatching {
         if (id.startsWith(WEB_PREFIX)) {
             val (link, entry) = savedLink(id)
-            webDownload(link, entry.value("filename"), entry.long("size"), entry.epochMs("date"))
+            webDownload(link, entry.optNonBlankString("filename"), entry.optLong("size"), entry.epochMs("date"))
         } else {
             magnet(id).toTorrent()
         }
@@ -101,7 +101,7 @@ class AllDebridProvider(
                 val unlocked = unlock(link)
                 directLink(unlocked)
                 call("POST", "/v4/user/links/save", mapOf("links[]" to link))
-                webDownload(link, unlocked.value("filename"), unlocked.long("filesize"), SystemClock.nowMillis())
+                webDownload(link, unlocked.optNonBlankString("filename"), unlocked.optLong("filesize"), SystemClock.nowMillis())
             }
             is AddInput.Nzb, is AddInput.NzbUrl ->
                 throw DebridError.UnsupportedCapability("AllDebrid has no Usenet support")
@@ -145,7 +145,7 @@ class AllDebridProvider(
         Result.success(false)
     }
 
-    suspend fun hosterDomains(): Set<String> = domainsMutex.withLock {
+    override suspend fun hosterDomains(): Set<String> = domainsMutex.withLock {
         if (SystemClock.nowMillis() >= domainsExpireAt) {
             val domains = call("GET", "/v4/hosts/domains", authenticated = false).get("hosts") as? JsonArray
                 ?: throw unreadableResponse()
@@ -161,8 +161,8 @@ class AllDebridProvider(
 
     private suspend fun finishUpload(entry: JsonObject): DebridDownload {
         (entry.get("error") as? JsonObject)?.let { throw apiError(it, "upload-failed") }
-        val id = resourceId(entry.value("id") ?: throw unreadableResponse())
-        if (entry.value("ready") == "true") return entry.toTorrent(DownloadStatus.READY)
+        val id = resourceId(entry.optNonBlankString("id") ?: throw unreadableResponse())
+        if (entry.optNonBlankString("ready") == "true") return entry.toTorrent(DownloadStatus.READY)
         try {
             repeat(MAX_POLLS) { attempt ->
                 if (attempt > 0) delay(pollDelayMs)
@@ -199,12 +199,12 @@ class AllDebridProvider(
     private suspend fun magnet(id: String): JsonObject {
         val verifiedId = resourceId(id)
         return call("POST", MAGNET_STATUS, mapOf("id" to verifiedId)).objects("magnets")
-            .firstOrNull { it.value("id") == verifiedId } ?: throw DebridError.NotCached()
+            .firstOrNull { it.optNonBlankString("id") == verifiedId } ?: throw DebridError.NotCached()
     }
 
     private suspend fun savedLinks(): List<Pair<String, JsonObject>> =
         call("GET", "/v4/user/links").objects("links").mapNotNull { entry ->
-            entry.value("link")?.takeIf { httpUri(it) != null && !containsKey(it) }?.let { it to entry }
+            entry.optNonBlankString("link")?.takeIf { httpUri(it) != null && !containsKey(it) }?.let { it to entry }
         }
 
     private suspend fun savedLink(id: String): Pair<String, JsonObject> =
@@ -216,15 +216,15 @@ class AllDebridProvider(
     }
 
     private suspend fun directLink(unlocked: JsonObject): String {
-        val delayed = unlocked.long("delayed")?.takeIf { it > 0 }
-        if (delayed == null) return checkedLink(unlocked.value("link"))
+        val delayed = unlocked.optLong("delayed")?.takeIf { it > 0 }
+        if (delayed == null) return checkedLink(unlocked.optNonBlankString("link"))
         repeat(MAX_POLLS) {
             // The API asks for at least five seconds between delayed-link checks.
             delay(pollDelayMs.coerceAtLeast(5_000L))
             val data = call("POST", "/v4/link/delayed", mapOf("id" to delayed.toString()))
-            when (data.value("status")) {
+            when (data.optNonBlankString("status")) {
                 "1" -> Unit
-                "2" -> return checkedLink(data.value("link"))
+                "2" -> return checkedLink(data.optNonBlankString("link"))
                 else -> throw DebridError.Provider("delayed-link-failed", "AllDebrid could not generate the link")
             }
         }
@@ -232,12 +232,12 @@ class AllDebridProvider(
     }
 
     private fun JsonObject.toTorrent(status: DownloadStatus = magnetStatus()): DebridDownload {
-        val size = long("size")
-        val downloaded = long("downloaded") ?: 0
+        val size = optLong("size")
+        val downloaded = optLong("downloaded") ?: 0
         return DebridDownload(
-            id = resourceId(value("id") ?: throw unreadableResponse()),
+            id = resourceId(optNonBlankString("id") ?: throw unreadableResponse()),
             service = service,
-            name = value("filename") ?: value("name") ?: "Torrent",
+            name = optNonBlankString("filename") ?: optNonBlankString("name") ?: "Torrent",
             sizeBytes = size,
             status = status,
             progress = when {
@@ -248,17 +248,17 @@ class AllDebridProvider(
             files = files().map { it.second },
             kind = DownloadKind.TORRENT,
             createdAtEpochMs = epochMs("uploadDate"),
-            downloadSpeedBytesPerSec = long("downloadSpeed"),
-            seeds = value("seeders")?.toIntOrNull(),
+            downloadSpeedBytesPerSec = optLong("downloadSpeed"),
+            seeds = optInt("seeders"),
         )
     }
 
-    private fun JsonObject.magnetStatus(): DownloadStatus = when (value("statusCode")?.toIntOrNull()) {
+    private fun JsonObject.magnetStatus(): DownloadStatus = when (optInt("statusCode")) {
         0 -> DownloadStatus.QUEUED
         in 1..3 -> DownloadStatus.DOWNLOADING
         4 -> DownloadStatus.READY
         in 5..15 -> DownloadStatus.ERROR
-        else -> when (value("status")?.lowercase()) {
+        else -> when (optNonBlankString("status")?.lowercase()) {
             "ready" -> DownloadStatus.READY
             "downloading" -> DownloadStatus.DOWNLOADING
             "in queue", "queued", "waiting" -> DownloadStatus.QUEUED
@@ -270,13 +270,13 @@ class AllDebridProvider(
     private fun JsonObject.files(): List<Pair<String, DebridFile>> = buildList {
         fun visit(entries: JsonArray, parent: String) {
             for (entry in entries.filterIsInstance<JsonObject>()) {
-                val name = entry.value("n") ?: continue
+                val name = entry.optNonBlankString("n") ?: continue
                 val path = parent + name
                 val children = entry.get("e") as? JsonArray
                 if (children != null) visit(children, "$path/")
-                val link = entry.value("l")?.takeIf { httpUri(it) != null && !containsKey(it) } ?: continue
+                val link = entry.optNonBlankString("l")?.takeIf { httpUri(it) != null && !containsKey(it) } ?: continue
                 // The tree has no file IDs. Hash the path to avoid exposing bearer links.
-                add(link to DebridFile(opaqueId(path), name, entry.long("s") ?: 0, path))
+                add(link to DebridFile(opaqueId(path), name, entry.optLong("s") ?: 0, path))
             }
         }
         (get("files") as? JsonArray)?.let { visit(it, "") }
@@ -314,18 +314,18 @@ class AllDebridProvider(
         }
         if (response.status == 401) throw DebridError.AuthInvalid()
         val envelope = runCatching { JsonParser.parseString(response.body) }.getOrNull() as? JsonObject
-        if (response.status !in 200..299 || envelope?.value("status") == "error") {
+        if (response.status !in 200..299 || envelope?.optNonBlankString("status") == "error") {
             throw apiError(envelope?.get("error") as? JsonObject, "http${response.status}")
         }
-        if (envelope?.value("status") != "success") throw unreadableResponse()
+        if (envelope?.optNonBlankString("status") != "success") throw unreadableResponse()
         return envelope.get("data") as? JsonObject ?: throw unreadableResponse()
     }
 
     private fun apiError(error: JsonObject?, fallbackCode: String): DebridError {
-        val code = error?.value("code")
+        val code = error?.optNonBlankString("code")
         if (code?.startsWith("AUTH_") == true) return DebridError.AuthInvalid()
         val safeCode = code?.takeIf { it.matches(ERROR_CODE) && !containsKey(it) } ?: fallbackCode
-        return DebridError.Provider(safeCode, safeDetail(error?.value("message")))
+        return DebridError.Provider(safeCode, safeDetail(error?.optNonBlankString("message")))
     }
 
     private fun safeDetail(message: String?): String {
@@ -363,21 +363,11 @@ class AllDebridProvider(
     private fun JsonObject.objects(key: String): List<JsonObject> =
         (get(key) as? JsonArray)?.filterIsInstance<JsonObject>() ?: throw unreadableResponse()
 
-    private fun JsonObject.value(key: String): String? =
-        get(key)?.takeIf { it.isJsonPrimitive }?.asString?.takeIf(String::isNotBlank)
-
-    private fun JsonObject.long(key: String): Long? = value(key)?.toLongOrNull()
-    private fun JsonObject.epochMs(key: String): Long? = long(key)
+    private fun JsonObject.epochMs(key: String): Long? = optLong(key)
         ?.takeIf { it in 1..Long.MAX_VALUE / 1000 }?.times(1000)
 
     private fun unreadableResponse() =
         DebridError.Provider("bad-response", "AllDebrid returned an unreadable response")
-
-    private fun <T> Result<T>.mapError(): Result<T> {
-        val failure = exceptionOrNull() ?: return this
-        if (failure is CancellationException || failure !is Exception) throw failure
-        return Result.failure(if (failure is DebridError) failure else DebridError.Network(failure))
-    }
 
     companion object {
         const val BASE = "https://api.alldebrid.com"

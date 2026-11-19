@@ -34,6 +34,20 @@ Run focused tests first, then collect edits before the full verification:
   and happens only in GitHub Actions; `:app:assembleRelease` and
   `:app:bundleRelease` are not local artifact-producing commands.
 
+## Debug-only convention
+
+`./gradlew test` is not the CI gate: it runs `:app` unit tests twice
+(debug + release variants) and reports 808 results for 570 unique tests
+(312 `:app` debug + 238 `:app` release + 258 `:core`; 566 `@Test`
+annotations — the parameterized add-rejection test in
+`AddAuthRejectionTest` is one annotation run × 5 services, so
+annotations undercount executions by 4). `:core` has no release-variant
+run. CI runs debug-only (`:app:testDebugUnitTest :core:test`),
+which is the 570. Run debug-only locally too; the release-variant re-run
+adds ~20 s (measured 20.4 s in the 2026-11-19 audit run) for no new
+coverage. Keep the release run available for the 1–2 R8-sensitive tests
+in `StartupRegressionTest` (shipped account-JSON compat cases).
+
 Do not edit app/core sources during a build. The 0.1.14 baseline
 (2026-11-16) is 107 JVM tests and lint 0 errors; this is a recorded
 baseline, not a claim that T2 reran the suite. TARS runs the build checks.

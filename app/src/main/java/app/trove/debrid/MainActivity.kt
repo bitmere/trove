@@ -4,6 +4,7 @@ import android.content.Intent
 import android.content.ActivityNotFoundException
 import android.content.ComponentName
 import android.content.ClipboardManager
+import android.content.SharedPreferences
 import app.trove.debrid.core.PlaybackTarget
 import app.trove.debrid.core.playbackTarget
 import kotlinx.coroutines.CancellationException
@@ -59,11 +60,13 @@ class MainActivity : ComponentActivity() {
         // Read the local theme before the first composition to avoid a default-theme flash.
         val repository = container.repository
         repository.loadStartupTheme()
+        val updatePreferences = applicationContext.getSharedPreferences("trove_updates", MODE_PRIVATE)
         setContent {
             val theme by repository.theme.collectAsState()
             TroveTheme(preference = theme) {
                 TroveApp(
                     container = container,
+                    updatePreferences = updatePreferences,
                     onPlayUrl = ::playUrl,
                     openAddRequested = openAddRequested,
                     onAddRequestHandled = { openAddRequested = false },
@@ -188,6 +191,7 @@ private class SimpleFactory<V : ViewModel>(private val create: () -> V) :
 @Composable
 private fun TroveApp(
     container: AppContainer,
+    updatePreferences: SharedPreferences,
     onPlayUrl: suspend (String, String?, Boolean) -> Unit,
     openAddRequested: Boolean,
     onAddRequestHandled: () -> Unit,
@@ -224,8 +228,6 @@ private fun TroveApp(
         factory = SimpleFactory { SettingsViewModel(container.repository, container.playerDiscovery) },
     )
 
-    val updatePreferences = androidx.compose.ui.platform.LocalContext.current.applicationContext
-        .getSharedPreferences("trove_updates", android.content.Context.MODE_PRIVATE)
     val updateViewModel: UpdateViewModel = viewModel(
         factory = SimpleFactory { UpdateViewModel(container.updateBackend, preferences = updatePreferences) },
     )

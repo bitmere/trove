@@ -1,14 +1,21 @@
 package app.trove.debrid
+import app.trove.debrid.core.DebridDownload
+import app.trove.debrid.core.DebridProvider
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 
 import app.trove.debrid.core.DownloadKind
 import app.trove.debrid.core.DownloadSort
 import app.trove.debrid.core.DownloadStatus
+import app.trove.debrid.data.TroveRepository
 import app.trove.debrid.data.defaultPreferWords
 import app.trove.debrid.ui.downloads.DownloadsViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
@@ -37,10 +44,22 @@ class DownloadsViewModelTest {
         Dispatchers.resetMain()
     }
 
+    // Preparation must run on the runTest scheduler, as in
+    // DownloadsLibraryPerformanceTest: the default Dispatchers.Default
+    // escapes virtual time, and its resume onto Main can land after
+    // resetMain(), when Main is again the unmocked-Looper MissingMain
+    // dispatcher. That resume fails fatally on the Default worker and the
+    // shared ExceptionCollector charges it to the next test in the fork
+    // (UncaughtExceptionsBeforeTest), even in a class that never builds a
+    // ViewModel. Injecting the test dispatcher keeps preparation, the
+    // 250 ms debounce and the return to Main on the drainable scheduler.
+    private fun TestScope.viewModel(repo: TroveRepository) =
+        DownloadsViewModel(repo, StandardTestDispatcher(testScheduler))
+
     @Test
     fun `signed out when no provider`() = runTest {
         val repo = FakeRepository(provider = null)
-        val vm = DownloadsViewModel(repo)
+        val vm = viewModel(repo)
         advanceUntilIdle()
         assertTrue(vm.state.value.signedOut)
         assertFalse(vm.state.value.loading)
@@ -57,21 +76,27 @@ class DownloadsViewModelTest {
                 ),
             ),
         )
-        val vm = DownloadsViewModel(repo)
+        val vm = viewModel(repo)
         advanceUntilIdle()
         assertFalse(vm.state.value.signedOut)
-        assertEquals(3, vm.state.value.downloads.size)
+        // Only the visible (Torrents) tab loads eagerly; Web loads on
+        // first visit.
+        assertEquals(2, vm.state.value.downloads.size)
 
         // Default tab is Torrents: 2 rows.
         assertEquals(2, vm.visibleDownloads(vm.state.value).size)
         vm.setTab(DownloadKind.WEB)
+        advanceUntilIdle()
+        assertEquals(3, vm.state.value.downloads.size)
         assertEquals(1, vm.visibleDownloads(vm.state.value).size)
         assertEquals("2", vm.visibleDownloads(vm.state.value).first().id)
 
         vm.setTab(DownloadKind.TORRENT)
         vm.setQuery("dune 1984")
+        advanceUntilIdle()
         assertEquals(1, vm.visibleDownloads(vm.state.value).size)
         vm.setQuery("zzz")
+        advanceUntilIdle()
         assertEquals(0, vm.visibleDownloads(vm.state.value).size)
     }
 
@@ -81,17 +106,30 @@ class DownloadsViewModelTest {
             sampleDownload(id = "same-id", name = "Match ${kind.name}", kind = kind)
         }
         val provider = FakeProvider(downloads = rows.toMutableList())
-        val vm = DownloadsViewModel(FakeRepository(provider = provider))
+        val vm = viewModel(FakeRepository(provider = provider))
         advanceUntilIdle()
         vm.setQuery("match")
+        advanceUntilIdle()
 
         for (selected in DownloadKind.entries + DownloadKind.TORRENT) {
             vm.setTab(selected)
+            advanceUntilIdle()
             assertEquals(selected, vm.state.value.tab)
-            // Adjacent pages must show their own rows, even before becoming selected.
+            // Each page shows its own rows once visited; unvisited
+            // pages load page 0 on first visit.
             for (page in DownloadKind.entries) {
-                assertEquals(listOf(rows[page.ordinal]), vm.visibleDownloads(vm.state.value, page))
+                if (vm.state.value.pagedByTab.getValue(page).visited) {
+                    assertEquals(listOf(rows[page.ordinal]), vm.visibleDownloads(vm.state.value, page))
+                }
             }
+        }
+        // Visit every tab, then all three pages filter independently.
+        for (page in DownloadKind.entries) {
+            vm.setTab(page)
+            advanceUntilIdle()
+        }
+        for (page in DownloadKind.entries) {
+            assertEquals(listOf(rows[page.ordinal]), vm.visibleDownloads(vm.state.value, page))
         }
         vm.setTab(DownloadKind.WEB)
         vm.refresh()
@@ -100,6 +138,7 @@ class DownloadsViewModelTest {
         assertEquals("match", vm.state.value.query)
         assertEquals(listOf(rows[1]), vm.visibleDownloads(vm.state.value))
         vm.setQuery("missing")
+        advanceUntilIdle()
         DownloadKind.entries.forEach { page ->
             assertTrue(vm.visibleDownloads(vm.state.value, page).isEmpty())
         }
@@ -110,7 +149,7 @@ class DownloadsViewModelTest {
         val repo = FakeRepository(
             provider = FakeProvider(downloads = mutableListOf(sampleDownload(fileCount = 1))),
         )
-        val vm = DownloadsViewModel(repo)
+        val vm = viewModel(repo)
         advanceUntilIdle()
         vm.play(vm.state.value.downloads.first())
         advanceUntilIdle()
@@ -122,7 +161,7 @@ class DownloadsViewModelTest {
     fun `failed play shows an error and can be retried`() = runTest {
         val provider = FakeProvider(downloads = mutableListOf(sampleDownload()))
         provider.playFailure = app.trove.debrid.core.DebridError.Provider("stream", "No stream link")
-        val vm = DownloadsViewModel(FakeRepository(provider = provider))
+        val vm = viewModel(FakeRepository(provider = provider))
         advanceUntilIdle()
         vm.play(vm.state.value.downloads.first())
         advanceUntilIdle()
@@ -138,7 +177,7 @@ class DownloadsViewModelTest {
     @Test
     fun `blank or malformed stream links show an error`() = runTest {
         for (url in listOf("", "not a url", "file:///tmp/video", "https://")) {
-            val vm = DownloadsViewModel(FakeRepository(provider = FakeProvider(playUrl = url)))
+            val vm = viewModel(FakeRepository(provider = FakeProvider(playUrl = url)))
             advanceUntilIdle()
             vm.play(sampleDownload())
             advanceUntilIdle()
@@ -150,7 +189,7 @@ class DownloadsViewModelTest {
     @Test
     fun `missing provider and thrown play failure show errors`() = runTest {
         val repo = FakeRepository(provider = FakeProvider())
-        val vm = DownloadsViewModel(repo)
+        val vm = viewModel(repo)
         advanceUntilIdle()
         repo.provider!!.throwOnPlay = true
         vm.play(sampleDownload())
@@ -166,7 +205,7 @@ class DownloadsViewModelTest {
 
     @Test
     fun `player launch error is visible after consuming the url`() = runTest {
-        val vm = DownloadsViewModel(FakeRepository())
+        val vm = viewModel(FakeRepository())
         advanceUntilIdle()
         vm.play(sampleDownload())
         advanceUntilIdle()
@@ -181,7 +220,7 @@ class DownloadsViewModelTest {
         val repo = FakeRepository(
             provider = FakeProvider(downloads = mutableListOf(sampleDownload(fileCount = 3))),
         )
-        val vm = DownloadsViewModel(repo)
+        val vm = viewModel(repo)
         advanceUntilIdle()
         vm.play(vm.state.value.downloads.first())
         assertEquals("11", vm.state.value.filePicker?.id)
@@ -201,7 +240,7 @@ class DownloadsViewModelTest {
                 downloads = mutableListOf(sampleDownload(status = DownloadStatus.DOWNLOADING)),
             ),
         )
-        val vm = DownloadsViewModel(repo)
+        val vm = viewModel(repo)
         advanceUntilIdle()
         vm.play(vm.state.value.downloads.first())
         advanceUntilIdle()
@@ -218,7 +257,7 @@ class DownloadsViewModelTest {
             ),
         )
         val repo = FakeRepository(provider = fake)
-        val vm = DownloadsViewModel(repo)
+        val vm = viewModel(repo)
         advanceUntilIdle()
         vm.requestDelete(vm.state.value.downloads.first())
         assertEquals("1", vm.state.value.deleteConfirm?.id)
@@ -235,7 +274,7 @@ class DownloadsViewModelTest {
         val old = FakeProvider(downloads = mutableListOf(sampleDownload(id = "1", name = "Old account")))
         val replacement = FakeProvider(downloads = mutableListOf(sampleDownload(id = "1", name = "New account")))
         val repo = FakeRepository(provider = old)
-        val vm = DownloadsViewModel(repo)
+        val vm = viewModel(repo)
         advanceUntilIdle()
         val row = vm.state.value.downloads.single()
         vm.requestDelete(row)
@@ -261,11 +300,17 @@ class DownloadsViewModelTest {
                 gate.await()
                 return Result.success(details)
             }
+
+            // The ViewModel looks downloads up by kind-aware reference;
+            // without this the delegate's default forwards to the
+            // ungated string lookup and the gate below is never awaited.
+            override suspend fun getDownload(ref: app.trove.debrid.core.DownloadRef): Result<app.trove.debrid.core.DebridDownload> =
+                getDownload(ref.id)
         }
         val repo = object : app.trove.debrid.data.TroveRepository by FakeRepository() {
             override suspend fun loadConnection() = app.trove.debrid.data.SavedConnection(null, true, provider)
         }
-        val vm = DownloadsViewModel(repo)
+        val vm = viewModel(repo)
         advanceUntilIdle()
         vm.openDownload(details.copy(files = emptyList()))
         runCurrent()
@@ -284,7 +329,7 @@ class DownloadsViewModelTest {
             ),
         )
         repo.savedKey = "key"
-        val vm = DownloadsViewModel(repo)
+        val vm = viewModel(repo)
         advanceUntilIdle()
         assertFalse(vm.state.value.loading)
         assertEquals(1, vm.state.value.downloads.size)
@@ -301,7 +346,7 @@ class DownloadsViewModelTest {
     }
     @Test
     fun `card opens files without playing and preserves long press deletion`() = runTest {
-        val vm = DownloadsViewModel(FakeRepository())
+        val vm = viewModel(FakeRepository())
         advanceUntilIdle()
         for (count in listOf(1, 3)) {
             val download = sampleDownload(fileCount = count)
@@ -319,7 +364,7 @@ class DownloadsViewModelTest {
     @Test
     fun `empty file list is refreshed before play instead of guessing file zero`() = runTest {
         val fresh = sampleDownload(fileCount = 3)
-        val vm = DownloadsViewModel(FakeRepository(provider = FakeProvider(downloads = mutableListOf(fresh))))
+        val vm = viewModel(FakeRepository(provider = FakeProvider(downloads = mutableListOf(fresh))))
         advanceUntilIdle()
         vm.play(fresh.copy(files = emptyList()))
         advanceUntilIdle()
@@ -329,7 +374,7 @@ class DownloadsViewModelTest {
 
     @Test
     fun `card can show incomplete download but cannot play its files`() = runTest {
-        val vm = DownloadsViewModel(FakeRepository())
+        val vm = viewModel(FakeRepository())
         advanceUntilIdle()
         val download = sampleDownload(status = DownloadStatus.DOWNLOADING)
         vm.openDownload(download)
@@ -346,7 +391,7 @@ class DownloadsViewModelTest {
                 download.copy(files = download.files.map { it.copy(id = "7") })
             }
             val provider = FakeProvider(downloads = mutableListOf(fresh))
-            val vm = DownloadsViewModel(FakeRepository(provider = provider))
+            val vm = viewModel(FakeRepository(provider = provider))
             advanceUntilIdle()
             vm.play(fresh.copy(files = emptyList()))
             advanceUntilIdle()
@@ -362,7 +407,7 @@ class DownloadsViewModelTest {
     fun `rejected playback key offers Settings and never emits a URL`() = runTest {
         val provider = FakeProvider()
         provider.playFailure = app.trove.debrid.core.DebridError.AuthInvalid()
-        val vm = DownloadsViewModel(FakeRepository(provider = provider))
+        val vm = viewModel(FakeRepository(provider = provider))
         advanceUntilIdle()
         vm.play(sampleDownload())
         advanceUntilIdle()
@@ -379,7 +424,7 @@ class DownloadsViewModelTest {
         val provider = FakeProvider()
         val link = "https://example.com/requestdl?token=secret"
         provider.playUrl = link
-        val vm = DownloadsViewModel(FakeRepository(provider = provider))
+        val vm = viewModel(FakeRepository(provider = provider))
         advanceUntilIdle()
         vm.play(sampleDownload())
         advanceUntilIdle()
@@ -395,7 +440,7 @@ class DownloadsViewModelTest {
         val repo = FakeRepository(
             provider = FakeProvider(downloads = mutableListOf(sampleDownload(id = "1"))),
         )
-        val vm = DownloadsViewModel(repo)
+        val vm = viewModel(repo)
         advanceUntilIdle()
         vm.setSort(DownloadSort.OLDEST)
         vm.setQuery("dune")
@@ -413,7 +458,7 @@ class DownloadsViewModelTest {
     @Test
     fun `reset is a no-op when search is already clean`() = runTest {
         val repo = FakeRepository()
-        val vm = DownloadsViewModel(repo)
+        val vm = viewModel(repo)
         advanceUntilIdle()
         vm.resetSearch()
         advanceUntilIdle()
@@ -430,7 +475,7 @@ class DownloadsViewModelTest {
                 sampleDownload(id = "2", name = "Dune Part Two 2024 x265"),
             )),
         )
-        val vm = DownloadsViewModel(repo)
+        val vm = viewModel(repo)
         advanceUntilIdle()
         assertEquals(defaultPreferWords, vm.state.value.preferWords)
         // Same date on both rows, so only the prefer word decides the order.
@@ -440,7 +485,7 @@ class DownloadsViewModelTest {
     @Test
     fun `show clutter files loads into state and follows settings changes`() = runTest {
         val repo = FakeRepository()
-        val vm = DownloadsViewModel(repo)
+        val vm = viewModel(repo)
         advanceUntilIdle()
         assertFalse(vm.state.value.showClutterFiles)
 
@@ -453,7 +498,7 @@ class DownloadsViewModelTest {
     @Test
     fun `play keeps details visible while resolving and suppresses duplicate taps`() = runTest {
         val provider = FakeProvider()
-        val vm = DownloadsViewModel(FakeRepository(provider = provider))
+        val vm = viewModel(FakeRepository(provider = provider))
         advanceUntilIdle()
         val download = sampleDownload()
         vm.openDownload(download)
@@ -471,4 +516,69 @@ class DownloadsViewModelTest {
         assertNull(vm.state.value.playFileName)
     }
 
+    @Test fun `details load has a synchronous busy guard`() = runTest {
+        val fresh = sampleDownload()
+        val vm = viewModel(FakeRepository(provider = FakeProvider(downloads = mutableListOf(fresh))))
+        advanceUntilIdle()
+        vm.openDownload(fresh.copy(files = emptyList()))
+        assertEquals(fresh.kind to fresh.id, vm.state.value.resolvingDownload)
+        vm.openDownload(sampleDownload(id = "different", fileCount = 2))
+        assertEquals(fresh.id, vm.state.value.filePicker?.id)
+        advanceUntilIdle()
+        assertNull(vm.state.value.resolvingDownload)
+        assertEquals(fresh, vm.state.value.filePicker)
+    }
+
+    @Test fun `sign out cannot be overwritten by a late refresh`() = runTest {
+        val base = FakeRepository()
+        val repo = object : TroveRepository by base {
+            override suspend fun listDownloads(provider: DebridProvider, bypassCache: Boolean): Result<List<DebridDownload>> {
+                withContext(NonCancellable) { delay(1000) }
+                return Result.success(listOf(sampleDownload()))
+            }
+        }
+        val vm = viewModel(repo)
+        runCurrent()
+        base.provider = null
+        vm.refresh()
+        advanceUntilIdle()
+        assertTrue(vm.state.value.signedOut)
+        assertTrue(vm.state.value.downloads.isEmpty())
+    }
+
+    @Test fun `download kind reaches the deletion repository boundary`() = runTest {
+        var deleted: DebridDownload? = null
+        val repo = object : TroveRepository by FakeRepository() {
+            override suspend fun delete(provider: DebridProvider, download: DebridDownload): Result<Unit> {
+                deleted = download
+                return Result.success(Unit)
+            }
+        }
+        val vm = viewModel(repo); advanceUntilIdle()
+        val web = sampleDownload(kind = DownloadKind.WEB)
+        vm.requestDelete(web); vm.confirmDelete(); advanceUntilIdle()
+        assertEquals(web, deleted)
+    }
+
+    @Test fun `successful add refresh retains rows query and tab without pull indicator`() = runTest {
+        val provider = FakeProvider(downloads = mutableListOf(sampleDownload()))
+        val vm = viewModel(FakeRepository(provider = provider))
+        advanceUntilIdle()
+        vm.setQuery("Dune")
+        val before = vm.state.value.downloads
+        provider.downloads.add(sampleDownload(id = "new").copy(createdAtEpochMs = 2000))
+        vm.onAdded(DownloadKind.TORRENT)
+        assertEquals(before, vm.state.value.downloads)
+        assertFalse(vm.state.value.loading)
+        assertFalse(vm.state.value.refreshing)
+        assertEquals(DownloadKind.TORRENT, vm.state.value.addedConfirmation)
+        advanceUntilIdle()
+        assertEquals("new", vm.visibleDownloads(vm.state.value).first().id)
+        assertEquals("Dune", vm.state.value.query)
+        vm.consumeAddedConfirmation()
+        assertNull(vm.state.value.addedConfirmation)
+        vm.refresh()
+        assertTrue(vm.state.value.refreshing)
+        advanceUntilIdle()
+    }
 }

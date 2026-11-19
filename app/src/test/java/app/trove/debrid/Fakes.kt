@@ -11,17 +11,24 @@ import app.trove.debrid.core.DebridError
 import app.trove.debrid.core.DebridProvider
 import app.trove.debrid.core.DebridService
 import app.trove.debrid.core.DownloadKind
+import app.trove.debrid.core.DownloadRef
 import app.trove.debrid.core.DownloadSort
 import app.trove.debrid.core.DownloadStatus
+import app.trove.debrid.core.HttpTransport
+import app.trove.debrid.core.MediaCandidate
+import app.trove.debrid.core.MediaMetadata
+import app.trove.debrid.core.MediaQuery
 import app.trove.debrid.core.ProviderCapabilities
 import app.trove.debrid.core.ShareClassifier
 import app.trove.debrid.core.ShareInput
 import app.trove.debrid.core.StreamUrl
+import app.trove.debrid.data.MetadataOverride
 import app.trove.debrid.data.SavedConnection
 import app.trove.debrid.data.TroveRepository
 import app.trove.debrid.data.defaultExcludeWords
 import app.trove.debrid.data.defaultPreferWords
 import app.trove.debrid.data.normalizeReleaseWords
+import app.trove.debrid.ui.settings.providerSectionDescriptors
 
 fun sampleDownload(
     id: String = "11",
@@ -114,7 +121,7 @@ class FakeRepository(
         "aabbccddeeff00112233445566778899aabbccdd" to
             CachedInfo(ready = true, name = "Dune Part Two 2024", sizeBytes = 1_000_000L),
     ),
-    /** When true, validateAndSaveTorboxKey THROWS instead of returning
+    /** When true, TorBox validation THROWS instead of returning
      *  a failed Result — the production bug the crash fix guards. */
     var throwOnValidate: Boolean = false,
     /** Artificial delay inside validate, for duplicate-submit tests. */
@@ -152,6 +159,9 @@ class FakeRepository(
     override suspend fun defaultPlayer() = savedPlayer
     override suspend fun setDefaultPlayer(player: app.trove.debrid.core.PlayerComponent?) { savedPlayer = player }
     var savedKey: String? = null
+    var savedTmdbKey: String? = null
+    /** When false, the fake rejects TMDB keys at validation time. */
+    var tmdbKeyValid: Boolean = true
     var addedClassified = mutableListOf<ClassifiedShare>()
     var validateCalls: Int = 0
 
@@ -248,83 +258,42 @@ class FakeRepository(
         return SavedConnection(accounts().firstOrNull { it.service == service }, hasCredential(service), provider())
     }
 
-    override suspend fun validateAndSaveRealDebridToken(token: String): Result<DebridAccount> {
-        val trimmed = token.trim()
-        if (trimmed.isEmpty() || trimmed == "bad-token") return Result.failure(DebridError.AuthInvalid())
-        savedRealDebridToken = trimmed
-        selectedService = DebridService.REAL_DEBRID
-        return Result.success(checkNotNull(realDebridAccount()))
+    override suspend fun validateAndSave(
+        service: DebridService,
+        credential: String,
+        factory: (String, HttpTransport) -> DebridProvider,
+        label: (AccountInfo?) -> String,
+    ): Result<DebridAccount> {
+        if (service == DebridService.TORBOX) {
+            validateCalls++
+            if (validateDelayMs > 0) kotlinx.coroutines.delay(validateDelayMs)
+            if (throwOnValidate) throw IllegalStateException("boom")
+            if (credential == "bad-key") return Result.failure(DebridError.AuthInvalid())
+            savedKey = credential
+        } else {
+            val trimmed = credential.trim()
+            val rejected = if (service == DebridService.REAL_DEBRID) "bad-token" else "bad-key"
+            if (trimmed.isEmpty() || trimmed == rejected) return Result.failure(DebridError.AuthInvalid())
+            setCredential(service, trimmed)
+            selectedService = service
+        }
+        return Result.success(accounts().first { it.service == service })
     }
 
-    override fun signOutRealDebrid() {
-        savedRealDebridToken = null
-        if (selectedService == DebridService.REAL_DEBRID) selectedService = activeService()
+    override fun signOut(service: DebridService) {
+        setCredential(service, null)
+        if (selectedService == service) selectedService = activeService()
     }
 
-    override suspend fun validateAndSaveAllDebridKey(key: String): Result<DebridAccount> {
-        val trimmed = key.trim()
-        if (trimmed.isEmpty() || trimmed == "bad-key") return Result.failure(DebridError.AuthInvalid())
-        savedAllDebridKey = trimmed
-        selectedService = DebridService.ALLDEBRID
-        return Result.success(checkNotNull(allDebridAccount()))
-    }
-
-    override fun signOutAllDebrid() {
-        savedAllDebridKey = null
-        if (selectedService == DebridService.ALLDEBRID) selectedService = activeService()
-    }
-
-    override suspend fun validateAndSavePremiumizeKey(key: String): Result<DebridAccount> {
-        val trimmed = key.trim()
-        if (trimmed.isEmpty() || trimmed == "bad-key") return Result.failure(DebridError.AuthInvalid())
-        savedPremiumizeKey = trimmed
-        selectedService = DebridService.PREMIUMIZE
-        return Result.success(checkNotNull(premiumizeAccount()))
-    }
-
-    override fun signOutPremiumize() {
-        savedPremiumizeKey = null
-        if (selectedService == DebridService.PREMIUMIZE) selectedService = activeService()
-    }
-
-    override suspend fun validateAndSaveOffcloudKey(key: String): Result<DebridAccount> {
-        val trimmed = key.trim()
-        if (trimmed.isEmpty() || trimmed == "bad-key") return Result.failure(DebridError.AuthInvalid())
-        savedOffcloudKey = trimmed
-        selectedService = DebridService.OFFCLOUD
-        return Result.success(checkNotNull(offcloudAccount()))
-    }
-
-    override suspend fun validateAndSaveDebridLinkKey(key: String): Result<DebridAccount> {
-        val trimmed = key.trim()
-        if (trimmed.isEmpty() || trimmed == "bad-key") return Result.failure(DebridError.AuthInvalid())
-        savedDebridLinkKey = trimmed
-        selectedService = DebridService.DEBRID_LINK
-        return Result.success(checkNotNull(debridLinkAccount()))
-    }
-
-    override fun signOutOffcloud() {
-        savedOffcloudKey = null
-        if (selectedService == DebridService.OFFCLOUD) selectedService = activeService()
-    }
-
-    override fun signOutDebridLink() {
-        savedDebridLinkKey = null
-        if (selectedService == DebridService.DEBRID_LINK) selectedService = activeService()
-    }
-
-    override suspend fun validateAndSaveTorboxKey(key: String): Result<DebridAccount> {
-        validateCalls++
-        if (validateDelayMs > 0) kotlinx.coroutines.delay(validateDelayMs)
-        if (throwOnValidate) throw IllegalStateException("boom")
-        if (key == "bad-key") return Result.failure(DebridError.AuthInvalid())
-        savedKey = key
-        return Result.success(torboxAccount()!!)
-    }
-
-    override fun signOutTorbox() {
-        savedKey = null
-        if (selectedService == DebridService.TORBOX) selectedService = activeService()
+    private fun setCredential(service: DebridService, credential: String?) {
+        when (service) {
+            DebridService.TORBOX -> savedKey = credential
+            DebridService.REAL_DEBRID -> savedRealDebridToken = credential
+            DebridService.ALLDEBRID -> savedAllDebridKey = credential
+            DebridService.PREMIUMIZE -> savedPremiumizeKey = credential
+            DebridService.OFFCLOUD -> savedOffcloudKey = credential
+            DebridService.DEBRID_LINK -> savedDebridLinkKey = credential
+        }
     }
 
     override suspend fun listDownloads(provider: DebridProvider, bypassCache: Boolean) = provider.listDownloads()
@@ -333,7 +302,7 @@ class FakeRepository(
     override suspend fun deleteMany(provider: DebridProvider, downloads: List<DebridDownload>) =
         super<TroveRepository>.deleteMany(provider, downloads)
     override suspend fun play(provider: DebridProvider, download: DebridDownload, fileId: String) =
-        provider.getStreamUrl(download.id, fileId)
+        provider.getStreamUrl(DownloadRef(download.kind, download.id), fileId)
 
     override suspend fun checkCached(provider: DebridProvider, hash: String): Result<Map<String, CachedInfo>?> =
         Result.success(cachedForHash)
@@ -365,4 +334,38 @@ class FakeRepository(
 
     override suspend fun downloadFileBytes(url: String): Result<ByteArray> =
         Result.success("fake-bytes".toByteArray())
+
+    /** Per-download picks for picker tests, keyed by (kind, id). */
+    var candidatesByQuery: (MediaQuery) -> List<MediaCandidate> = { emptyList() }
+    var metadataById: Map<Pair<String, String>, MediaMetadata> = emptyMap()
+    val savedMetadataOverrides = mutableMapOf<Pair<DownloadKind, String>, MetadataOverride>()
+
+    override suspend fun resolveMetadataCandidates(query: MediaQuery) = candidatesByQuery(query)
+    override suspend fun resolveMetadataById(imdbId: String, type: String) = metadataById[imdbId to type]
+    override suspend fun loadMetadataOverride(ref: DownloadRef) = savedMetadataOverrides[ref.kind to ref.id]
+    override suspend fun saveMetadataOverride(ref: DownloadRef, pick: MetadataOverride) {
+        savedMetadataOverrides[ref.kind to ref.id] = pick
+    }
+    override suspend fun clearMetadataOverride(ref: DownloadRef) {
+        savedMetadataOverrides.remove(ref.kind to ref.id)
+    }
+
+    override fun hasTmdbKey(): Boolean = savedTmdbKey != null
+    override fun maskedTmdbKey(): String =
+        savedTmdbKey?.let { if (it.length <= 4) "••••" else "•".repeat(8) + it.takeLast(4) } ?: ""
+    override suspend fun saveTmdbKey(key: String) {
+        require(key.trim().isNotEmpty()) { "TMDB key is empty" }
+        savedTmdbKey = key.trim()
+    }
+    override suspend fun clearTmdbKey() {
+        savedTmdbKey = null
+    }
+    override suspend fun validateTmdbKey(key: String): Result<Unit> =
+        if (key.trim().isNotEmpty() && tmdbKeyValid) Result.success(Unit)
+        else Result.failure(IllegalStateException("TMDB key was not accepted"))
+}
+
+internal suspend fun TroveRepository.saveTestCredential(service: DebridService, credential: String): Result<DebridAccount> {
+    val descriptor = providerSectionDescriptors.getValue(service)
+    return validateAndSave(service, credential, descriptor.factory, descriptor.accountLabel)
 }

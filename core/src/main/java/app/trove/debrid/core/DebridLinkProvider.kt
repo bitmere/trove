@@ -66,12 +66,12 @@ class DebridLinkProvider(
 
     override suspend fun validateAccount(): Result<AccountInfo> = runCatching {
         val account = call("GET", "/account/infos").get("value").obj()
-        val premium = account.number("accountType") in setOf(1L, 2L) ||
-            (account.number("premiumLeft") ?: 0) > 0
+        val premium = account.optLong("accountType") in setOf(1L, 2L) ||
+            (account.optLong("premiumLeft") ?: 0) > 0
         val plan = if (premium) "Premium" else "Free"
-        val points = account.number("pts")
+        val points = account.optLong("pts")?.takeIf { it >= 0 }
         AccountInfo(
-            safeText(account.value("username", "pseudo")),
+            safeText(account.optNonBlankString("username") ?: account.optNonBlankString("pseudo")),
             premium,
             if (points == null) plan else "$plan · $points pts",
         )
@@ -90,7 +90,7 @@ class DebridLinkProvider(
             val response = call("GET", "$path?page=$page&perPage=$PAGE_SIZE$options")
             val entries = response.get("value").array()
             entries.forEach { visit(it.obj()) }
-            val pages = (response.get("pagination") as? JsonObject)?.number("pages")
+            val pages = (response.get("pagination") as? JsonObject)?.optLong("pages")
             page++
             if (entries.size() < PAGE_SIZE || pages == null || page >= pages) return
         }
@@ -113,7 +113,7 @@ class DebridLinkProvider(
         find("/downloader/list?ids=$id", id)?.downloader()
 
     private suspend fun find(path: String, id: String): JsonObject? = try {
-        call("GET", path).get("value").array().asSequence().map { it.obj() }.firstOrNull { it.value("id") == id }
+        call("GET", path).get("value").array().asSequence().map { it.obj() }.firstOrNull { it.optNonBlankString("id") == id }
     } catch (error: DebridError.Provider) {
         if (error.code != "badId") throw error
         null
@@ -157,7 +157,7 @@ class DebridLinkProvider(
         try {
             var latest = created.seedbox().download
             if (latest.status == DownloadStatus.READY && latest.files.isNotEmpty() &&
-                created.value("isZip") != "true"
+                created.optNonBlankString("isZip") != "true"
             ) {
                 currentCoroutineContext().ensureActive()
                 return latest
@@ -223,7 +223,7 @@ class DebridLinkProvider(
         Result.success(false)
     }
 
-    suspend fun hosterDomains(): Set<String> = hosterRules().domains
+    override suspend fun hosterDomains(): Set<String> = hosterRules().domains
 
     private suspend fun hosterRules(): HosterRules = hosterMutex.withLock {
         cachedRules?.takeIf { SystemClock.nowMillis() < rulesExpireAt }?.let { return@withLock it }
@@ -241,8 +241,8 @@ class DebridLinkProvider(
 
     private fun JsonObject.seedbox(): DownloadRecord {
         val percent = percent()
-        val status = if ((value("error")?.toIntOrNull() ?: 0) != 0) DownloadStatus.ERROR else {
-            when (value("status")?.toIntOrNull()) {
+        val status = if ((optInt("error") ?: 0) != 0) DownloadStatus.ERROR else {
+            when (optInt("status")) {
                 0 -> DownloadStatus.PAUSED
                 1 -> DownloadStatus.QUEUED
                 2, 4 -> DownloadStatus.DOWNLOADING
@@ -255,19 +255,25 @@ class DebridLinkProvider(
         val links = mutableMapOf<String, String>()
         (get("files") as? JsonArray)?.forEach { entry ->
             val file = entry.obj()
-            val id = file.value("id")?.takeUnless(::containsKey) ?: return@forEach
-            val name = safeText(file.value("name")) ?: "File"
-            files += DebridFile(id, name.substringAfterLast('/'), file.number("size", "length") ?: 0, "/" + name.trimStart('/'))
-            if (file.percent() == 100f) file.value("downloadUrl", "downloadLink")?.let { links[id] = it }
+            val id = file.optNonBlankString("id")?.takeUnless(::containsKey) ?: return@forEach
+            val name = safeText(file.optNonBlankString("name")) ?: "File"
+            val fileSize = (file.optLong("size") ?: file.optLong("length"))?.takeIf { it >= 0 } ?: 0
+            files += DebridFile(id, name.substringAfterLast('/'), fileSize, "/" + name.trimStart('/'))
+            if (file.percent() == 100f) {
+                val fileLink = file.optNonBlankString("downloadUrl") ?: file.optNonBlankString("downloadLink")
+                fileLink?.let { links[id] = it }
+            }
         }
         return DownloadRecord(
             DebridDownload(
-                SEEDBOX_PREFIX + id(), service, safeText(value("name")) ?: "Debrid-Link torrent",
-                number("totalSize"), status, (percent ?: 0f).div(100f).coerceIn(0f, 1f),
+                SEEDBOX_PREFIX + id(), service, safeText(optNonBlankString("name")) ?: "Debrid-Link torrent",
+                optLong("totalSize")?.takeIf { it >= 0 }, status, (percent ?: 0f).div(100f).coerceIn(0f, 1f),
                 files = files, kind = DownloadKind.TORRENT,
                 createdAtEpochMs = epochMillis("created", "addedDate"),
-                errorMessage = if (status == DownloadStatus.ERROR) safeText(value("errorString", "message")) else null,
-                downloadSpeedBytesPerSec = number("downloadSpeed"),
+                errorMessage = if (status == DownloadStatus.ERROR) {
+                    safeText(optNonBlankString("errorString") ?: optNonBlankString("message"))
+                } else null,
+                downloadSpeedBytesPerSec = optLong("downloadSpeed")?.takeIf { it >= 0 },
             ),
             links,
         )
@@ -275,12 +281,12 @@ class DebridLinkProvider(
 
     private fun JsonObject.downloader(): DownloadRecord {
         val id = id()
-        val name = safeText(value("name", "filename")) ?: "Debrid-Link download"
-        val size = number("size", "length")
-        val link = value("downloadUrl", "downloadLink")
+        val name = safeText(optNonBlankString("name") ?: optNonBlankString("filename")) ?: "Debrid-Link download"
+        val size = (optLong("size") ?: optLong("length"))?.takeIf { it >= 0 }
+        val link = optNonBlankString("downloadUrl") ?: optNonBlankString("downloadLink")
         val status = when {
-            value("expired") == "true" -> DownloadStatus.ERROR
-            value("isProcessing") == "true" -> DownloadStatus.DOWNLOADING
+            optNonBlankString("expired") == "true" -> DownloadStatus.ERROR
+            optNonBlankString("isProcessing") == "true" -> DownloadStatus.DOWNLOADING
             link != null -> DownloadStatus.READY
             else -> DownloadStatus.DOWNLOADING
         }
@@ -327,11 +333,11 @@ class DebridLinkProvider(
         } catch (_: JsonParseException) {
             null
         }
-        val success = envelope?.value("success")
+        val success = envelope?.optNonBlankString("success")
         if (response.status !in 200..299 || success == "false") {
-            val code = envelope?.value("error")?.takeIf { RESOURCE_ID.matches(it) && !containsKey(it) }
+            val code = envelope?.optNonBlankString("error")?.takeIf { RESOURCE_ID.matches(it) && !containsKey(it) }
                 ?: "http${response.status}"
-            val detail = safeText(envelope?.value("error_description")).orEmpty()
+            val detail = safeText(envelope?.optNonBlankString("error_description")).orEmpty()
             throw if (method == "DELETE" && success == "false") DebridError.Provider(code, detail) else when (code) {
                 in AUTH_CODES -> DebridError.AuthInvalid()
                 "floodDetected" -> DebridError.RateLimited(3600)
@@ -375,24 +381,15 @@ class DebridLinkProvider(
     private fun JsonElement?.array(): JsonArray = this as? JsonArray ?: throw unreadableResponse()
     private fun JsonElement?.text(): String? = this?.takeIf { it.isJsonPrimitive }
         ?.asString?.takeIf { it.isNotBlank() }
-    private fun JsonObject.value(key: String, alias: String? = null): String? =
-        get(key).text() ?: alias?.let { get(it).text() }
-    private fun JsonObject.number(key: String, alias: String? = null): Long? =
-        value(key, alias)?.toLongOrNull()?.takeIf { it >= 0 }
     private fun JsonObject.percent(): Float? =
-        value("downloadPercent", "percentDownload")?.toFloatOrNull()?.takeIf { it.isFinite() }
+        (optNonBlankString("downloadPercent") ?: optNonBlankString("percentDownload"))
+            ?.toFloatOrNull()?.takeIf { it.isFinite() }
     private fun JsonObject.epochMillis(key: String, alias: String): Long? =
-        number(key, alias)?.takeIf { it <= Long.MAX_VALUE / 1000 }?.times(1000)
-    private fun JsonObject.id(): String = resourceId(value("id") ?: throw unreadableResponse())
+        (optLong(key) ?: optLong(alias))?.takeIf { it in 0..Long.MAX_VALUE / 1000 }?.times(1000)
+    private fun JsonObject.id(): String = resourceId(optNonBlankString("id") ?: throw unreadableResponse())
 
     private fun invalidSource() = DebridError.Provider("invalid-input", "Invalid source link")
     private fun unreadableResponse() = DebridError.Provider("bad-response", "Debrid-Link returned an unreadable response")
-
-    private fun <T> Result<T>.mapError(): Result<T> {
-        val failure = exceptionOrNull() ?: return this
-        if (failure is CancellationException || failure !is Exception) throw failure
-        return Result.failure(if (failure is DebridError) failure else DebridError.Network(failure))
-    }
 
     companion object {
         const val BASE = "https://debrid-link.com/api"

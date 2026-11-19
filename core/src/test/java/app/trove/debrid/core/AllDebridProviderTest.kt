@@ -6,21 +6,13 @@ import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AllDebridProviderTest {
-    private class FakeTransport(private val handler: (HttpRequest) -> HttpResponse) : HttpTransport {
-        val requests = mutableListOf<HttpRequest>()
-
-        override suspend fun execute(request: HttpRequest): HttpResponse {
-            requests += request
-            return handler(request)
-        }
-    }
-
-    private fun provider(handler: (HttpRequest) -> HttpResponse): Pair<AllDebridProvider, FakeTransport> {
-        val fake = FakeTransport(handler)
+    private fun provider(handler: (HttpRequest) -> HttpResponse): Pair<AllDebridProvider, RecordingTransport> {
+        val fake = RecordingTransport(handler)
         return AllDebridProvider(KEY, fake, TokenBucket(4.0, 50), TokenBucket(0.5, 10), pollDelayMs = 0) to fake
     }
 
@@ -110,6 +102,55 @@ class AllDebridProviderTest {
         val error = runCatching { provider.add(AddInput.Magnet(MAGNET)) }.exceptionOrNull()
         assertTrue(error is CancellationException)
         assertEquals(listOf(UPLOAD, STATUS, DELETE), fake.requests.map { it.path })
+    }
+
+    @Test
+    fun `a JVM Error escapes instead of mapping to a network failure`() = runBlocking {
+        val error = OutOfMemoryError("test")
+        val (provider, _) = provider { throw error }
+        assertSame(error, runCatching { provider.validateAccount() }.exceptionOrNull())
+    }
+
+    @Test
+    fun `string and numeric JSON fields parse identically after the opt migration`() = runBlocking {
+        suspend fun downloadFor(payload: HttpResponse): DebridDownload {
+            val (provider, _) = provider {
+                when (it.path) {
+                    STATUS -> payload
+                    FILES -> success("""{"magnets":[]}""")
+                    LINKS -> success("""{"links":[]}""")
+                    else -> error("Unexpected request ${it.path}")
+                }
+            }
+            return provider.listDownloads().getOrThrow().single()
+        }
+        fun magnetJson(size: String, downloaded: String, speed: String, seeders: String, code: String) =
+            success("""{"magnets":[{"id":123,"filename":"Example","status":"Downloading","statusCode":$code,"size":$size,"downloaded":$downloaded,"downloadSpeed":$speed,"seeders":$seeders,"uploadDate":500}]}""")
+        val asNumbers = downloadFor(magnetJson("1000", "250", "50", "3", "2"))
+        val asStrings = downloadFor(magnetJson("\"1000\"", "\"250\"", "\"50\"", "\"3\"", "\"2\""))
+        assertEquals(asNumbers, asStrings)
+        assertEquals(1000L, asNumbers.sizeBytes)
+        assertEquals(0.25f, asNumbers.progress, 0.001f)
+        assertEquals(DownloadStatus.DOWNLOADING, asNumbers.status)
+        assertEquals(3, asNumbers.seeds)
+        assertEquals(50L, asNumbers.downloadSpeedBytesPerSec)
+        assertEquals(500_000L, asNumbers.createdAtEpochMs)
+    }
+
+    @Test
+    fun `account premium flag reads booleans and strings alike`() = runBlocking {
+        for ((body, premium) in listOf(
+            """{"user":{"username":"alice","isPremium":true}}""" to true,
+            """{"user":{"username":"alice","isPremium":"true"}}""" to true,
+            """{"user":{"username":"alice","isPremium":"  "}}""" to false,
+            """{"user":{"username":"alice"}}""" to false,
+        )) {
+            val (provider, _) = provider { success(body) }
+            assertEquals(
+                AccountInfo("alice", premium, if (premium) "Premium" else "Free"),
+                provider.validateAccount().getOrThrow(),
+            )
+        }
     }
 
     @Test

@@ -4,22 +4,14 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.net.URI
 
 class OffcloudProviderTest {
-    private class FakeTransport(private val handler: (HttpRequest) -> HttpResponse) : HttpTransport {
-        val requests = mutableListOf<HttpRequest>()
-
-        override suspend fun execute(request: HttpRequest): HttpResponse {
-            requests += request
-            return handler(request)
-        }
-    }
-
-    private fun provider(handler: (HttpRequest) -> HttpResponse): Pair<OffcloudProvider, FakeTransport> {
-        val fake = FakeTransport(handler)
+    private fun provider(handler: (HttpRequest) -> HttpResponse): Pair<OffcloudProvider, RecordingTransport> {
+        val fake = RecordingTransport(handler)
         return OffcloudProvider(KEY, fake, TokenBucket(2.0, 100), TokenBucket(0.5, 20), pollDelayMs = 0) to fake
     }
 
@@ -101,6 +93,37 @@ class OffcloudProviderTest {
             assertTrue(if (cancel) failure is CancellationException else failure is DebridError.Provider)
             assertEquals("/cloud/remove/$ID", fake.requests.last().path)
         }
+    }
+
+    @Test
+    fun `a JVM Error escapes instead of mapping to a network failure`() = runBlocking {
+        val error = OutOfMemoryError("test")
+        val (provider, _) = provider { throw error }
+        assertSame(error, runCatching { provider.validateAccount() }.exceptionOrNull())
+    }
+
+    @Test
+    fun `string and numeric JSON fields parse identically after the opt migration`() = runBlocking {
+        suspend fun downloadFor(amount: String, fileSize: String): DebridDownload {
+            var polls = 0
+            val (provider, _) = provider {
+                when (it.path) {
+                    "/api/cloud" -> created()
+                    "/api/cloud/status" -> ok(
+                        """{"status":{"requestId":"$ID","status":"${if (polls++ == 0) "downloading" else "downloaded"}","amount":$amount,"fileSize":$fileSize}}""",
+                    )
+                    "/api/cloud/explore/$ID" -> ok("""["$LINK"]""")
+                    else -> unexpected(it)
+                }
+            }
+            return provider.add(AddInput.Magnet(MAGNET)).getOrThrow()
+        }
+        val asNumbers = downloadFor("100", "400")
+        val asStrings = downloadFor("\"100\"", "\"400\"")
+        assertEquals(asNumbers, asStrings)
+        assertEquals(400L, asNumbers.sizeBytes)
+        assertEquals(DownloadStatus.READY, asNumbers.status)
+        assertEquals(1, asNumbers.files.size)
     }
 
     @Test

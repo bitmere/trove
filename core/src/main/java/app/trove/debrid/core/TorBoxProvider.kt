@@ -1,9 +1,12 @@
 package app.trove.debrid.core
 
 import com.google.gson.JsonArray
+import com.google.gson.JsonElement
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import java.net.URLEncoder
 import java.time.Instant
 
@@ -27,7 +30,12 @@ class TorBoxProvider(
     private val generalBucket: TokenBucket = TokenBucket(permitsPerSecond = 5.0, burst = 5),
     private val createTorrentBudget: HourlyBudget = HourlyBudget(50),
     private val createWebBudget: HourlyBudget = HourlyBudget(25),
+    private val listPageSize: Int = 1000,
 ) : DebridProvider {
+
+    init {
+        require(listPageSize > 0)
+    }
 
     override val service: DebridService = DebridService.TORBOX
 
@@ -152,18 +160,30 @@ class TorBoxProvider(
         listDownloadsInternal(bypassCache = true)
 
     private suspend fun listDownloadsInternal(bypassCache: Boolean): Result<List<DebridDownload>> = runCatching {
-        val torrents = listKind("/torrents/mylist", DownloadKind.TORRENT, bypassCache = bypassCache)
-        val web = listKind("/webdl/mylist", DownloadKind.WEB, bypassCache = bypassCache)
-        val usenet = runCatching { listKind("/usenet/mylist", DownloadKind.USENET, bypassCache = bypassCache) }
-            .getOrElse {
+        coroutineScope {
+            // Capture failures in each child so awaits determine which error surfaces.
+            val torrentLoad = async {
+                runCatching { listKind("/torrents/mylist", DownloadKind.TORRENT, bypassCache = bypassCache) }
+            }
+            val webLoad = async {
+                runCatching { listKind("/webdl/mylist", DownloadKind.WEB, bypassCache = bypassCache) }
+            }
+            val usenetLoad = async {
+                runCatching { listKind("/usenet/mylist", DownloadKind.USENET, bypassCache = bypassCache) }
+            }
+
+            val torrents = torrentLoad.await().getOrThrow()
+            val web = webLoad.await().getOrThrow()
+            val usenet = usenetLoad.await().getOrElse {
                 if (it is CancellationException || it is DebridError.AuthInvalid) throw it
                 // Usenet is Pro-plan only; Essential accounts get an error
                 // here. A failed Usenet list must not kill the whole list
                 // (a bad key already fails on the torrents list above).
                 emptyList()
             }
-        (torrents + web + usenet)
-            .sortedByDescending { it.createdAtEpochMs ?: 0L }
+            (torrents + web + usenet)
+                .sortedByDescending { it.createdAtEpochMs ?: 0L }
+        }
     }.mapError()
 
     override suspend fun getDownload(id: String): Result<DebridDownload> = runCatching {
@@ -277,12 +297,18 @@ class TorBoxProvider(
     override suspend fun getStreamUrl(downloadId: String, fileId: String): Result<StreamUrl> =
         runCatching {
             val download = getDownload(downloadId).getOrThrow()
-            resolveStream(download, fileId).getOrThrow()
+            getStreamUrl(download, fileId).getOrThrow()
         }.mapError()
 
     /** The list already identifies the namespace; numeric IDs alone can collide. */
     suspend fun getStreamUrl(download: DebridDownload, fileId: String): Result<StreamUrl> =
-        resolveStream(download, fileId)
+        getStreamUrl(DownloadRef(download.kind, download.id), fileId)
+
+    override suspend fun getStreamUrl(ref: DownloadRef, fileId: String): Result<StreamUrl> =
+        resolveStream(ref, fileId)
+
+    override suspend fun getDownload(ref: DownloadRef): Result<DebridDownload> =
+        getDownload(ref.id, ref.kind)
 
     suspend fun getDownload(id: String, kind: DownloadKind): Result<DebridDownload> = runCatching {
         val numericId = id.toLongOrNull() ?: throw DebridError.NotCached()
@@ -290,9 +316,9 @@ class TorBoxProvider(
             ?: throw DebridError.NotCached()
     }.mapError()
 
-    private suspend fun resolveStream(download: DebridDownload, fileId: String): Result<StreamUrl> =
+    private suspend fun resolveStream(ref: DownloadRef, fileId: String): Result<StreamUrl> =
         runCatching {
-            val (path, idField) = when (download.kind) {
+            val (path, idField) = when (ref.kind) {
                 DownloadKind.TORRENT -> "/torrents/requestdl" to "torrent_id"
                 DownloadKind.WEB -> "/webdl/requestdl" to "web_id"
                 DownloadKind.USENET -> "/usenet/requestdl" to "usenet_id"
@@ -301,7 +327,7 @@ class TorBoxProvider(
             // Never retain a transport exception or its cause on this path.
             val data = try {
                 call("GET", path, query = mapOf(
-                    "token" to apiKey, idField to download.id, "file_id" to fileId,
+                    "token" to apiKey, idField to ref.id, "file_id" to fileId,
                 ))["data"]
             } catch (e: CancellationException) {
                 throw e
@@ -333,14 +359,16 @@ class TorBoxProvider(
     }.mapError()
 
     /** Use the selected namespace: IDs are not globally unique. */
-    suspend fun delete(download: DebridDownload): Result<Unit> = runCatching {
-        val id = download.id
-        val (path, idField) = when (download.kind) {
+    suspend fun delete(download: DebridDownload): Result<Unit> =
+        delete(DownloadRef(download.kind, download.id))
+
+    override suspend fun delete(ref: DownloadRef): Result<Unit> = runCatching {
+        val (path, idField) = when (ref.kind) {
             DownloadKind.TORRENT -> "/torrents/controltorrent" to "torrent_id"
             DownloadKind.WEB -> "/webdl/controlwebdownload" to "webdl_id"
             DownloadKind.USENET -> "/usenet/controlusenetdownload" to "usenetdownload_id"
         }
-        val numericId = id.toLongOrNull() ?: throw DebridError.NotCached()
+        val numericId = ref.id.toLongOrNull() ?: throw DebridError.NotCached()
         call(
             "POST", path,
             jsonBody = """{"operation":"delete","$idField":$numericId}""",
@@ -366,17 +394,64 @@ class TorBoxProvider(
         id: Long? = null,
         bypassCache: Boolean = false,
     ): List<DebridDownload> {
-        val query = mutableMapOf("limit" to "1000", "files" to "true")
+        if (id != null) {
+            return listKindPage(path, id = id, bypassCache = bypassCache)
+                .mapNotNull { (it as? JsonObject)?.toDownload(kind) }
+                .filter { it.id == id.toString() }
+        }
+
+        // This map is scoped to one kind and retains the first row for each ID.
+        val downloads = linkedMapOf<String, DebridDownload>()
+        var offset = 0
+        do {
+            val page = listKindPage(path, offset = offset, bypassCache = bypassCache)
+            for (item in page) {
+                val download = (item as? JsonObject)?.toDownload(kind) ?: continue
+                downloads.putIfAbsent(download.id, download)
+            }
+            offset += listPageSize
+        } while (page.size >= listPageSize)
+        return downloads.values.toList()
+    }
+
+    private suspend fun listKindPage(
+        path: String,
+        offset: Int? = null,
+        id: Long? = null,
+        bypassCache: Boolean,
+        limit: Int = listPageSize,
+    ): List<JsonElement> {
+        val query = mutableMapOf("limit" to limit.toString(), "files" to "true")
+        if (offset != null) query["offset"] = offset.toString()
         if (id != null || bypassCache) query["bypass_cache"] = "true"
         if (id != null) query["id"] = id.toString()
-        val data = call("GET", path, query = query)["data"]
-        val items = when (data) {
-            is JsonObject -> if (data.has("id")) listOf(data) else data.entrySet().mapNotNull { it.value as? JsonObject }
-            is JsonArray -> data.mapNotNull { it as? JsonObject }
+        return when (val data = call("GET", path, query = query)["data"]) {
+            is JsonObject -> if (data.has("id")) listOf(data) else data.entrySet().map { it.value }
+            is JsonArray -> data.toList()
             else -> emptyList()
         }
-        return items.mapNotNull { it.toDownload(kind) }.filter { id == null || it.id == id.toString() }
     }
+
+    /** One viewport page of one kind, for per-tab paging. Unlike the
+     *  full sync ([listDownloads]), a failure here is returned as-is:
+     *  a Usenet page error is surfaced to the caller, never swallowed,
+     *  so the UI can offer a Retry for just that page. The page is
+     *  deduped by id (first row wins), matching [listKind]. */
+    suspend fun listPage(
+        kind: DownloadKind,
+        offset: Int,
+        limit: Int,
+        bypassCache: Boolean = false,
+    ): Result<List<DebridDownload>> = runCatching {
+        require(offset >= 0) { "offset must be >= 0" }
+        require(limit > 0) { "limit must be > 0" }
+        val seen = linkedMapOf<String, DebridDownload>()
+        for (item in listKindPage(kind.listPath(), offset = offset, bypassCache = bypassCache, limit = limit)) {
+            val download = (item as? JsonObject)?.toDownload(kind) ?: continue
+            seen.putIfAbsent(download.id, download)
+        }
+        seen.values.toList()
+    }.mapError()
 
     private fun DownloadKind.listPath(): String = when (this) {
         DownloadKind.TORRENT -> "/torrents/mylist"
@@ -410,7 +485,7 @@ class TorBoxProvider(
 
     /** Cached hoster domains for the share flow (1h TTL). Public so
      *  the app can classify shared links without an extra call. */
-    suspend fun hosterDomains(): Set<String> {
+    override suspend fun hosterDomains(): Set<String> {
         val cached = hosterCache
         if (cached != null && System.currentTimeMillis() - cached.first < 3_600_000L) return cached.second
         val data = try { call("GET", "/webdl/hosters")["data"] as? JsonArray }
@@ -448,17 +523,19 @@ class TorBoxProvider(
     private fun JsonObject.toDownload(kind: DownloadKind): DebridDownload? {
         val id = optLong("id") ?: return null
         val finished = optBoolean("download_finished", false)
+        val downloadPresent = optBoolean("download_present", false)
+        val cachedFlag = optBoolean("cached", false)
         val state = optString("download_state")?.lowercase().orEmpty()
         val status = when {
-            finished -> DownloadStatus.READY
-            state in setOf("cached", "completed", "seeding", "uploading") -> DownloadStatus.READY
+            finished || downloadPresent || cachedFlag ||
+                state in setOf("cached", "seeding", "uploading") -> DownloadStatus.READY
             // TorBox's states also include metaDL (downloading metadata —
             // every magnet starts here), "stalled (no seeds)" and
-            // checking_resume_data. All three are still trying to
+            // checkingResumeData. All three are still trying to
             // download, so they show the progress row instead of
             // UNKNOWN; "stalled" is prefix-matched because the server
             // appends a reason in parentheses.
-            state == "downloading" || state == "metadl" || state == "checking_resume_data" ||
+            state == "downloading" || state == "metadl" || state.replace("_", "") == "checkingresumedata" ||
                 state.startsWith("stalled") -> DownloadStatus.DOWNLOADING
             state == "queued" -> DownloadStatus.QUEUED
             state == "paused" -> DownloadStatus.PAUSED
@@ -498,6 +575,11 @@ class TorBoxProvider(
             etaSeconds = optLong("eta")?.takeIf { it > 0 },
             seeds = optInt("seeds")?.takeIf { it >= 0 },
             peers = optInt("peers")?.takeIf { it >= 0 },
+            active = optBooleanOrNull("active"),
+            cached = optBooleanOrNull("cached"),
+            expiresAtEpochMs = optString("expires_at")?.let {
+                runCatching { Instant.parse(it).toEpochMilli() }.getOrNull()
+            },
         )
     }
 
@@ -509,45 +591,12 @@ class TorBoxProvider(
         3 -> "Pro"
         else -> "Free"
     }
-
-    /** Maps a failure to a typed [DebridError]. Cancellation is never
-     *  a failure: it is rethrown so the caller's coroutine still
-     *  cancels instead of reporting a bogus network error. */
-    private fun <T> Result<T>.mapError(): Result<T> {
-        val failure = exceptionOrNull() ?: return this
-        if (failure is CancellationException) throw failure
-        return Result.failure(if (failure is DebridError) failure else DebridError.Network(failure))
-    }
 }
 
 // ------------------------------------------------------------------
-// Gson lenient accessors
+// Hoster-domain helper
 // ------------------------------------------------------------------
 
 /** Lowercase, strip a www. prefix, drop blanks. */
 private fun String.normalizeHosterDomain(): String? =
     trim().lowercase().removePrefix("www.").takeIf { it.isNotEmpty() }
-
-internal fun JsonObject.optString(name: String): String? {
-    val el = this[name] ?: return null
-    return if (el.isJsonNull) null else runCatching { el.asString }.getOrNull()
-}
-
-internal fun JsonObject.optLong(name: String): Long? {
-    val el = this[name] ?: return null
-    return if (el.isJsonNull) null else runCatching { el.asLong }.getOrNull()
-        ?: el.asString.toLongOrNull()
-}
-
-internal fun JsonObject.optInt(name: String): Int? = optLong(name)?.toInt()
-
-internal fun JsonObject.optDouble(name: String): Double? {
-    val el = this[name] ?: return null
-    return if (el.isJsonNull) null else runCatching { el.asDouble }.getOrNull()
-        ?: el.asString.toDoubleOrNull()
-}
-
-internal fun JsonObject.optBoolean(name: String, default: Boolean): Boolean {
-    val el = this[name] ?: return default
-    return if (el.isJsonNull) default else runCatching { el.asBoolean }.getOrNull() ?: default
-}

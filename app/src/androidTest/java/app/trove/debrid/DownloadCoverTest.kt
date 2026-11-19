@@ -1,6 +1,7 @@
 package app.trove.debrid
 
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.style.TextOverflow
@@ -41,5 +42,18 @@ class DownloadCoverTest {
         rule.onNodeWithText("2026 · Movie").assertExists()
         rule.onNodeWithText("Web · Ready").assertExists()
         rule.onNodeWithText("MKV").assertDoesNotExist()
+    }
+
+    @Test fun renamedDownloadUpdatesParsedTitle() {
+        val current = mutableStateOf(download)
+        rule.setContent { MaterialTheme { DownloadCover(current.value) } }
+        rule.onNodeWithText("Baththa").assertExists()
+
+        rule.runOnIdle {
+            current.value = download.copy(name = "Arrival.2016.1080p.WEB-Rip.HEVC-GROUP.mkv")
+        }
+
+        rule.onNodeWithText("Arrival").assertExists()
+        rule.onNodeWithText("Baththa").assertDoesNotExist()
     }
 }

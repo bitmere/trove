@@ -6,21 +6,13 @@ import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class PremiumizeProviderTest {
-    private class FakeTransport(private val handler: (HttpRequest) -> HttpResponse) : HttpTransport {
-        val requests = mutableListOf<HttpRequest>()
-
-        override suspend fun execute(request: HttpRequest): HttpResponse {
-            requests += request
-            return handler(request)
-        }
-    }
-
-    private fun provider(handler: (HttpRequest) -> HttpResponse): Pair<PremiumizeProvider, FakeTransport> {
-        val fake = FakeTransport(handler)
+    private fun provider(handler: (HttpRequest) -> HttpResponse): Pair<PremiumizeProvider, RecordingTransport> {
+        val fake = RecordingTransport(handler)
         return PremiumizeProvider(KEY, fake, TokenBucket(4.0, 100), TokenBucket(0.5, 20), pollDelayMs = 0) to fake
     }
 
@@ -121,6 +113,46 @@ class PremiumizeProviderTest {
             }
             assertEquals("/transfer/delete", fake.requests.last().path)
             assertEquals(mapOf("id" to "transfer-a"), fake.requests.last().formFields)
+        }
+    }
+
+    @Test
+    fun `a JVM Error escapes instead of mapping to a network failure`() = runBlocking {
+        val error = OutOfMemoryError("test")
+        val (provider, _) = provider { throw error }
+        assertSame(error, runCatching { provider.validateAccount() }.exceptionOrNull())
+    }
+
+    @Test
+    fun `string and numeric JSON fields parse identically after the opt migration`() = runBlocking {
+        suspend fun downloadFor(progress: String, createdAt: String): DebridDownload {
+            val (provider, _) = provider {
+                when (it.path) {
+                    "/transfer/list" -> transfer("running", ""","progress":$progress,"created_at":$createdAt""")
+                    "/item/listall" -> ok(""" "files":[] """)
+                    else -> unexpected(it)
+                }
+            }
+            return provider.listDownloads().getOrThrow().single()
+        }
+        val asNumbers = downloadFor("0.42", "125")
+        val asStrings = downloadFor("\"0.42\"", "\"125\"")
+        assertEquals(asNumbers, asStrings)
+        assertEquals(0.42f, asNumbers.progress, 0.001f)
+        assertEquals(125_000L, asNumbers.createdAtEpochMs)
+    }
+
+    @Test
+    fun `account fields read numbers and numeric strings alike`() = runBlocking {
+        for (body in listOf(
+            """"customer_id":"42","premium_until":4102444800,"booster_points":1234""",
+            """"customer_id":"42","premium_until":"4102444800","booster_points":"1234"""",
+        )) {
+            val (provider, _) = provider { ok(body) }
+            assertEquals(
+                AccountInfo("42", true, "Premium · 1234 booster points"),
+                provider.validateAccount().getOrThrow(),
+            )
         }
     }
 

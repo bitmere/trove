@@ -139,7 +139,7 @@ class RealDebridProvider(
         Result.success(false)
     }
 
-    suspend fun hosterDomains(): Set<String> = domainsMutex.withLock {
+    override suspend fun hosterDomains(): Set<String> = domainsMutex.withLock {
         if (SystemClock.nowMillis() >= domainsExpireAt) {
             cachedDomains = call("GET", "/hosts/domains").requireArray().mapNotNull {
                 it.stringValue()?.trim()?.lowercase()?.trimEnd('.')?.takeIf(String::isNotEmpty)
@@ -327,13 +327,6 @@ class RealDebridProvider(
     private fun JsonElement?.requireArray(): JsonArray = this as? JsonArray ?: throw unreadableResponse()
 
     private fun unreadableResponse() = DebridError.Provider("bad-response", "Real-Debrid returned an unreadable response")
-
-    private fun <T> Result<T>.mapError(): Result<T> {
-        val failure = exceptionOrNull() ?: return this
-        if (failure is CancellationException) throw failure
-        if (failure !is Exception) throw failure
-        return Result.failure(if (failure is DebridError) failure else DebridError.Network(failure))
-    }
 
     companion object {
         const val BASE = "https://api.real-debrid.com/rest/1.0"

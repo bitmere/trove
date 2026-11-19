@@ -42,6 +42,7 @@
     <string name="no_matches">No matches</string>
     <string name="empty_library">Room for your next find</string>
     <string name="try_again">Try again</string>
+    <string name="loading_more">Loading more…</string>
     <string name="add_download">Add download</string>
     <string name="shortcut_add">Add</string>
     <string name="shortcut_target_package" translatable="false">app.trove.debrid</string>
@@ -160,6 +161,14 @@
     <string name="delete_body">“%1$s” will be removed from TorBox.</string>
     <string name="file_count_size">%1$s · %2$d files</string>
     <string name="details_metadata">%1$s · %2$s · %3$s</string>
+    <string name="directed_by">Directed by %1$s</string>
+    <string name="cast_list">Cast: %1$s</string>
+    <string name="match_picker_title">Which one is this?</string>
+    <string name="match_picker_hint">Pick the right title. It applies to this download only.</string>
+    <string name="clear_metadata_override">Clear match</string>
+    <string name="episodes_count">Episodes (%1$d)</string>
+    <string name="show_all_episodes">Show all episodes (%1$d)</string>
+    <string name="show_season_only">Show only season %1$d</string>
     <string name="files_count">Files · %1$d</string>
     <string name="play_file">Play %1$s</string>
     <string name="no_query_match">No downloads match “%1$s”.</string>
@@ -237,6 +246,19 @@
     <string name="apply_release_words">Apply</string>
     <string name="release_preferences_failed">Couldn’t load or save release preferences.</string>
     <string name="show_clutter_files">Show clutter files</string>
+    <string name="clear">Clear</string>
+    <string name="clear_cached_metadata">Clear cached metadata</string>
+    <string name="clear_cached_metadata_description">Removes saved titles, posters and episode lists. They download again when needed.</string>
+    <string name="cached_metadata_cleared">Cached metadata cleared.</string>
+    <string name="tmdb_title">TMDB (optional)</string>
+    <string name="tmdb_api_key">TMDB API Read Access Token</string>
+    <string name="tmdb_replace_key">Replace TMDB key</string>
+    <string name="tmdb_saved_key">Saved TMDB key: %1$s</string>
+    <string name="tmdb_key_help">Optional. Your own TMDB API Read Access Token is used only when Cinemeta has no match for a title. It is stored encrypted on this device and never leaves it except in TMDB requests.</string>
+    <string name="tmdb_save_key">Save TMDB key</string>
+    <string name="tmdb_key_saved">TMDB key saved.</string>
+    <string name="tmdb_key_failed">Couldn’t check that TMDB key. Check it and try again.</string>
+    <string name="tmdb_attribution">This product uses TMDB and the TMDB APIs but is not endorsed, certified, or otherwise approved by TMDB.</string>
     <string name="clipboard_offers_setting">Offer to add copied torrent links</string>
     <string name="clipboard_offers_setting_failed">Couldn’t load or save the clipboard offer setting.</string>
     <string name="clipboard_offer_title">Add copied link?</string>

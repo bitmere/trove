@@ -63,9 +63,9 @@ class PremiumizeProvider(
 
     override suspend fun validateAccount(): Result<AccountInfo> = runCatching {
         val account = call("GET", "/account/info")
-        val premium = (account.long("premium_until") ?: 0) > SystemClock.nowMillis() / 1000
+        val premium = (account.optLong("premium_until") ?: 0) > SystemClock.nowMillis() / 1000
         val plan = if (premium) "Premium" else "Free"
-        val points = account.long("booster_points")
+        val points = account.optLong("booster_points")
         AccountInfo(
             account.safeValue("customer_id"),
             premium,
@@ -147,18 +147,18 @@ class PremiumizeProvider(
         } else {
             val entry = transfer(downloadId)
             if (entry.transferStatus() != DownloadStatus.READY) throw DebridError.NotCached()
-            val singleFileId = entry.value("file_id")
+            val singleFileId = entry.optNonBlankString("file_id")
             if (singleFileId != null) {
                 if (singleFileId != fileId) throw DebridError.NotCached()
                 item(fileId)
             } else {
-                val folder = entry.value("folder_id") ?: throw DebridError.NotCached()
-                folderFiles(folder).firstOrNull { it.first.value("id") == fileId }?.first
+                val folder = entry.optNonBlankString("folder_id") ?: throw DebridError.NotCached()
+                folderFiles(folder).firstOrNull { it.first.optNonBlankString("id") == fileId }?.first
                     ?: throw DebridError.NotCached()
             }
         }
         // Cloud APIs already return a per-file CDN link.
-        StreamUrl(checkedLink(cloudFile.value("link")))
+        StreamUrl(checkedLink(cloudFile.optNonBlankString("link")))
     }.mapError()
 
     override suspend fun control(id: String, action: ControlAction): Result<Unit> =
@@ -196,7 +196,7 @@ class PremiumizeProvider(
     private var cachedPatterns = emptyList<Regex>()
     private var domainsExpireAt = 0L
 
-    suspend fun hosterDomains(): Set<String> = domainsMutex.withLock {
+    override suspend fun hosterDomains(): Set<String> = domainsMutex.withLock {
         if (SystemClock.nowMillis() >= domainsExpireAt) {
             val services = try {
                 call("GET", "/services/list", authenticated = false)
@@ -228,8 +228,8 @@ class PremiumizeProvider(
         val files = content.map { entry ->
             val path = entry.safeValue("path") ?: throw unreadableResponse()
             val fileId = opaqueId(path)
-            links[fileId] = StreamUrl(checkedLink(entry.value("link")))
-            DebridFile(fileId, path.substringAfterLast('/'), entry.long("size") ?: 0, path)
+            links[fileId] = StreamUrl(checkedLink(entry.optNonBlankString("link")))
+            DebridFile(fileId, path.substringAfterLast('/'), entry.optLong("size") ?: 0, path)
         }
         val download = DebridDownload(
             id, service, files.first().name, files.sumOf { it.sizeBytes }, DownloadStatus.READY, 1f,
@@ -260,7 +260,7 @@ class PremiumizeProvider(
             repeat(MAX_POLLS) { attempt ->
                 currentCoroutineContext().ensureActive()
                 if (attempt > 0) delay(pollDelayMs)
-                val entry = transfers().firstOrNull { it.value("id") == id } ?: return@repeat
+                val entry = transfers().firstOrNull { it.optNonBlankString("id") == id } ?: return@repeat
                 latest = entry.toTransfer()
                 if (latest.status == DownloadStatus.READY) return latest
                 if (latest.status == DownloadStatus.ERROR) {
@@ -290,7 +290,7 @@ class PremiumizeProvider(
 
     private suspend fun transfer(id: String): JsonObject {
         val verifiedId = resourceId(id)
-        return transfers().firstOrNull { it.value("id") == verifiedId } ?: throw DebridError.NotCached()
+        return transfers().firstOrNull { it.optNonBlankString("id") == verifiedId } ?: throw DebridError.NotCached()
     }
 
     private suspend fun item(id: String): JsonObject =
@@ -308,7 +308,7 @@ class PremiumizeProvider(
             for (entry in response.objects("content")) {
                 val name = entry.safeValue("name")
                 val path = if (dir == null) name else "$dir/${name ?: "File"}"
-                when (entry.value("type")) {
+                when (entry.optNonBlankString("type")) {
                     "folder" -> pending.add(entry.id() to path)
                     "file" -> files.add(entry to path)
                 }
@@ -320,8 +320,8 @@ class PremiumizeProvider(
     private suspend fun JsonObject.toTransfer(cloudItems: Map<String, JsonObject>? = null): DebridDownload {
         val id = id()
         val status = transferStatus()
-        val fileId = value("file_id")
-        val folderId = value("folder_id")
+        val fileId = optNonBlankString("file_id")
+        val folderId = optNonBlankString("folder_id")
         val files = try {
             when {
                 status != DownloadStatus.READY -> emptyList()
@@ -341,15 +341,15 @@ class PremiumizeProvider(
             files.takeIf { it.isNotEmpty() }?.sumOf { it.sizeBytes },
             status,
             if (status == DownloadStatus.READY) 1f else
-                value("progress")?.toFloatOrNull()?.takeIf { it.isFinite() }?.coerceIn(0f, 1f) ?: 0f,
+                optNonBlankString("progress")?.toFloatOrNull()?.takeIf { it.isFinite() }?.coerceIn(0f, 1f) ?: 0f,
             files = files,
             kind = if (id in usenetTransfers) DownloadKind.USENET else DownloadKind.TORRENT,
             createdAtEpochMs = epochMs(),
-            errorMessage = if (status == DownloadStatus.ERROR) safeDetail(value("message")) else null,
+            errorMessage = if (status == DownloadStatus.ERROR) safeDetail(optNonBlankString("message")) else null,
         )
     }
 
-    private fun JsonObject.transferStatus(): DownloadStatus = when (value("status")?.lowercase()) {
+    private fun JsonObject.transferStatus(): DownloadStatus = when (optNonBlankString("status")?.lowercase()) {
         "finished", "seeding" -> DownloadStatus.READY
         "running", "downloading" -> DownloadStatus.DOWNLOADING
         "queued", "waiting" -> DownloadStatus.QUEUED
@@ -360,13 +360,13 @@ class PremiumizeProvider(
     private fun JsonObject.toItem(): DebridDownload {
         val file = toFile()
         return DebridDownload(
-            ITEM_PREFIX + file.id, service, file.name, long("size"), DownloadStatus.READY, 1f,
+            ITEM_PREFIX + file.id, service, file.name, optLong("size"), DownloadStatus.READY, 1f,
             files = listOf(file), kind = DownloadKind.WEB, createdAtEpochMs = epochMs(),
         )
     }
 
     private fun JsonObject.toFile(path: String? = safeValue("path")) =
-        DebridFile(id(), safeValue("name") ?: "File", long("size") ?: 0, path)
+        DebridFile(id(), safeValue("name") ?: "File", optLong("size") ?: 0, path)
 
     private suspend fun call(
         method: String,
@@ -383,17 +383,17 @@ class PremiumizeProvider(
             multipart = multipart,
         ))
         val envelope = runCatching { JsonParser.parseString(response.body) }.getOrNull() as? JsonObject
-        val code = envelope?.value("code")
+        val code = envelope?.optNonBlankString("code")
         if (response.status == 429 || code == "rate_limit_reached") {
             val retryAfter = response.headers.entries.firstOrNull { it.key.equals("Retry-After", true) }
                 ?.value?.trim()?.let(::retryAfterSeconds)
             throw DebridError.RateLimited(retryAfter)
         }
         if (response.status == 401 || code == "authentication_failed") throw DebridError.AuthInvalid()
-        if (response.status !in 200..299 || envelope?.value("status") == "error") {
-            throw apiError(code, envelope?.value("message"), "http${response.status}")
+        if (response.status !in 200..299 || envelope?.optNonBlankString("status") == "error") {
+            throw apiError(code, envelope?.optNonBlankString("message"), "http${response.status}")
         }
-        if (envelope?.value("status") != "success") throw unreadableResponse()
+        if (envelope?.optNonBlankString("status") != "success") throw unreadableResponse()
         return envelope
     }
 
@@ -457,11 +457,9 @@ class PremiumizeProvider(
     private fun resourceId(value: String): String =
         value.takeIf { it.matches(RESOURCE_ID) && !containsKey(it) } ?: throw DebridError.NotCached()
 
-    private fun JsonObject.id(): String = resourceId(value("id") ?: throw unreadableResponse())
-    private fun JsonObject.safeValue(key: String): String? = safeText(value(key))
-    private fun JsonObject.value(key: String): String? = get(key).text()
-    private fun JsonObject.long(key: String): Long? = value(key)?.toLongOrNull()
-    private fun JsonObject.epochMs(): Long? = long("created_at")
+    private fun JsonObject.id(): String = resourceId(optNonBlankString("id") ?: throw unreadableResponse())
+    private fun JsonObject.safeValue(key: String): String? = safeText(optNonBlankString(key))
+    private fun JsonObject.epochMs(): Long? = optLong("created_at")
         ?.takeIf { it in 1..Long.MAX_VALUE / 1000 }?.times(1000)
 
     private fun JsonElement?.text(): String? = this?.takeIf { it.isJsonPrimitive }
@@ -474,12 +472,6 @@ class PremiumizeProvider(
 
     private fun unreadableResponse() =
         DebridError.Provider("bad-response", "Premiumize returned an unreadable response")
-
-    private fun <T> Result<T>.mapError(): Result<T> {
-        val failure = exceptionOrNull() ?: return this
-        if (failure is CancellationException || failure !is Exception) throw failure
-        return Result.failure(if (failure is DebridError) failure else DebridError.Network(failure))
-    }
 
     companion object {
         const val BASE = "https://www.premiumize.me/api"

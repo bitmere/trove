@@ -2,6 +2,7 @@ package app.trove.debrid
 
 import app.trove.debrid.core.PlayerComponent
 import app.trove.debrid.core.VideoPlayer
+import app.trove.debrid.data.TroveRepository
 import app.trove.debrid.ui.downloads.DownloadsViewModel
 import app.trove.debrid.ui.settings.SettingsViewModel
 import kotlinx.coroutines.Dispatchers
@@ -19,6 +20,18 @@ class DefaultPlayerViewModelTest {
     private val player = PlayerComponent("org.example.player", "org.example.player.VideoActivity")
     @Before fun setUp() { Dispatchers.setMain(dispatcher) }
     @After fun tearDown() { Dispatchers.resetMain() }
+
+    // Preparation must run on the runTest scheduler: the default
+    // Dispatchers.Default escapes virtual time, and its resume onto Main
+    // can land after resetMain(), when Main is again the unmocked-Looper
+    // MissingMain dispatcher. That resume fails fatally on the Default
+    // worker and the shared ExceptionCollector charges it to the next test
+    // in the fork (UncaughtExceptionsBeforeTest), even in a class that
+    // never builds a ViewModel. Injecting the test dispatcher keeps
+    // preparation, the 250 ms debounce and the return to Main on the
+    // drainable scheduler.
+    private fun TestScope.viewModel(repo: TroveRepository) =
+        DownloadsViewModel(repo, StandardTestDispatcher(testScheduler))
 
     @Test fun `settings discovers players loads default and can choose then clear`() = runTest {
         val repo = FakeRepository()
@@ -69,7 +82,7 @@ class DefaultPlayerViewModelTest {
 
     @Test fun `play with is one event and never changes saved default`() = runTest {
         val repo = FakeRepository().apply { savedPlayer = player }
-        val vm = DownloadsViewModel(repo)
+        val vm = viewModel(repo)
         advanceUntilIdle()
         val download = sampleDownload()
         vm.playFile(download, download.files.first().id, askEveryTime = true)

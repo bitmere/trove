@@ -1,5 +1,7 @@
 package app.trove.debrid.core
 
+data class DownloadRef(val kind: DownloadKind, val id: String)
+
 /** Everything the UI ever asks a provider to do. One method per user
  *  intent, not one per endpoint — the adapter hides how many HTTP
  *  calls that takes. */
@@ -23,6 +25,8 @@ interface DebridProvider {
     /** One download's fresh state (for polling progress). */
     suspend fun getDownload(id: String): Result<DebridDownload>
 
+    suspend fun getDownload(ref: DownloadRef): Result<DebridDownload> = getDownload(ref.id)
+
     /** Add a magnet / .torrent file / hoster link / NZB. The input is
      *  already classified by the share/add flow. Returns the created
      *  download; adapters that need a second step (RD selectFiles) do
@@ -40,11 +44,17 @@ interface DebridProvider {
      *  chooser — any player may take it. */
     suspend fun getStreamUrl(downloadId: String, fileId: String): Result<StreamUrl>
 
+    suspend fun getStreamUrl(ref: DownloadRef, fileId: String): Result<StreamUrl> = getStreamUrl(ref.id, fileId)
+
     /** Pause/resume where supported; failure(UnsupportedCapability)
      *  otherwise. */
     suspend fun control(id: String, action: ControlAction): Result<Unit>
 
     suspend fun delete(id: String): Result<Unit>
+
+    suspend fun delete(ref: DownloadRef): Result<Unit> = delete(ref.id)
+
+    suspend fun hosterDomains(): Set<String> = emptySet()
 
     /** Hoster support for the share flow: "can this provider take
      *  this URL?" */

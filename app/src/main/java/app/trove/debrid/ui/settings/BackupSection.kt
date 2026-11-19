@@ -86,7 +86,7 @@ internal fun BackupSection(state: SettingsUiState, viewModel: SettingsViewModel,
 
     if (showBackup) {
         BackupDialog(
-            hasKey = state.hasKey,
+            hasKey = state.torbox.hasKey,
             onDismiss = { showBackup = false },
             onContinue = { includeSignIn, password ->
                 showBackup = false

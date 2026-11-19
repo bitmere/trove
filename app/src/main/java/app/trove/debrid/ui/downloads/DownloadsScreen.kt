@@ -58,6 +58,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
@@ -141,13 +142,62 @@ fun DownloadsScreen(
 
     // Memoized so tab/query filtering and counting do not redo list
     // work on every recomposition.
-    val counts = remember(state.downloads) {
-        state.downloads.groupBy { it.kind }.mapValues { it.value.size }
+    // Counts are loaded-so-far per tab; a "+" marks a tab with more
+    // pages still to load (Step 2). Unvisited tabs have no count yet.
+    val counts = remember(state.pagedByTab) {
+        state.pagedByTab.mapValues { it.value.loaded.size }
     }
-    val visibleByTab = remember(state.downloads, state.query, state.sort, state.preferWords) {
+    val hasMorePages = remember(state.pagedByTab) {
+        state.pagedByTab.mapValues { it.value.visited && !it.value.endReached }
+    }
+    val visibleByTab = remember(state.downloads, state.query, state.sort, state.preferWords, state.visibleByTab) {
         DownloadKind.entries.associateWith { viewModel.visibleDownloads(state, it) }
     }
     val visible = visibleByTab.getValue(selectedTab)
+
+    // Step 2b — scroll-anchor + process-death restoration. Only small
+    // non-secret UI state is saved: the query, the anchor row (kind +
+    // id + visible index + the sort/query it was captured under), and
+    // the opaque account identity (provider service name). The sort
+    // already persists in Settings preferences, and the tab survives
+    // through the pager's own saved state. No keys or credentials.
+    var savedQuery by rememberSaveable { mutableStateOf("") }
+    var savedAnchorKind by rememberSaveable { mutableStateOf<String?>(null) }
+    var savedAnchorId by rememberSaveable { mutableStateOf<String?>(null) }
+    var savedAnchorIndex by rememberSaveable { mutableStateOf(0) }
+    var savedAnchorSort by rememberSaveable { mutableStateOf<String?>(null) }
+    var savedAnchorQuery by rememberSaveable { mutableStateOf("") }
+    var savedAnchorAccount by rememberSaveable { mutableStateOf<String?>(null) }
+    // Restore first: this runs before the sync effect below, so a
+    // restored query is not overwritten by the fresh VM's blank one.
+    LaunchedEffect(Unit) {
+        if (savedQuery.isNotBlank() && state.query.isBlank()) {
+            viewModel.setQuery(savedQuery)
+        }
+        val kind = savedAnchorKind?.let { runCatching { DownloadKind.valueOf(it) }.getOrNull() }
+        val sort = savedAnchorSort?.let { runCatching { DownloadSort.valueOf(it) }.getOrNull() }
+        val id = savedAnchorId
+        if (kind != null && sort != null && id != null) {
+            viewModel.setPendingAnchor(
+                ScrollAnchor(kind, id, savedAnchorIndex, sort, savedAnchorQuery),
+                savedAnchorAccount,
+            )
+        }
+    }
+    LaunchedEffect(state.query) { savedQuery = state.query }
+    // Capture the anchor only once a fling settles, not on every frame.
+    LaunchedEffect(settledPosition) {
+        val position = settledPosition ?: return@LaunchedEffect
+        if (visible.isEmpty()) return@LaunchedEffect
+        viewModel.captureAnchor(selectedTab, position.first)?.let { anchor ->
+            savedAnchorKind = anchor.kind.name
+            savedAnchorId = anchor.id
+            savedAnchorIndex = anchor.index
+            savedAnchorSort = anchor.sort.name
+            savedAnchorQuery = anchor.query
+            savedAnchorAccount = viewModel.currentAccountIdentity()
+        }
+    }
 
     // Content, scroll completion and navigation invalidate the snapshot.
     // A fresh composition after navigation also gets a fresh identity and layer.
@@ -250,7 +300,7 @@ fun DownloadsScreen(
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
                 windowInsets = androidx.compose.foundation.layout.WindowInsets(0, 0, 0, 0),
             )
-            Subtabs(counts, pagerState) { kind ->
+            Subtabs(counts, hasMorePages, pagerState) { kind ->
                 scope.launch { pagerState.animateScrollToPage(kind.ordinal) }
             }
             Row(
@@ -299,6 +349,38 @@ fun DownloadsScreen(
             ) { page ->
                 val tab = DownloadKind.entries[page]
                 val pageDownloads = visibleByTab.getValue(tab)
+                val tabState = state.pagedByTab[tab] ?: PagedTabState()
+                val tabListState = listStates.getValue(tab)
+                // Viewport appends (Step 2): when the last visible row
+                // is within 10 of the end and more pages exist, load
+                // the next page. A failed page blocks re-triggering
+                // until Retry; a loading page blocks until it lands.
+                LaunchedEffect(tabListState, pageDownloads.size, tabState.endReached, tabState.pageLoading, tabState.pageError) {
+                    snapshotFlow { tabListState.layoutInfo.visibleItemsInfo.lastOrNull()?.index }.collect { lastIndex ->
+                        if (lastIndex != null && pageDownloads.isNotEmpty() &&
+                            lastIndex >= pageDownloads.size - 10 &&
+                            !tabState.endReached && !tabState.pageLoading && tabState.pageError == null
+                        ) {
+                            viewModel.loadNextPage(tab)
+                        }
+                    }
+                }
+                // Step 2b: restore the saved scroll anchor once its row
+                // is in the loaded set; if the tab finishes loading
+                // without it, the anchor is dropped and the list stays
+                // at the top.
+                val pendingAnchor = state.pendingAnchor
+                LaunchedEffect(pendingAnchor, pageDownloads, tabState.endReached) {
+                    val anchor = pendingAnchor ?: return@LaunchedEffect
+                    if (anchor.kind != tab) return@LaunchedEffect
+                    val index = viewModel.anchorRowIndex(anchor)
+                    if (index != null) {
+                        tabListState.scrollToItem(index)
+                        viewModel.consumePendingAnchor()
+                    } else if (tabState.endReached) {
+                        viewModel.consumePendingAnchor()
+                    }
+                }
                 when {
                     state.loading -> Box(
                         modifier = Modifier.fillMaxSize(),
@@ -314,8 +396,18 @@ fun DownloadsScreen(
                             modifier = Modifier.fillMaxSize(),
                         ) {
                             if (pageDownloads.isEmpty()) {
-                                LibraryEmptyState(tab, state.query, state.loadError, onAdd,
-                                    { viewModel.setQuery("") }, viewModel::refresh)
+                                // An unvisited tab has not loaded page 0
+                                // yet: show a spinner, not the empty
+                                // state, until its first page lands.
+                                if (tabState.pageLoading || !tabState.visited) {
+                                    Box(
+                                        modifier = Modifier.fillMaxSize(),
+                                        contentAlignment = Alignment.Center,
+                                    ) { CircularProgressIndicator(color = MaterialTheme.colorScheme.primary) }
+                                } else {
+                                    LibraryEmptyState(tab, state.query, state.loadError, onAdd,
+                                        { viewModel.setQuery("") }, viewModel::refresh)
+                                }
                             } else {
                                 LazyColumn(
                                     state = listStates.getValue(tab),
@@ -335,6 +427,18 @@ fun DownloadsScreen(
                                             onOpen = { if (viewModel.isCurrentDownload(download)) viewModel.openDownload(download) },
                                             onLongPress = { if (viewModel.isCurrentDownload(download)) viewModel.requestDelete(download) },
                                         )
+                                    }
+                                    // A failed page never clears loaded
+                                    // rows: Retry re-requests only it.
+                                    val pageError = tabState.pageError
+                                    if (pageError != null) {
+                                        item(key = "page-error") {
+                                            PageErrorRow(pageError) { viewModel.retryPage(tab) }
+                                        }
+                                    } else if (tabState.pageLoading) {
+                                        item(key = "page-loading") {
+                                            LoadingMoreRow()
+                                        }
                                     }
                                 }
                             }
@@ -414,6 +518,8 @@ fun DownloadsScreen(
             },
             onPlay = { if (viewModel.isCurrentDownload(download)) viewModel.playFile(download, it) },
             onPlayWith = { if (viewModel.isCurrentDownload(download)) viewModel.playFile(download, it, askEveryTime = true) },
+            onPickCandidate = { if (viewModel.isCurrentDownload(download)) viewModel.pickCandidate(download, it) },
+            onClearOverride = { if (viewModel.isCurrentDownload(download)) viewModel.clearMetadataOverride(download) },
             onDelete = {
                 scope.launch {
                     detailsSheetState.hide()
@@ -444,6 +550,7 @@ fun DownloadsScreen(
 @Composable
 private fun Subtabs(
     counts: Map<DownloadKind, Int>,
+    hasMorePages: Map<DownloadKind, Boolean>,
     pagerState: PagerState,
     onSelect: (DownloadKind) -> Unit,
 ) {
@@ -466,9 +573,56 @@ private fun Subtabs(
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         Text(label, style = MaterialTheme.typography.labelLarge, maxLines = 1, softWrap = false)
                         CountPill(counts[kind] ?: 0, selected = kind == selected)
+                        // Loaded-so-far count: "+" marks a tab with more
+                        // pages still to load (Step 2).
+                        if (hasMorePages[kind] == true) {
+                            Text("+", style = MaterialTheme.typography.labelLarge,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1, softWrap = false)
+                        }
                     }
                 })
         }
+    }
+}
+
+/** A failed page keeps its loaded rows: this row offers a Retry for
+ *  just that page. */
+@Composable
+private fun PageErrorRow(message: String, onRetry: () -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = TroveSpace.small),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(TroveSpace.small),
+    ) {
+        Text(
+            text = message,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.weight(1f),
+        )
+        TextButton(onClick = onRetry) {
+            Text(stringResource(R.string.try_again))
+        }
+    }
+}
+
+@Composable
+private fun LoadingMoreRow() {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = TroveSpace.small),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(TroveSpace.small, Alignment.CenterHorizontally),
+    ) {
+        CircularProgressIndicator(
+            color = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.size(TroveSpace.section),
+        )
+        Text(
+            text = stringResource(R.string.loading_more),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 

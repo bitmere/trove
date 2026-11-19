@@ -18,9 +18,12 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import app.trove.debrid.core.*
 import app.trove.debrid.ui.theme.TroveSpace
+import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
@@ -34,10 +37,26 @@ internal fun DownloadDetailsSheet(
     onPlayWith: (String) -> Unit,
     onDelete: () -> Unit,
     showClutterFiles: Boolean = false,
+    onPickCandidate: (MediaCandidate) -> Unit = {},
+    onClearOverride: () -> Unit = {},
 ) {
     val visibleFiles = remember(download.files, showClutterFiles) {
         if (showClutterFiles) download.files else download.files.filterNot { isClutterFile(it.name) }
     }
+    val metadata = state.metadata[download.kind to download.id]
+    val candidates = state.candidates[download.kind to download.id].orEmpty()
+    val storedOverride = state.metadataOverrides[download.kind to download.id]
+    val title = remember(download.name, metadata) {
+        if (metadata == null) download.name else downloadIdentity(download, metadata).title
+    }
+    val episodes = metadata?.episodes.orEmpty()
+    val matchedEpisode = remember(episodes, download.name) {
+        if (episodes.isEmpty()) null else matchingEpisode(episodes, parseReleaseDetails(download.name).episode)
+    }
+    val currentSeason = matchedEpisode?.season ?: episodes.firstOrNull()?.season
+    var showAllEpisodes by remember(download.kind, download.id) { mutableStateOf(false) }
+    val seasonEpisodes = remember(episodes, currentSeason) { episodes.filter { it.season == currentSeason } }
+    val visibleEpisodes = if (showAllEpisodes) episodes else seasonEpisodes
     val busy = state.resolvingDownload != null || state.playUrl != null || dismissing
     val canClose = !busy || (state.resolvingDownload != null && download.files.isEmpty() && !dismissing)
     val ready = download.status == DownloadStatus.READY && visibleFiles.isNotEmpty()
@@ -52,7 +71,7 @@ internal fun DownloadDetailsSheet(
         ) {
             item {
                 Column(verticalArrangement = Arrangement.spacedBy(TroveSpace.compact)) {
-                    Text(download.name, style = MaterialTheme.typography.headlineSmall)
+                    Text(title, style = MaterialTheme.typography.headlineSmall)
                     Text(stringResource(R.string.details_metadata, kindWord(download.kind), formatSize(download.sizeBytes), statusWord(download.status)),
                         style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     DownloadTransfer(download)
@@ -70,6 +89,49 @@ internal fun DownloadDetailsSheet(
                         style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
+            if (metadata != null) {
+                val facts = listOfNotNull(
+                    metadata.year?.toString(),
+                    metadata.genres.takeIf { it.isNotEmpty() }?.joinToString(", "),
+                    metadata.runtime?.takeIf { it.isNotBlank() },
+                    metadata.imdbRating?.let { String.format(Locale.ROOT, "IMDb %.1f", it) },
+                ).joinToString(" · ")
+                val overview = metadata.overview?.takeIf { it.isNotBlank() }
+                val director = metadata.director?.takeIf { it.isNotBlank() }
+                if (overview != null || facts.isNotEmpty() || director != null || metadata.cast.isNotEmpty()) item {
+                    Column(verticalArrangement = Arrangement.spacedBy(TroveSpace.compact)) {
+                        overview?.let { Text(it, style = MaterialTheme.typography.bodyMedium) }
+                        if (facts.isNotEmpty()) MetadataLine(facts)
+                        director?.let { MetadataLine(stringResource(R.string.directed_by, it), compact = true) }
+                        if (metadata.cast.isNotEmpty()) {
+                            MetadataLine(stringResource(R.string.cast_list, metadata.cast.joinToString(", ")), compact = true)
+                        }
+                    }
+                }
+            }
+            if (metadata != null && storedOverride != null) item {
+                TextButton(onClick = onClearOverride) { Text(stringResource(R.string.clear_metadata_override)) }
+            }
+            if (metadata == null && candidates.isNotEmpty()) item {
+                Column(verticalArrangement = Arrangement.spacedBy(TroveSpace.compact)) {
+                    Text(stringResource(R.string.match_picker_title), style = MaterialTheme.typography.titleMedium)
+                    Text(stringResource(R.string.match_picker_hint), style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    candidates.forEach { candidate ->
+                        val typeWord = stringResource(
+                            if (candidate.type == "series") R.string.media_series else R.string.media_movie)
+                        val label = buildString {
+                            append(candidate.title)
+                            candidate.year?.let { append(" ($it)") }
+                            append(" · ")
+                            append(typeWord)
+                        }
+                        TextButton(onClick = { onPickCandidate(candidate) }, modifier = Modifier.fillMaxWidth()) {
+                            Text(label, modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Start)
+                        }
+                    }
+                }
+            }
             item {
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(TroveSpace.small)) {
                     Button(onClick = { visibleFiles.firstOrNull()?.let { onPlay(it.id) } }, enabled = ready && !busy) {
@@ -83,6 +145,34 @@ internal fun DownloadDetailsSheet(
                     TextButton(onClick = onDelete, enabled = !busy,
                         colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)) { Text(stringResource(R.string.delete)) }
                     TextButton(onClick = onClose, enabled = canClose) { Text(stringResource(R.string.close)) }
+                }
+            }
+            if (currentSeason != null) {
+                item {
+                    Column {
+                        Text(stringResource(R.string.episodes_count, episodes.size), style = MaterialTheme.typography.titleMedium)
+                        TextButton(onClick = { showAllEpisodes = !showAllEpisodes }) {
+                            Text(
+                                if (showAllEpisodes) stringResource(R.string.show_season_only, currentSeason)
+                                else stringResource(R.string.show_all_episodes, episodes.size)
+                            )
+                        }
+                    }
+                }
+                items(visibleEpisodes, key = { it.season to it.episode }) { episode ->
+                    val color = if (episode == matchedEpisode) MaterialTheme.colorScheme.secondaryContainer
+                        else MaterialTheme.colorScheme.surfaceContainerHigh
+                    Surface(shape = MaterialTheme.shapes.medium, color = color) {
+                        Column(
+                            Modifier.fillMaxWidth().padding(TroveSpace.medium),
+                            verticalArrangement = Arrangement.spacedBy(TroveSpace.micro),
+                        ) {
+                            val number = String.format(Locale.ROOT, "S%02dE%02d", episode.season, episode.episode)
+                            val title = episode.title?.takeIf { it.isNotBlank() }
+                            Text(if (title == null) number else "$number · $title", style = MaterialTheme.typography.bodyMedium)
+                            episode.released?.takeIf { it.isNotBlank() }?.let { MetadataLine(it) }
+                        }
+                    }
                 }
             }
             if (visibleFiles.isNotEmpty()) item {
@@ -128,4 +218,15 @@ internal fun DownloadDetailsSheet(
             }
         }
     }
+}
+
+@Composable
+private fun MetadataLine(text: String, compact: Boolean = false) {
+    Text(
+        text,
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        maxLines = if (compact) 1 else Int.MAX_VALUE,
+        overflow = TextOverflow.Ellipsis,
+    )
 }

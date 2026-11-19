@@ -129,17 +129,17 @@ private fun GroupRow(group: SettingsDestination, onClick: () -> Unit) {
 private fun ProvidersContent(state: SettingsUiState, canEdit: Boolean, viewModel: SettingsViewModel) {
     ProviderList(
         state,
-        canEdit && !state.saving && !state.rdSaving && !state.adSaving && !state.pmSaving && !state.ocSaving && !state.dlSaving,
+        canEdit && !state.anyProviderSaving,
         viewModel::setActiveProvider,
     )
     HorizontalDivider()
-    TorBoxSection(state, canEdit, viewModel)
+    ProviderSection(state, canEdit, viewModel, providerSectionDescriptors.getValue(DebridService.TORBOX))
     HorizontalDivider()
-    RealDebridSection(state, canEdit, viewModel)
-    AllDebridSection(state, canEdit, viewModel)
-    PremiumizeSection(state, canEdit, viewModel)
-    OffcloudSection(state, canEdit, viewModel)
-    DebridLinkSection(state, canEdit, viewModel)
+    ProviderSection(state, canEdit, viewModel, providerSectionDescriptors.getValue(DebridService.REAL_DEBRID))
+    ProviderSection(state, canEdit, viewModel, providerSectionDescriptors.getValue(DebridService.ALLDEBRID))
+    ProviderSection(state, canEdit, viewModel, providerSectionDescriptors.getValue(DebridService.PREMIUMIZE))
+    ProviderSection(state, canEdit, viewModel, providerSectionDescriptors.getValue(DebridService.OFFCLOUD))
+    ProviderSection(state, canEdit, viewModel, providerSectionDescriptors.getValue(DebridService.DEBRID_LINK))
     if (COMING_SOON_SERVICES.isNotEmpty()) {
         HorizontalDivider()
         Text(stringResource(R.string.more_providers), style = MaterialTheme.typography.titleMedium)
@@ -158,55 +158,97 @@ private fun ProvidersContent(state: SettingsUiState, canEdit: Boolean, viewModel
 }
 
 @Composable
-private fun TorBoxSection(state: SettingsUiState, canEdit: Boolean, viewModel: SettingsViewModel) {
+private fun ProviderSection(
+    state: SettingsUiState,
+    canEdit: Boolean,
+    viewModel: SettingsViewModel,
+    descriptor: ProviderSectionDescriptor,
+) {
+    val hasKey = descriptor.hasKey(state)
+    val saving = descriptor.saving(state)
+    val enabled = canEdit && !saving
+    val credential = descriptor.field(state)
+    val showCredential = descriptor.showCredential(state)
     Surface(shape = MaterialTheme.shapes.extraLarge, color = MaterialTheme.colorScheme.primaryContainer) {
-        Column(Modifier.fillMaxWidth().padding(TroveSpace.large), verticalArrangement = Arrangement.spacedBy(TroveSpace.small)) {
-            Text(stringResource(R.string.torbox), style = MaterialTheme.typography.headlineMedium)
-            Text(if (state.hasKey) stringResource(R.string.connected_account) else stringResource(R.string.connect_library), style = MaterialTheme.typography.titleMedium)
+        Column(
+            Modifier.fillMaxWidth().padding(TroveSpace.large),
+            verticalArrangement = Arrangement.spacedBy(TroveSpace.small),
+        ) {
+            Text(stringResource(descriptor.title), style = MaterialTheme.typography.headlineMedium)
+            Text(
+                stringResource(if (hasKey) R.string.connected_account else R.string.connect_library),
+                style = MaterialTheme.typography.titleMedium,
+            )
         }
     }
-    Text(stringResource(R.string.connection), style = MaterialTheme.typography.titleLarge)
+    descriptor.connectionHeading?.let {
+        Text(stringResource(it), style = MaterialTheme.typography.titleLarge)
+    }
     Text(
-        if (state.hasKey) state.accountLabel ?: stringResource(R.string.key_saved) else stringResource(R.string.connect_body),
+        if (hasKey) descriptor.savedLabel(state) ?: stringResource(descriptor.credentialSaved)
+        else stringResource(R.string.connect_body),
         style = MaterialTheme.typography.bodyLarge,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
-    if (state.hasKey) {
-        Text(stringResource(R.string.saved_key, state.maskedKey), style = MaterialTheme.typography.bodyMedium)
+    if (hasKey) {
+        Text(
+            stringResource(descriptor.savedCredential, descriptor.maskedCredential(state)),
+            style = MaterialTheme.typography.bodyMedium,
+        )
     }
     OutlinedTextField(
-        value = state.keyField,
-        onValueChange = viewModel::setKeyField,
-        label = { Text(if (state.hasKey) stringResource(R.string.replace_key) else stringResource(R.string.api_key)) },
+        value = credential,
+        onValueChange = { descriptor.setField(viewModel, it) },
+        label = { Text(stringResource(if (hasKey) descriptor.replaceCredential else descriptor.credentialLabel)) },
         singleLine = true,
         shape = MaterialTheme.shapes.medium,
-        enabled = canEdit && !state.saving,
+        enabled = enabled,
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, autoCorrectEnabled = false),
-        visualTransformation = if (state.showKey) VisualTransformation.None else PasswordVisualTransformation(),
+        visualTransformation = if (showCredential) VisualTransformation.None else PasswordVisualTransformation(),
         trailingIcon = {
-            TextButton(onClick = viewModel::toggleShowKey, enabled = canEdit && !state.saving) {
-                Text(if (state.showKey) stringResource(R.string.hide) else stringResource(R.string.show))
+            TextButton(onClick = { descriptor.toggleShow(viewModel) }, enabled = enabled) {
+                Text(stringResource(if (showCredential) R.string.hide else R.string.show))
             }
         },
         modifier = Modifier.fillMaxWidth(),
     )
-    Button(onClick = viewModel::testAndSave,
-        enabled = canEdit && !state.saving && state.keyField.isNotBlank(), modifier = Modifier.fillMaxWidth(),
-        contentPadding = PaddingValues(18.dp)) {
-        if (state.saving) {
-            CircularProgressIndicator(Modifier.padding(end = TroveSpace.small).size(TroveSpace.page),
-                color = LocalContentColor.current, strokeWidth = 2.dp)
+    Button(
+        onClick = { viewModel.testAndSave(descriptor.service) },
+        enabled = enabled && credential.isNotBlank(),
+        modifier = Modifier.fillMaxWidth(),
+        contentPadding = PaddingValues(descriptor.buttonPadding),
+    ) {
+        if (saving) {
+            val indicator = Modifier.padding(end = TroveSpace.small).size(TroveSpace.page)
+            val stroke = descriptor.progressStroke
+            if (stroke == null) CircularProgressIndicator(indicator, color = LocalContentColor.current)
+            else CircularProgressIndicator(indicator, color = LocalContentColor.current, strokeWidth = stroke)
         }
-        Text(if (state.saving) stringResource(R.string.checking_key) else stringResource(R.string.test_save))
+        Text(stringResource(if (saving) descriptor.checkingCredential else R.string.test_save))
     }
-    state.message?.takeUnless { state.rdFeedback || state.adFeedback || state.pmFeedback || state.ocFeedback || state.dlFeedback }?.let {
-        Feedback(it, error = state.messageIsError)
+    if (descriptor.showFeedback(state)) {
+        val resource = state.messageResource
+        val argument = state.messageArgument
+        val message = when {
+            descriptor.plainFeedback || resource == null -> state.message
+            argument != null -> stringResource(resource, argument)
+            else -> stringResource(resource)
+        }
+        message?.let { Feedback(it, error = state.messageIsError) }
     }
-    Text(stringResource(R.string.key_help),
-        style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-    if (state.hasKey) {
-        OutlinedButton(onClick = viewModel::signOut, enabled = canEdit && !state.saving,
-            colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error)) {
+    descriptor.helpLines.forEach { resource ->
+        Text(
+            stringResource(resource),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+    if (hasKey) {
+        OutlinedButton(
+            onClick = { viewModel.signOut(descriptor.service) },
+            enabled = enabled,
+            colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+        ) {
             Text(stringResource(R.string.sign_out))
         }
     }
@@ -272,6 +314,83 @@ private fun LibraryContent(state: SettingsUiState, canEdit: Boolean, viewModel: 
     if (state.releaseWordsError) {
         Feedback(stringResource(R.string.release_preferences_failed), error = true)
     }
+    HorizontalDivider()
+    ListItem(
+        headlineContent = { Text(stringResource(R.string.clear_cached_metadata)) },
+        supportingContent = { Text(stringResource(R.string.clear_cached_metadata_description)) },
+        trailingContent = {
+            TextButton(onClick = viewModel::clearCachedMetadata) {
+                Text(stringResource(R.string.clear))
+            }
+        },
+    )
+    if (state.metadataCacheCleared) {
+        Feedback(stringResource(R.string.cached_metadata_cleared))
+    }
+    HorizontalDivider()
+    Text(stringResource(R.string.tmdb_title), style = MaterialTheme.typography.titleMedium)
+    if (state.hasTmdbKey) {
+        Text(
+            stringResource(R.string.tmdb_saved_key, state.maskedTmdbKey),
+            style = MaterialTheme.typography.bodyMedium,
+        )
+    }
+    OutlinedTextField(
+        value = state.tmdbKeyField,
+        onValueChange = viewModel::setTmdbKeyField,
+        label = { Text(stringResource(if (state.hasTmdbKey) R.string.tmdb_replace_key else R.string.tmdb_api_key)) },
+        singleLine = true,
+        shape = MaterialTheme.shapes.medium,
+        enabled = canEdit && !state.savingTmdbKey,
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, autoCorrectEnabled = false),
+        visualTransformation = if (state.showTmdbKey) VisualTransformation.None else PasswordVisualTransformation(),
+        trailingIcon = {
+            TextButton(onClick = viewModel::toggleShowTmdbKey, enabled = canEdit && !state.savingTmdbKey) {
+                Text(stringResource(if (state.showTmdbKey) R.string.hide else R.string.show))
+            }
+        },
+        modifier = Modifier.fillMaxWidth().testTag("tmdb_key_field"),
+    )
+    Text(
+        stringResource(R.string.tmdb_key_help),
+        style = MaterialTheme.typography.bodyMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    Row(horizontalArrangement = Arrangement.spacedBy(TroveSpace.small)) {
+        Button(
+            onClick = viewModel::saveTmdbKey,
+            enabled = canEdit && !state.savingTmdbKey && state.tmdbKeyField.isNotBlank(),
+            modifier = Modifier.weight(1f),
+        ) {
+            if (state.savingTmdbKey) {
+                CircularProgressIndicator(
+                    Modifier.padding(end = TroveSpace.small).size(TroveSpace.page),
+                    color = LocalContentColor.current,
+                )
+            }
+            Text(stringResource(R.string.tmdb_save_key))
+        }
+        if (state.hasTmdbKey) {
+            OutlinedButton(
+                onClick = viewModel::clearTmdbKey,
+                enabled = canEdit && !state.savingTmdbKey,
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+            ) {
+                Text(stringResource(R.string.clear))
+            }
+        }
+    }
+    if (state.tmdbKeySaved) {
+        Feedback(stringResource(R.string.tmdb_key_saved))
+    }
+    if (state.tmdbKeyError) {
+        Feedback(stringResource(R.string.tmdb_key_failed), error = true)
+    }
+    Text(
+        stringResource(R.string.tmdb_attribution),
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
 }
 
 @Composable
@@ -308,24 +427,9 @@ private fun ProviderList(state: SettingsUiState, canEdit: Boolean, onSelect: (De
         val services = (supportedServices + state.accounts.map { it.service }).distinct()
         services.forEach { service ->
             val account = state.accounts.firstOrNull { it.service == service }
-            val signedIn = when (service) {
-                DebridService.TORBOX -> state.hasKey
-                DebridService.REAL_DEBRID -> state.rdHasKey
-                DebridService.ALLDEBRID -> state.adHasKey
-                DebridService.PREMIUMIZE -> state.pmHasKey
-                DebridService.OFFCLOUD -> state.ocHasKey
-                DebridService.DEBRID_LINK -> state.dlHasKey
-                else -> account != null
-            }
-            val label = when (service) {
-                DebridService.TORBOX -> state.accountLabel
-                DebridService.REAL_DEBRID -> state.rdAccountLabel
-                DebridService.ALLDEBRID -> state.adAccountLabel
-                DebridService.PREMIUMIZE -> state.pmAccountLabel
-                DebridService.OFFCLOUD -> state.ocAccountLabel
-                DebridService.DEBRID_LINK -> state.dlAccountLabel
-                else -> account?.label
-            }
+            val record = state.providerAccount(service)
+            val signedIn = record.hasKey
+            val label = record.accountLabel
             val selected = signedIn && state.activeService == service
             val enabled = signedIn && canEdit
             ListItem(
@@ -359,385 +463,6 @@ private fun ProviderList(state: SettingsUiState, canEdit: Boolean, onSelect: (De
                     onSelect(service)
                 },
             )
-        }
-    }
-}
-
-@Composable
-private fun RealDebridSection(state: SettingsUiState, canEdit: Boolean, viewModel: SettingsViewModel) {
-    val enabled = canEdit && !state.rdSaving
-    Surface(shape = MaterialTheme.shapes.extraLarge, color = MaterialTheme.colorScheme.primaryContainer) {
-        Column(
-            Modifier.fillMaxWidth().padding(TroveSpace.large),
-            verticalArrangement = Arrangement.spacedBy(TroveSpace.small),
-        ) {
-            Text(stringResource(R.string.real_debrid), style = MaterialTheme.typography.headlineMedium)
-            Text(
-                stringResource(if (state.rdHasKey) R.string.connected_account else R.string.connect_library),
-                style = MaterialTheme.typography.titleMedium,
-            )
-        }
-    }
-    Text(
-        if (state.rdHasKey) state.rdAccountLabel ?: stringResource(R.string.rd_token_saved)
-        else stringResource(R.string.connect_body),
-        style = MaterialTheme.typography.bodyLarge,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
-    if (state.rdHasKey) {
-        Text(stringResource(R.string.rd_saved_token, SAVED_CREDENTIAL_MASK), style = MaterialTheme.typography.bodyMedium)
-    }
-    OutlinedTextField(
-        value = state.rdTokenField,
-        onValueChange = viewModel::setRdTokenField,
-        label = {
-            Text(stringResource(if (state.rdHasKey) R.string.rd_replace_token else R.string.real_debrid_api_token))
-        },
-        singleLine = true,
-        shape = MaterialTheme.shapes.medium,
-        enabled = enabled,
-        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, autoCorrectEnabled = false),
-        visualTransformation = if (state.rdShowToken) VisualTransformation.None else PasswordVisualTransformation(),
-        trailingIcon = {
-            TextButton(onClick = viewModel::toggleShowRdToken, enabled = enabled) {
-                Text(stringResource(if (state.rdShowToken) R.string.hide else R.string.show))
-            }
-        },
-        modifier = Modifier.fillMaxWidth(),
-    )
-    Button(
-        onClick = viewModel::testAndSaveRealDebrid,
-        enabled = enabled && state.rdTokenField.isNotBlank(),
-        modifier = Modifier.fillMaxWidth(),
-        contentPadding = PaddingValues(TroveSpace.medium),
-    ) {
-        if (state.rdSaving) {
-            CircularProgressIndicator(
-                Modifier.padding(end = TroveSpace.small).size(TroveSpace.page),
-                color = LocalContentColor.current,
-            )
-        }
-        Text(stringResource(if (state.rdSaving) R.string.rd_checking_token else R.string.test_save))
-    }
-    if (state.rdFeedback) {
-        val message = state.messageResource?.let { resource ->
-            state.messageArgument?.let { stringResource(resource, it) } ?: stringResource(resource)
-        } ?: state.message
-        message?.let { Feedback(it, error = state.messageIsError) }
-    }
-    Text(stringResource(R.string.rd_token_help),
-        style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-    Text(stringResource(R.string.rd_token_note),
-        style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-    if (state.rdHasKey) {
-        OutlinedButton(
-            onClick = viewModel::signOutRealDebrid,
-            enabled = enabled,
-            colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
-        ) {
-            Text(stringResource(R.string.sign_out))
-        }
-    }
-}
-
-@Composable
-private fun AllDebridSection(state: SettingsUiState, canEdit: Boolean, viewModel: SettingsViewModel) {
-    val enabled = canEdit && !state.adSaving
-    Surface(shape = MaterialTheme.shapes.extraLarge, color = MaterialTheme.colorScheme.primaryContainer) {
-        Column(
-            Modifier.fillMaxWidth().padding(TroveSpace.large),
-            verticalArrangement = Arrangement.spacedBy(TroveSpace.small),
-        ) {
-            Text(stringResource(R.string.all_debrid), style = MaterialTheme.typography.headlineMedium)
-            Text(
-                stringResource(if (state.adHasKey) R.string.connected_account else R.string.connect_library),
-                style = MaterialTheme.typography.titleMedium,
-            )
-        }
-    }
-    Text(
-        if (state.adHasKey) state.adAccountLabel ?: stringResource(R.string.ad_key_saved)
-        else stringResource(R.string.connect_body),
-        style = MaterialTheme.typography.bodyLarge,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
-    if (state.adHasKey) {
-        Text(stringResource(R.string.ad_saved_key, SAVED_CREDENTIAL_MASK), style = MaterialTheme.typography.bodyMedium)
-    }
-    OutlinedTextField(
-        value = state.adKeyField,
-        onValueChange = viewModel::setAdKeyField,
-        label = {
-            Text(stringResource(if (state.adHasKey) R.string.ad_replace_key else R.string.all_debrid_api_key))
-        },
-        singleLine = true,
-        shape = MaterialTheme.shapes.medium,
-        enabled = enabled,
-        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, autoCorrectEnabled = false),
-        visualTransformation = if (state.adShowKey) VisualTransformation.None else PasswordVisualTransformation(),
-        trailingIcon = {
-            TextButton(onClick = viewModel::toggleShowAdKey, enabled = enabled) {
-                Text(stringResource(if (state.adShowKey) R.string.hide else R.string.show))
-            }
-        },
-        modifier = Modifier.fillMaxWidth(),
-    )
-    Button(
-        onClick = viewModel::testAndSaveAllDebrid,
-        enabled = enabled && state.adKeyField.isNotBlank(),
-        modifier = Modifier.fillMaxWidth(),
-        contentPadding = PaddingValues(TroveSpace.medium),
-    ) {
-        if (state.adSaving) {
-            CircularProgressIndicator(
-                Modifier.padding(end = TroveSpace.small).size(TroveSpace.page),
-                color = LocalContentColor.current,
-            )
-        }
-        Text(stringResource(if (state.adSaving) R.string.ad_checking_key else R.string.test_save))
-    }
-    if (state.adFeedback) {
-        val message = state.messageResource?.let { resource ->
-            state.messageArgument?.let { stringResource(resource, it) } ?: stringResource(resource)
-        } ?: state.message
-        message?.let { Feedback(it, error = state.messageIsError) }
-    }
-    Text(stringResource(R.string.ad_key_help),
-        style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-    Text(stringResource(R.string.ad_key_note),
-        style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-    if (state.adHasKey) {
-        OutlinedButton(
-            onClick = viewModel::signOutAllDebrid,
-            enabled = enabled,
-            colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
-        ) {
-            Text(stringResource(R.string.sign_out))
-        }
-    }
-}
-
-@Composable
-private fun PremiumizeSection(state: SettingsUiState, canEdit: Boolean, viewModel: SettingsViewModel) {
-    val enabled = canEdit && !state.pmSaving
-    Surface(shape = MaterialTheme.shapes.extraLarge, color = MaterialTheme.colorScheme.primaryContainer) {
-        Column(
-            Modifier.fillMaxWidth().padding(TroveSpace.large),
-            verticalArrangement = Arrangement.spacedBy(TroveSpace.small),
-        ) {
-            Text(stringResource(R.string.premiumize), style = MaterialTheme.typography.headlineMedium)
-            Text(
-                stringResource(if (state.pmHasKey) R.string.connected_account else R.string.connect_library),
-                style = MaterialTheme.typography.titleMedium,
-            )
-        }
-    }
-    Text(
-        if (state.pmHasKey) state.pmAccountLabel ?: stringResource(R.string.pm_key_saved)
-        else stringResource(R.string.connect_body),
-        style = MaterialTheme.typography.bodyLarge,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
-    if (state.pmHasKey) {
-        Text(stringResource(R.string.pm_saved_key, SAVED_CREDENTIAL_MASK), style = MaterialTheme.typography.bodyMedium)
-    }
-    OutlinedTextField(
-        value = state.pmKeyField,
-        onValueChange = viewModel::setPmKeyField,
-        label = {
-            Text(stringResource(if (state.pmHasKey) R.string.pm_replace_key else R.string.premiumize_api_key))
-        },
-        singleLine = true,
-        shape = MaterialTheme.shapes.medium,
-        enabled = enabled,
-        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, autoCorrectEnabled = false),
-        visualTransformation = if (state.pmShowKey) VisualTransformation.None else PasswordVisualTransformation(),
-        trailingIcon = {
-            TextButton(onClick = viewModel::toggleShowPmKey, enabled = enabled) {
-                Text(stringResource(if (state.pmShowKey) R.string.hide else R.string.show))
-            }
-        },
-        modifier = Modifier.fillMaxWidth(),
-    )
-    Button(
-        onClick = viewModel::testAndSavePremiumize,
-        enabled = enabled && state.pmKeyField.isNotBlank(),
-        modifier = Modifier.fillMaxWidth(),
-        contentPadding = PaddingValues(TroveSpace.medium),
-    ) {
-        if (state.pmSaving) {
-            CircularProgressIndicator(
-                Modifier.padding(end = TroveSpace.small).size(TroveSpace.page),
-                color = LocalContentColor.current,
-            )
-        }
-        Text(stringResource(if (state.pmSaving) R.string.pm_checking_key else R.string.test_save))
-    }
-    if (state.pmFeedback) {
-        val message = state.messageResource?.let { resource ->
-            state.messageArgument?.let { stringResource(resource, it) } ?: stringResource(resource)
-        } ?: state.message
-        message?.let { Feedback(it, error = state.messageIsError) }
-    }
-    Text(stringResource(R.string.pm_key_help),
-        style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-    if (state.pmHasKey) {
-        OutlinedButton(
-            onClick = viewModel::signOutPremiumize,
-            enabled = enabled,
-            colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
-        ) {
-            Text(stringResource(R.string.sign_out))
-        }
-    }
-}
-
-@Composable
-private fun OffcloudSection(state: SettingsUiState, canEdit: Boolean, viewModel: SettingsViewModel) {
-    val enabled = canEdit && !state.ocSaving
-    Surface(shape = MaterialTheme.shapes.extraLarge, color = MaterialTheme.colorScheme.primaryContainer) {
-        Column(
-            Modifier.fillMaxWidth().padding(TroveSpace.large),
-            verticalArrangement = Arrangement.spacedBy(TroveSpace.small),
-        ) {
-            Text(stringResource(R.string.offcloud), style = MaterialTheme.typography.headlineMedium)
-            Text(
-                stringResource(if (state.ocHasKey) R.string.connected_account else R.string.connect_library),
-                style = MaterialTheme.typography.titleMedium,
-            )
-        }
-    }
-    Text(
-        if (state.ocHasKey) state.ocAccountLabel ?: stringResource(R.string.oc_key_saved)
-        else stringResource(R.string.connect_body),
-        style = MaterialTheme.typography.bodyLarge,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
-    if (state.ocHasKey) {
-        Text(stringResource(R.string.oc_saved_key, SAVED_CREDENTIAL_MASK), style = MaterialTheme.typography.bodyMedium)
-    }
-    OutlinedTextField(
-        value = state.ocKeyField,
-        onValueChange = viewModel::setOcKeyField,
-        label = {
-            Text(stringResource(if (state.ocHasKey) R.string.oc_replace_key else R.string.offcloud_api_key))
-        },
-        singleLine = true,
-        shape = MaterialTheme.shapes.medium,
-        enabled = enabled,
-        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, autoCorrectEnabled = false),
-        visualTransformation = if (state.ocShowKey) VisualTransformation.None else PasswordVisualTransformation(),
-        trailingIcon = {
-            TextButton(onClick = viewModel::toggleShowOcKey, enabled = enabled) {
-                Text(stringResource(if (state.ocShowKey) R.string.hide else R.string.show))
-            }
-        },
-        modifier = Modifier.fillMaxWidth(),
-    )
-    Button(
-        onClick = viewModel::testAndSaveOffcloud,
-        enabled = enabled && state.ocKeyField.isNotBlank(),
-        modifier = Modifier.fillMaxWidth(),
-        contentPadding = PaddingValues(TroveSpace.medium),
-    ) {
-        if (state.ocSaving) {
-            CircularProgressIndicator(
-                Modifier.padding(end = TroveSpace.small).size(TroveSpace.page),
-                color = LocalContentColor.current,
-            )
-        }
-        Text(stringResource(if (state.ocSaving) R.string.oc_checking_key else R.string.test_save))
-    }
-    if (state.ocFeedback) {
-        val message = state.messageResource?.let { resource ->
-            state.messageArgument?.let { stringResource(resource, it) } ?: stringResource(resource)
-        } ?: state.message
-        message?.let { Feedback(it, error = state.messageIsError) }
-    }
-    Text(stringResource(R.string.oc_key_help),
-        style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-    if (state.ocHasKey) {
-        OutlinedButton(
-            onClick = viewModel::signOutOffcloud,
-            enabled = enabled,
-            colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
-        ) {
-            Text(stringResource(R.string.sign_out))
-        }
-    }
-}
-
-@Composable
-private fun DebridLinkSection(state: SettingsUiState, canEdit: Boolean, viewModel: SettingsViewModel) {
-    val enabled = canEdit && !state.dlSaving
-    Surface(shape = MaterialTheme.shapes.extraLarge, color = MaterialTheme.colorScheme.primaryContainer) {
-        Column(
-            Modifier.fillMaxWidth().padding(TroveSpace.large),
-            verticalArrangement = Arrangement.spacedBy(TroveSpace.small),
-        ) {
-            Text(stringResource(R.string.debrid_link), style = MaterialTheme.typography.headlineMedium)
-            Text(
-                stringResource(if (state.dlHasKey) R.string.connected_account else R.string.connect_library),
-                style = MaterialTheme.typography.titleMedium,
-            )
-        }
-    }
-    Text(
-        if (state.dlHasKey) state.dlAccountLabel ?: stringResource(R.string.dl_key_saved)
-        else stringResource(R.string.connect_body),
-        style = MaterialTheme.typography.bodyLarge,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
-    if (state.dlHasKey) {
-        Text(stringResource(R.string.dl_saved_key, SAVED_CREDENTIAL_MASK), style = MaterialTheme.typography.bodyMedium)
-    }
-    OutlinedTextField(
-        value = state.dlKeyField,
-        onValueChange = viewModel::setDlKeyField,
-        label = {
-            Text(stringResource(if (state.dlHasKey) R.string.dl_replace_key else R.string.debridlink_api_key))
-        },
-        singleLine = true,
-        shape = MaterialTheme.shapes.medium,
-        enabled = enabled,
-        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, autoCorrectEnabled = false),
-        visualTransformation = if (state.dlShowKey) VisualTransformation.None else PasswordVisualTransformation(),
-        trailingIcon = {
-            TextButton(onClick = viewModel::toggleShowDlKey, enabled = enabled) {
-                Text(stringResource(if (state.dlShowKey) R.string.hide else R.string.show))
-            }
-        },
-        modifier = Modifier.fillMaxWidth(),
-    )
-    Button(
-        onClick = viewModel::testAndSaveDebridLink,
-        enabled = enabled && state.dlKeyField.isNotBlank(),
-        modifier = Modifier.fillMaxWidth(),
-        contentPadding = PaddingValues(TroveSpace.medium),
-    ) {
-        if (state.dlSaving) {
-            CircularProgressIndicator(
-                Modifier.padding(end = TroveSpace.small).size(TroveSpace.page),
-                color = LocalContentColor.current,
-            )
-        }
-        Text(stringResource(if (state.dlSaving) R.string.dl_checking_key else R.string.test_save))
-    }
-    if (state.dlFeedback) {
-        val message = state.messageResource?.let { resource ->
-            state.messageArgument?.let { stringResource(resource, it) } ?: stringResource(resource)
-        } ?: state.message
-        message?.let { Feedback(it, error = state.messageIsError) }
-    }
-    Text(stringResource(R.string.dl_key_help),
-        style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-    if (state.dlHasKey) {
-        OutlinedButton(
-            onClick = viewModel::signOutDebridLink,
-            enabled = enabled,
-            colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
-        ) {
-            Text(stringResource(R.string.sign_out))
         }
     }
 }

@@ -12,17 +12,8 @@ import org.junit.Test
 import java.io.IOException
 
 class RealDebridProviderTest {
-    private class FakeTransport(private val handler: (HttpRequest) -> HttpResponse) : HttpTransport {
-        val requests = mutableListOf<HttpRequest>()
-
-        override suspend fun execute(request: HttpRequest): HttpResponse {
-            requests += request
-            return handler(request)
-        }
-    }
-
-    private fun provider(handler: (HttpRequest) -> HttpResponse): Pair<RealDebridProvider, FakeTransport> {
-        val fake = FakeTransport(handler)
+    private fun provider(handler: (HttpRequest) -> HttpResponse): Pair<RealDebridProvider, RecordingTransport> {
+        val fake = RecordingTransport(handler)
         return RealDebridProvider(
             TOKEN, fake,
             generalBucket = TokenBucket(4.0, 50),
@@ -338,6 +329,11 @@ class RealDebridProviderTest {
         val (cancelled, _) = provider { throw cancellation }
         val thrown = runCatching { cancelled.validateAccount() }.exceptionOrNull()
         assertSame(cancellation, thrown)
+        // A JVM Error is neither mapped nor swallowed: the shared
+        // mapError rethrows it (Stage 1 TorBox decision).
+        val error = OutOfMemoryError("test")
+        val (errored, _) = provider { throw error }
+        assertSame(error, runCatching { errored.validateAccount() }.exceptionOrNull())
     }
 
     private fun torrent(status: String) = HttpResponse(200, """

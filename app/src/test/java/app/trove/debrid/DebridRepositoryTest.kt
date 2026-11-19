@@ -1,4 +1,5 @@
 package app.trove.debrid
+import org.junit.Assert.assertNotSame
 
 import android.content.SharedPreferences
 import app.trove.debrid.core.AllDebridProvider
@@ -13,14 +14,21 @@ import app.trove.debrid.core.DebridError
 import app.trove.debrid.core.DebridProvider
 import app.trove.debrid.core.DebridService
 import app.trove.debrid.core.DownloadKind
+import app.trove.debrid.core.DownloadRef
 import app.trove.debrid.core.HttpRequest
 import app.trove.debrid.core.HttpResponse
 import app.trove.debrid.core.HttpTransport
 import app.trove.debrid.core.InMemoryCredentialStore
+import app.trove.debrid.core.MediaCandidate
+import app.trove.debrid.core.MediaMetadata
+import app.trove.debrid.core.MediaQuery
+import app.trove.debrid.core.MetadataDiskCache
 import app.trove.debrid.core.RealDebridProvider
 import app.trove.debrid.core.ServiceCacheResult
 import app.trove.debrid.core.TorBoxProvider
+import app.trove.debrid.data.BackupSignIn
 import app.trove.debrid.data.DebridRepository
+import app.trove.debrid.data.MetadataOverride
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -32,7 +40,9 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
+import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.TemporaryFolder
 import java.io.IOException
 
 /** In-memory SharedPreferences for repository tests (no Robolectric). */
@@ -97,16 +107,179 @@ private const val VALID_REAL_DEBRID_USER = """{"username":"rd-user","type":"prem
 
 class DebridRepositoryTest {
 
+    @get:Rule val folder = TemporaryFolder()
+
     private fun repository(
         transport: HttpTransport,
         store: InMemoryCredentialStore = InMemoryCredentialStore(),
         prefs: FakeSharedPreferences = FakeSharedPreferences(),
+        metadataDiskCache: MetadataDiskCache? = null,
     ) = DebridRepository(
         prefs = prefs,
         credentialStore = store,
         transport = transport,
         ioDispatcher = Dispatchers.Unconfined,
+        metadataDiskCache = metadataDiskCache,
     ) to store
+
+    @Test
+    fun `clearCachedMetadata empties the disk cache`() = runTest {
+        val cache = MetadataDiskCache(folder.root)
+        val query = MediaQuery("Example Show", 2026, "series")
+        cache.put(query, MediaMetadata("Example Show", 2026, "series"))
+        assertEquals("Example Show", cache.get(query)?.metadata?.title)
+        val (repo, _) = repository(FakeHttpTransport { error("Unexpected request") }, metadataDiskCache = cache)
+        repo.clearCachedMetadata()
+        assertNull(cache.get(query))
+    }
+
+    @Test
+    fun `tmdb key round-trips encrypted and masked never reveals it`() = runTest {
+        val (repo, store) = repository(FakeHttpTransport { error("Unexpected request") })
+        assertFalse(repo.hasTmdbKey())
+        assertEquals("", repo.maskedTmdbKey())
+        repo.saveTmdbKey("  test-read-access-token  ")
+        assertTrue(repo.hasTmdbKey())
+        assertEquals("test-read-access-token", store.get(DebridRepository.TMDB_ACCOUNT_ID))
+        val masked = repo.maskedTmdbKey()
+        assertTrue(masked.endsWith("oken"))
+        assertFalse(masked.contains("test-read-access-token"))
+        repo.clearTmdbKey()
+        assertFalse(repo.hasTmdbKey())
+        assertNull(store.get(DebridRepository.TMDB_ACCOUNT_ID))
+    }
+
+    @Test
+    fun `blank tmdb key is rejected and validateTmdbKey checks the live endpoint`() = runTest {
+        val (repo, _) = repository(FakeHttpTransport { error("Unexpected request") })
+        try {
+            repo.saveTmdbKey("   ")
+            fail("Blank key must be rejected")
+        } catch (_: IllegalArgumentException) {
+        }
+        val accepted = FakeHttpTransport { request ->
+            assertTrue(request.url.endsWith("/3/configuration"))
+            assertEquals("Bearer good-key", request.headers["Authorization"])
+            HttpResponse(200, "{}")
+        }
+        val (goodRepo, _) = repository(accepted)
+        assertTrue(goodRepo.validateTmdbKey("good-key").isSuccess)
+        val denied = FakeHttpTransport { HttpResponse(401, "{}") }
+        val (badRepo, _) = repository(denied)
+        assertTrue(badRepo.validateTmdbKey("bad-key").isFailure)
+        assertFalse(badRepo.hasTmdbKey())
+    }
+
+    @Test
+    fun `cinemeta miss with a stored tmdb key resolves from TMDB and records the source`() = runTest {
+        val cache = MetadataDiskCache(folder.root)
+        val transport = FakeHttpTransport { request ->
+            when {
+                request.url.contains("v3-cinemeta.strem.io") -> HttpResponse(200, """{"metas":[]}""")
+                request.url.endsWith("/3/configuration") -> HttpResponse(200,
+                    """{"images":{"secure_base_url":"https://images.example.invalid/t/p/",
+                        "poster_sizes":["w342","w500","original"]}}""")
+                "/3/search/movie" in request.url -> HttpResponse(200,
+                    """{"results":[{"id":123,"title":"Example Film","release_date":"2026-03-01",
+                        "overview":"Fallback hit.","poster_path":"/s.jpg"}]}""")
+                "/3/search/tv" in request.url -> HttpResponse(200, """{"results":[]}""")
+                request.url.endsWith("/credits") -> HttpResponse(200,
+                    """{"cast":[{"name":"Actor One"}],"crew":[{"name":"Director One","job":"Director"}]}""")
+                "/3/movie/123" in request.url -> HttpResponse(200,
+                    """{"id":123,"title":"Example Film","release_date":"2026-03-01",
+                        "overview":"Fallback hit.","genres":[{"name":"Drama"}],"runtime":148,
+                        "poster_path":"/d.jpg"}""")
+                else -> error("Unexpected request: ${request.url}")
+            }
+        }
+        val (repo, store) = repository(transport, metadataDiskCache = cache)
+        store.save(DebridRepository.TMDB_ACCOUNT_ID, "test-key")
+        val query = MediaQuery("Example Film", 2026, "movie")
+        val result = repo.resolveMetadata(query)
+        assertEquals("Example Film", result?.title)
+        assertEquals("https://images.example.invalid/t/p/w500/d.jpg", result?.posterUrl)
+        assertEquals("tmdb", cache.get(query)?.source)
+        assertTrue(cache.get(query)?.isFresh(System.currentTimeMillis()) == true)
+    }
+
+    @Test
+    fun `cinemeta miss without a tmdb key makes no TMDB call`() = runTest {
+        val seenTmdb = mutableListOf<String>()
+        val transport = FakeHttpTransport { request ->
+            if ("themoviedb.org" in request.url) seenTmdb += request.url
+            HttpResponse(200, """{"metas":[]}""")
+        }
+        val (repo, _) = repository(transport)
+        assertNull(repo.resolveMetadata(MediaQuery("Example Film", 2026, "movie")))
+        assertTrue(seenTmdb.isEmpty())
+    }
+
+    @Test
+    fun `metadata override survives a repository reload`() = runTest {
+        val prefs = FakeSharedPreferences()
+        val (repo, _) = repository(FakeHttpTransport(), prefs = prefs)
+        val ref = DownloadRef(DownloadKind.TORRENT, "42")
+        repo.saveMetadataOverride(ref, MetadataOverride("tt0000002", "movie", "Picked Film"))
+        val (reloaded, _) = repository(FakeHttpTransport(), prefs = prefs)
+        assertEquals(MetadataOverride("tt0000002", "movie", "Picked Film"), reloaded.loadMetadataOverride(ref))
+    }
+
+    @Test
+    fun `metadata overrides are independent per kind for the same id`() = runTest {
+        val (repo, _) = repository(FakeHttpTransport())
+        val torrent = DownloadRef(DownloadKind.TORRENT, "42")
+        val web = DownloadRef(DownloadKind.WEB, "42")
+        repo.saveMetadataOverride(torrent, MetadataOverride("tt0000001", "movie", "Torrent Film"))
+        repo.saveMetadataOverride(web, MetadataOverride("tt0000002", "movie", "Web Film"))
+        assertEquals("Torrent Film", repo.loadMetadataOverride(torrent)?.title)
+        assertEquals("Web Film", repo.loadMetadataOverride(web)?.title)
+        repo.clearMetadataOverride(torrent)
+        assertNull(repo.loadMetadataOverride(torrent))
+        assertEquals("Web Film", repo.loadMetadataOverride(web)?.title)
+    }
+
+    @Test
+    fun `clearCachedMetadata keeps stored metadata overrides`() = runTest {
+        val prefs = FakeSharedPreferences()
+        val cache = MetadataDiskCache(folder.root)
+        val (repo, _) = repository(FakeHttpTransport(), prefs = prefs, metadataDiskCache = cache)
+        repo.saveMetadataOverride(
+            DownloadRef(DownloadKind.TORRENT, "42"), MetadataOverride("tt0000002", "movie", "Picked Film"))
+        repo.clearCachedMetadata()
+        assertEquals(
+            "Picked Film",
+            repo.loadMetadataOverride(DownloadRef(DownloadKind.TORRENT, "42"))?.title,
+        )
+    }
+
+    @Test
+    fun `resolveMetadataCandidates lists title matches without resolving`() = runTest {
+        val transport = FakeHttpTransport {
+            HttpResponse(200, """{"metas":[
+                {"id":"tt0000001","name":"Example Film","releaseInfo":"2026","type":"movie"},
+                {"id":"tt0000002","name":"Example Film","releaseInfo":"2026","type":"movie"}]}""")
+        }
+        val (repo, _) = repository(transport)
+        assertEquals(
+            listOf(
+                MediaCandidate("tt0000001", "Example Film", 2026, "movie"),
+                MediaCandidate("tt0000002", "Example Film", 2026, "movie"),
+            ),
+            repo.resolveMetadataCandidates(MediaQuery("Example Film", 2026, "movie")),
+        )
+    }
+
+    @Test
+    fun `resolveMetadataById returns the picked title`() = runTest {
+        val transport = FakeHttpTransport { request ->
+            assertTrue(request.url.endsWith("meta/movie/tt0000002.json"))
+            HttpResponse(200, """{"meta":{"id":"tt0000002","name":"Picked Film","year":"2026","type":"movie"}}""")
+        }
+        val (repo, _) = repository(transport)
+        val result = repo.resolveMetadataById("tt0000002", "movie")
+        assertEquals("Picked Film", result?.title)
+        assertEquals("tt0000002", result?.imdbId)
+    }
 
     @Test
     fun `provider lookup lists only signed in services in Settings order`() = runTest {
@@ -227,6 +400,83 @@ class DebridRepositoryTest {
     }
 
     @Test
+    fun `torbox page loads one kind only and end reached uses the raw page size`() = runTest {
+        val store = InMemoryCredentialStore()
+        store.save(DebridRepository.TORBOX_ACCOUNT_ID, "test-key")
+        val requests = mutableListOf<HttpRequest>()
+        val transport = FakeHttpTransport { request ->
+            requests += request
+            val offset = request.url.substringAfter("offset=", "").substringBefore("&").toIntOrNull() ?: 0
+            val data = when {
+                !request.url.contains("/torrents/mylist") -> "[]"
+                offset == 0 -> """[{"id":1,"name":"Film.CAM"},{"id":2,"name":"Film.1080p"}]"""
+                else -> """[{"id":3,"name":"Film.2160p"}]"""
+            }
+            HttpResponse(200, """{"success":true,"data":$data}""")
+        }
+        val (repo, _) = repository(transport, store)
+        val provider = requireNotNull(repo.provider())
+
+        // The CAM row is excluded, but the raw page was full (2 of 2),
+        // so the tab is not at its end yet.
+        val first = repo.listDownloadPage(provider, DownloadKind.TORRENT, 0, 2).getOrThrow()
+        assertEquals(listOf("2"), first.rows.map { it.id })
+        assertFalse(first.endReached)
+        assertEquals(2, first.fetchedCount)
+        assertTrue(requests.all { it.url.contains("/torrents/mylist") })
+        assertTrue(requests.single().url.contains("limit=2"))
+
+        val second = repo.listDownloadPage(provider, DownloadKind.TORRENT, 2, 2).getOrThrow()
+        assertEquals(listOf("3"), second.rows.map { it.id })
+        assertTrue(second.endReached)
+        assertEquals(1, requests.count { it.url.contains("offset=2") })
+    }
+
+    @Test
+    fun `usenet page failure surfaces while the full sync still swallows it`() = runTest {
+        val store = InMemoryCredentialStore()
+        store.save(DebridRepository.TORBOX_ACCOUNT_ID, "test-key")
+        val transport = FakeHttpTransport { request ->
+            if (request.url.contains("/usenet/mylist")) {
+                HttpResponse(403, """{"success":false,"error":"pro","detail":"Usenet is Pro only"}""")
+            } else {
+                HttpResponse(200, """{"success":true,"data":[]}""")
+            }
+        }
+        val (repo, _) = repository(transport, store)
+        val provider = requireNotNull(repo.provider())
+
+        val page = repo.listDownloadPage(provider, DownloadKind.USENET, 0, 100)
+        assertTrue(page.isFailure)
+        assertEquals("pro", (page.exceptionOrNull() as? DebridError.Provider)?.code)
+        assertTrue(repo.listDownloads(provider).isSuccess)
+    }
+
+    @Test
+    fun `non torbox page slices the full list without a per kind call`() = runTest {
+        // The seam keys on the TorBoxProvider type, not the service:
+        // any other provider pages from its full list in memory.
+        val provider = FakeProvider(
+            downloads = mutableListOf(
+                sampleDownload(id = "t1", name = "First"),
+                sampleDownload(id = "t2", name = "Second"),
+                sampleDownload(id = "w1", name = "Web row", kind = DownloadKind.WEB),
+            ),
+        )
+        val (repo, _) = repository(FakeHttpTransport())
+
+        val first = repo.listDownloadPage(provider, DownloadKind.TORRENT, 0, 1).getOrThrow()
+        assertEquals(listOf("t1"), first.rows.map { it.id })
+        assertFalse(first.endReached)
+        val second = repo.listDownloadPage(provider, DownloadKind.TORRENT, 1, 1).getOrThrow()
+        assertEquals(listOf("t2"), second.rows.map { it.id })
+        assertTrue(second.endReached)
+        val web = repo.listDownloadPage(provider, DownloadKind.WEB, 0, 10).getOrThrow()
+        assertEquals(listOf("w1"), web.rows.map { it.id })
+        assertTrue(web.endReached)
+    }
+
+    @Test
     fun `batch delete continues after failure and keeps failed and unrelated items`() = runTest {
         val first = sampleDownload(id = "1")
         val bad = sampleDownload(id = "2")
@@ -279,7 +529,7 @@ class DebridRepositoryTest {
     @Test
     fun `valid key stores the trimmed key and account`() = runTest {
         val (repo, store) = repository(FakeHttpTransport { HttpResponse(200, VALID_ME) })
-        val result = repo.validateAndSaveTorboxKey("  my-key  ")
+        val result = repo.saveTestCredential(DebridService.TORBOX, "  my-key  ")
         assertTrue(result.isSuccess)
         assertEquals("TorBox (Plan Essential)", result.getOrThrow().label)
         assertEquals("my-key", store.get(DebridRepository.TORBOX_ACCOUNT_ID))
@@ -300,8 +550,8 @@ class DebridRepositoryTest {
         }
         val prefs = FakeSharedPreferences()
         val (repo, store) = repository(transport, prefs = prefs)
-        repo.validateAndSaveTorboxKey("torbox-key").getOrThrow()
-        val account = repo.validateAndSaveAllDebridKey("  ad-key  ").getOrThrow()
+        repo.saveTestCredential(DebridService.TORBOX, "torbox-key").getOrThrow()
+        val account = repo.saveTestCredential(DebridService.ALLDEBRID, "  ad-key  ").getOrThrow()
         assertEquals(DebridRepository.ALLDEBRID_ACCOUNT_ID, account.id)
         assertEquals("AllDebrid (Premium)", account.label)
         assertEquals(account, repo.allDebridAccount())
@@ -333,9 +583,9 @@ class DebridRepositoryTest {
             HttpResponse(200, """{"status":"success","data":{"user":{"username":"ad-user","isPremium":true}}}""")
         }
         val (repo, _) = repository(transport, store)
-        repo.validateAndSaveAllDebridKey("ad-key").getOrThrow()
+        repo.saveTestCredential(DebridService.ALLDEBRID, "ad-key").getOrThrow()
 
-        repo.signOutAllDebrid()
+        repo.signOut(DebridService.ALLDEBRID)
 
         assertFalse(repo.hasAllDebridKey())
         assertNull(repo.allDebridAccount())
@@ -376,8 +626,8 @@ class DebridRepositoryTest {
         }
         val prefs = FakeSharedPreferences()
         val (repo, store) = repository(transport, prefs = prefs)
-        repo.validateAndSaveTorboxKey("torbox-key").getOrThrow()
-        val account = repo.validateAndSavePremiumizeKey("  pm-key  ").getOrThrow()
+        repo.saveTestCredential(DebridService.TORBOX, "torbox-key").getOrThrow()
+        val account = repo.saveTestCredential(DebridService.PREMIUMIZE, "  pm-key  ").getOrThrow()
         assertEquals(DebridRepository.PREMIUMIZE_ACCOUNT_ID, account.id)
         assertEquals("Premiumize (Premium · 1234 booster points)", account.label)
         assertEquals(account, repo.premiumizeAccount())
@@ -409,9 +659,9 @@ class DebridRepositoryTest {
             HttpResponse(200, """{"status":"success","customer_id":"42","premium_until":4102444800,"booster_points":1234}""")
         }
         val (repo, _) = repository(transport, store)
-        repo.validateAndSavePremiumizeKey("pm-key").getOrThrow()
+        repo.saveTestCredential(DebridService.PREMIUMIZE, "pm-key").getOrThrow()
 
-        repo.signOutPremiumize()
+        repo.signOut(DebridService.PREMIUMIZE)
 
         assertFalse(repo.hasPremiumizeKey())
         assertNull(repo.premiumizeAccount())
@@ -419,6 +669,42 @@ class DebridRepositoryTest {
         assertEquals("rd-token", store.get(DebridRepository.REAL_DEBRID_ACCOUNT_ID))
         assertEquals(DebridService.REAL_DEBRID, repo.activeService())
         assertTrue(repo.provider() is RealDebridProvider)
+    }
+
+    @Test
+    fun `TorBox save and restore retain the preferred provider`() = runTest {
+        val transport = FakeHttpTransport { request ->
+            when (request.url.substringBefore('?')) {
+                "${TorBoxProvider.BASE}/user/me" -> HttpResponse(200, VALID_ME)
+                "${RealDebridProvider.BASE}/user" -> HttpResponse(200, VALID_REAL_DEBRID_USER)
+                else -> error("Unexpected request")
+            }
+        }
+        val (repo, store) = repository(transport)
+        repo.saveTestCredential(DebridService.REAL_DEBRID, "rd-token").getOrThrow()
+        repo.saveTestCredential(DebridService.TORBOX, "torbox-key").getOrThrow()
+        assertEquals(DebridService.REAL_DEBRID, repo.activeService())
+        val restored = BackupSignIn("restored-key", "TorBox (Restored)", 123L, 456L)
+        repo.restoreBackupSignIn(restored)
+        assertEquals(DebridService.REAL_DEBRID, repo.activeService())
+        val account = requireNotNull(repo.torboxAccount())
+        assertEquals(restored.label, account.label)
+        assertEquals(restored.addedAt, account.addedAtEpochMs)
+        assertEquals(restored.lastValidated, account.lastValidatedEpochMs)
+        assertEquals(restored.key, store.get(account.id))
+        assertEquals(restored.key, repo.loadBackupSignIn()?.key)
+    }
+
+    @Test
+    fun `reference defaults forward to the string operations`() = runTest {
+        val download = sampleDownload(id = "11").copy(service = DebridService.REAL_DEBRID)
+        val provider = FakeProvider(downloads = mutableListOf(download), service = download.service)
+        val ref = DownloadRef(download.kind, download.id)
+        assertEquals(provider.getDownload(download.id), provider.getDownload(ref))
+        assertEquals(provider.getStreamUrl(download.id, "7").getOrThrow().url,
+            provider.getStreamUrl(ref, "7").getOrThrow().url)
+        assertTrue(provider.delete(ref).isSuccess)
+        assertEquals(listOf(download.id), provider.deletedIds)
     }
 
     @Test
@@ -439,8 +725,8 @@ class DebridRepositoryTest {
         }
         val prefs = FakeSharedPreferences()
         val (repo, store) = repository(transport, prefs = prefs)
-        repo.validateAndSaveTorboxKey("torbox-key").getOrThrow()
-        val account = repo.validateAndSaveOffcloudKey("  oc-key  ").getOrThrow()
+        repo.saveTestCredential(DebridService.TORBOX, "torbox-key").getOrThrow()
+        val account = repo.saveTestCredential(DebridService.OFFCLOUD, "  oc-key  ").getOrThrow()
         assertEquals(DebridRepository.OFFCLOUD_ACCOUNT_ID, account.id)
         assertEquals("Offcloud", account.label)
         assertEquals(account, repo.offcloudAccount())
@@ -450,8 +736,11 @@ class DebridRepositoryTest {
         assertEquals(DebridService.OFFCLOUD, repo.activeService())
         val provider = repo.provider()
         assertTrue(provider is OffcloudProvider)
+        assertTrue(requireNotNull(provider).hosterDomains().isEmpty())
+        val link = "https://files.example.com/video.mkv"
+        assertEquals(ClassifiedShare.HosterLink(link), repo.classifyShared(link, null, null, null))
 
-        assertTrue(repo.validateAndSaveOffcloudKey("bad-key").exceptionOrNull() is DebridError.AuthInvalid)
+        assertTrue(repo.saveTestCredential(DebridService.OFFCLOUD, "bad-key").exceptionOrNull() is DebridError.AuthInvalid)
         assertEquals(account, repo.offcloudAccount())
         assertEquals("oc-key", store.get(DebridRepository.OFFCLOUD_ACCOUNT_ID))
         assertEquals(DebridService.OFFCLOUD, repo.activeService())
@@ -479,9 +768,9 @@ class DebridRepositoryTest {
             HttpResponse(200, "[]")
         }
         val (repo, _) = repository(transport, store)
-        repo.validateAndSaveOffcloudKey("oc-key").getOrThrow()
+        repo.saveTestCredential(DebridService.OFFCLOUD, "oc-key").getOrThrow()
 
-        repo.signOutOffcloud()
+        repo.signOut(DebridService.OFFCLOUD)
 
         assertFalse(repo.hasOffcloudKey())
         assertNull(repo.offcloudAccount())
@@ -509,8 +798,8 @@ class DebridRepositoryTest {
         }
         val prefs = FakeSharedPreferences()
         val (repo, store) = repository(transport, prefs = prefs)
-        repo.validateAndSaveTorboxKey("torbox-key").getOrThrow()
-        val account = repo.validateAndSaveDebridLinkKey("  dl-key  ").getOrThrow()
+        repo.saveTestCredential(DebridService.TORBOX, "torbox-key").getOrThrow()
+        val account = repo.saveTestCredential(DebridService.DEBRID_LINK, "  dl-key  ").getOrThrow()
         assertEquals(DebridRepository.DEBRID_LINK_ACCOUNT_ID, account.id)
         assertEquals("Debrid-Link (Premium · 500 pts)", account.label)
         assertEquals("debridlink-1", account.id)
@@ -522,7 +811,7 @@ class DebridRepositoryTest {
         val provider = repo.provider()
         assertTrue(provider is DebridLinkProvider)
 
-        assertTrue(repo.validateAndSaveDebridLinkKey("bad-key").exceptionOrNull() is DebridError.AuthInvalid)
+        assertTrue(repo.saveTestCredential(DebridService.DEBRID_LINK, "bad-key").exceptionOrNull() is DebridError.AuthInvalid)
         assertEquals(account, repo.debridLinkAccount())
         assertEquals("dl-key", store.get(DebridRepository.DEBRID_LINK_ACCOUNT_ID))
         assertEquals(DebridService.DEBRID_LINK, repo.activeService())
@@ -550,9 +839,9 @@ class DebridRepositoryTest {
             HttpResponse(200, """{"success":true,"value":{"username":"dl-user","accountType":1,"premiumLeft":3600,"pts":500}}""")
         }
         val (repo, _) = repository(transport, store)
-        repo.validateAndSaveDebridLinkKey("dl-key").getOrThrow()
+        repo.saveTestCredential(DebridService.DEBRID_LINK, "dl-key").getOrThrow()
 
-        repo.signOutDebridLink()
+        repo.signOut(DebridService.DEBRID_LINK)
 
         assertFalse(repo.hasDebridLinkKey())
         assertNull(repo.debridLinkAccount())
@@ -599,9 +888,9 @@ class DebridRepositoryTest {
         }
         val prefs = FakeSharedPreferences()
         val (repo, store) = repository(transport, prefs = prefs)
-        repo.validateAndSaveTorboxKey("torbox-key").getOrThrow()
+        repo.saveTestCredential(DebridService.TORBOX, "torbox-key").getOrThrow()
         val torbox = requireNotNull(repo.provider())
-        val account = repo.validateAndSaveRealDebridToken("  rd-token  ").getOrThrow()
+        val account = repo.saveTestCredential(DebridService.REAL_DEBRID, "  rd-token  ").getOrThrow()
         assertEquals("Real-Debrid (Premium)", account.label)
         assertEquals(DebridService.REAL_DEBRID, repo.activeService())
         assertEquals("torbox-key", store.get(DebridRepository.TORBOX_ACCOUNT_ID))
@@ -678,13 +967,14 @@ class DebridRepositoryTest {
                 else -> error("Unexpected request")
             }
         }
-        val (repo, store) = repository(transport)
-        repo.validateAndSaveTorboxKey("torbox-key").getOrThrow()
+        val prefs = FakeSharedPreferences()
+        val (repo, store) = repository(transport, prefs = prefs)
+        repo.saveTestCredential(DebridService.TORBOX, "torbox-key").getOrThrow()
         val torbox = repo.provider()
-        repo.validateAndSaveRealDebridToken("rd-token").getOrThrow()
+        repo.saveTestCredential(DebridService.REAL_DEBRID, "rd-token").getOrThrow()
         val originalRealDebrid = repo.provider()
 
-        repo.signOutRealDebrid()
+        repo.signOut(DebridService.REAL_DEBRID)
         assertFalse(repo.hasRealDebridKey())
         assertNull(store.get(DebridRepository.REAL_DEBRID_ACCOUNT_ID))
         assertNull(repo.realDebridAccount())
@@ -692,17 +982,18 @@ class DebridRepositoryTest {
         assertEquals(DebridService.TORBOX, repo.activeService())
         assertSame(torbox, repo.provider())
 
-        repo.validateAndSaveRealDebridToken("rd-token").getOrThrow()
+        repo.saveTestCredential(DebridService.REAL_DEBRID, "rd-token").getOrThrow()
         val realDebrid = repo.provider()
         assertTrue(realDebrid is RealDebridProvider)
         assertTrue(originalRealDebrid !== realDebrid)
-        repo.signOutTorbox()
+        repo.signOut(DebridService.TORBOX)
         assertNull(store.get(DebridRepository.TORBOX_ACCOUNT_ID))
         assertEquals(listOf(DebridService.REAL_DEBRID), repo.accounts().map { it.service })
         assertEquals(DebridService.REAL_DEBRID, repo.activeService())
         assertSame(realDebrid, repo.provider())
 
-        repo.signOutRealDebrid()
+        repo.signOut(DebridService.REAL_DEBRID)
+        assertFalse(prefs.contains("active_service"))
         assertNull(repo.activeService())
         assertNull(repo.provider())
     }
@@ -713,15 +1004,15 @@ class DebridRepositoryTest {
         val transport = FakeHttpTransport { HttpResponse(401, """{"error":"bad_token"}""") }
         val (repo, store) = repository(transport, prefs = prefs)
 
-        assertTrue(repo.validateAndSaveRealDebridToken("bad-token").exceptionOrNull() is DebridError.AuthInvalid)
+        assertTrue(repo.saveTestCredential(DebridService.REAL_DEBRID, "bad-token").exceptionOrNull() is DebridError.AuthInvalid)
         assertNull(store.get(DebridRepository.REAL_DEBRID_ACCOUNT_ID))
         assertTrue(repo.accounts().isEmpty())
         assertTrue(prefs.map.isEmpty())
 
         transport.handler = { HttpResponse(200, VALID_REAL_DEBRID_USER) }
-        val saved = repo.validateAndSaveRealDebridToken("rd-token").getOrThrow()
+        val saved = repo.saveTestCredential(DebridService.REAL_DEBRID, "rd-token").getOrThrow()
         transport.handler = { HttpResponse(401, """{"error":"bad_token"}""") }
-        assertTrue(repo.validateAndSaveRealDebridToken("bad-token").exceptionOrNull() is DebridError.AuthInvalid)
+        assertTrue(repo.saveTestCredential(DebridService.REAL_DEBRID, "bad-token").exceptionOrNull() is DebridError.AuthInvalid)
         assertEquals("rd-token", store.get(DebridRepository.REAL_DEBRID_ACCOUNT_ID))
         assertEquals(saved, repo.realDebridAccount())
         assertEquals(DebridService.REAL_DEBRID, repo.activeService())
@@ -747,7 +1038,7 @@ class DebridRepositoryTest {
             FakeHttpTransport { HttpResponse(401, """{"success":false,"error":"unauthorized"}""") },
             prefs = prefs,
         )
-        val result = repo.validateAndSaveTorboxKey("bad-key")
+        val result = repo.saveTestCredential(DebridService.TORBOX, "bad-key")
         assertTrue(result.isFailure)
         assertNull(store.get(DebridRepository.TORBOX_ACCOUNT_ID))
         assertTrue(repo.accounts().isEmpty())
@@ -757,19 +1048,19 @@ class DebridRepositoryTest {
     @Test
     fun `rate limit and malformed responses return failure without throwing`() = runTest {
         val rateLimited = repository(FakeHttpTransport { HttpResponse(429, "{}") }).first
-        assertTrue(rateLimited.validateAndSaveTorboxKey("k").isFailure)
+        assertTrue(rateLimited.saveTestCredential(DebridService.TORBOX, "k").isFailure)
 
         val malformed = repository(FakeHttpTransport { HttpResponse(200, "not json") }).first
-        assertTrue(malformed.validateAndSaveTorboxKey("k").isFailure)
+        assertTrue(malformed.saveTestCredential(DebridService.TORBOX, "k").isFailure)
 
         val missingData = repository(FakeHttpTransport { HttpResponse(200, """{"success":true}""") }).first
-        assertTrue(missingData.validateAndSaveTorboxKey("k").isFailure)
+        assertTrue(missingData.saveTestCredential(DebridService.TORBOX, "k").isFailure)
     }
 
     @Test
     fun `a throwing transport returns failure, never a crash`() = runTest {
         val (repo, store) = repository(FakeHttpTransport { throw IOException("offline") })
-        val result = repo.validateAndSaveTorboxKey("k")
+        val result = repo.saveTestCredential(DebridService.TORBOX, "k")
         assertTrue(result.isFailure)
         assertNull(store.get(DebridRepository.TORBOX_ACCOUNT_ID))
     }
@@ -789,7 +1080,7 @@ class DebridRepositoryTest {
             transport = FakeHttpTransport { HttpResponse(200, VALID_ME) },
             ioDispatcher = Dispatchers.Unconfined,
         )
-        val result = repo.validateAndSaveTorboxKey("k")
+        val result = repo.saveTestCredential(DebridService.TORBOX, "k")
         assertTrue(result.isFailure)
         assertTrue(repo.accounts().isEmpty())
     }
@@ -800,7 +1091,7 @@ class DebridRepositoryTest {
             delay(Long.MAX_VALUE)
             HttpResponse(200, VALID_ME)
         })
-        val deferred = async { repo.validateAndSaveTorboxKey("k") }
+        val deferred = async { repo.saveTestCredential(DebridService.TORBOX, "k") }
         delay(10)
         deferred.cancel()
         try {
@@ -811,19 +1102,55 @@ class DebridRepositoryTest {
         }
     }
     @Test
-    fun `repository play carries the selected download kind to TorBox`() = runTest {
+    fun `repository deletes and plays each TorBox row with an overlapping ID`() = runTest {
         val store = InMemoryCredentialStore()
         store.save(DebridRepository.TORBOX_ACCOUNT_ID, "test-key")
+        val requests = mutableListOf<HttpRequest>()
         val transport = FakeHttpTransport { request ->
-            assertTrue(request.url.contains("/webdl/requestdl"))
-            assertTrue(request.url.contains("web_id=11"))
-            assertTrue(request.url.contains("file_id=1"))
-            HttpResponse(200, """{"success":true,"data":"https://example.com/play"}""")
+            requests += request
+            if (request.method == "GET") {
+                HttpResponse(200, """{"success":true,"data":"https://example.com/play"}""")
+            } else {
+                HttpResponse(200, """{"success":true,"data":true}""")
+            }
         }
         val (repo, _) = repository(transport, store)
-        val result = repo.play(repo.provider()!!, sampleDownload(kind = app.trove.debrid.core.DownloadKind.WEB), "1")
-        assertEquals("https://example.com/play", result.getOrThrow().url)
-        assertEquals(1, transport.calls)
+        val provider = requireNotNull(repo.provider())
+        val torrent = sampleDownload(id = "11", kind = DownloadKind.TORRENT)
+        val web = torrent.copy(kind = DownloadKind.WEB)
+
+        repo.delete(provider, web).getOrThrow()
+        assertEquals("https://example.com/play", repo.play(provider, torrent, "7").getOrThrow().url)
+        repo.delete(provider, torrent).getOrThrow()
+        assertEquals("https://example.com/play", repo.play(provider, web, "8").getOrThrow().url)
+
+        assertEquals(
+            listOf("webdl/controlwebdownload", "torrents/requestdl", "torrents/controltorrent", "webdl/requestdl")
+                .map { "${TorBoxProvider.BASE}/$it" },
+            requests.map { it.url.substringBefore('?') },
+        )
+        assertEquals("""{"operation":"delete","webdl_id":11}""", requests[0].jsonBody)
+        assertEquals("""{"operation":"delete","torrent_id":11}""", requests[2].jsonBody)
+        assertTrue(requests[1].url.contains("torrent_id=11") && requests[1].url.contains("file_id=7"))
+        assertTrue(requests[3].url.contains("web_id=11") && requests[3].url.contains("file_id=8"))
     }
 
+    @Test fun `provider lifetime retains budgets until credential changes`() {
+        val store = InMemoryCredentialStore()
+        val repo = DebridRepository(FakeSharedPreferences(), store, FakeHttpTransport(), Dispatchers.Unconfined)
+        store.save(DebridRepository.TORBOX_ACCOUNT_ID, "first")
+        val first = repo.provider()
+        assertSame(first, repo.provider())
+        store.save(DebridRepository.TORBOX_ACCOUNT_ID, "second")
+        assertNotSame(first, repo.provider())
+        repo.signOut(DebridService.TORBOX)
+        assertNull(repo.provider())
+    }
+
+    @Test fun `URL file download failure is a Result instead of a thrown exception`() = runTest {
+        val repo = DebridRepository(FakeSharedPreferences(), InMemoryCredentialStore(),
+            FakeHttpTransport { throw java.io.IOException("offline") }, Dispatchers.Unconfined)
+        val result = repo.addClassified(FakeProvider(), ClassifiedShare.TorrentUrl("https://example.com/a.torrent"))
+        assertTrue(result.isFailure)
+    }
 }

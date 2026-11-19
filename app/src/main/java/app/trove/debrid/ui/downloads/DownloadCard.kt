@@ -79,7 +79,9 @@ internal fun DownloadCover(download: DebridDownload, metadata: MediaMetadata? = 
     Surface(color = background, contentColor = foreground) {
         Row(Modifier.fillMaxWidth().padding(TroveSpace.page), verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(TroveSpace.medium)) {
-            val identity = downloadIdentity(download, metadata)
+            val identity = remember(download, metadata) {
+                metadata ?: downloadIdentity(download, null)
+            }
             MetadataPoster(identity.posterUrl)
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(TroveSpace.small)) {
                 Text(identity.title, style = MaterialTheme.typography.titleMedium,

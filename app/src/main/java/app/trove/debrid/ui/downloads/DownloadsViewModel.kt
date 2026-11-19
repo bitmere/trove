@@ -6,31 +6,79 @@ import app.trove.debrid.core.DebridDownload
 import app.trove.debrid.core.DebridError
 import app.trove.debrid.core.DebridProvider
 import app.trove.debrid.core.DownloadKind
-import app.trove.debrid.core.DownloadStatus
+import app.trove.debrid.core.DownloadRef
 import app.trove.debrid.core.DownloadSort
-import app.trove.debrid.core.sortDownloads
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
+import app.trove.debrid.core.DownloadStatus
+import app.trove.debrid.core.MediaCandidate
+import app.trove.debrid.core.MediaMetadata
+import app.trove.debrid.data.DownloadPage
+import app.trove.debrid.data.MetadataOverride
 import app.trove.debrid.data.TroveRepository
 import app.trove.debrid.data.defaultPreferWords
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import java.net.URI
+import java.util.Locale
+
+/** Viewport paging state for one tab (Step 2). `loaded` is the rows
+ *  paged in so far, in server order; the visible list is the sorted /
+ *  filtered view of these rows. `nextOffset` is the server offset of
+ *  the next page, and a failed page keeps its offset so Retry
+ *  re-requests exactly that page without losing loaded rows. */
+data class PagedTabState(
+    val loaded: List<DebridDownload> = emptyList(),
+    val nextOffset: Int = 0,
+    val endReached: Boolean = false,
+    val pageLoading: Boolean = false,
+    val pageError: String? = null,
+    val visited: Boolean = false,
+)
+
+/** Scroll anchor for process-death restoration (Step 2b). Small,
+ *  non-secret UI state only: the row's kind + id, its index in the
+ *  visible list, and the sort + query it was captured under (the
+ *  criteria version). Restored only once the anchor row is in the
+ *  loaded set; otherwise the list starts at the top. */
+data class ScrollAnchor(
+    val kind: DownloadKind,
+    val id: String,
+    val index: Int,
+    val sort: DownloadSort,
+    val query: String,
+)
+
+private enum class PageOutcome { LOADED, FAILED, STALE }
+
+private fun freshPagedStates(): Map<DownloadKind, PagedTabState> =
+    DownloadKind.entries.associateWith { PagedTabState() }
 
 data class DownloadsUiState(
-    val metadata: Map<Pair<DownloadKind, String>, app.trove.debrid.core.MediaMetadata> = emptyMap(),
+    val metadata: Map<Pair<DownloadKind, String>, MediaMetadata> = emptyMap(),
+    /** Picker candidates for the open download only, keyed by (kind, id). */
+    val candidates: Map<Pair<DownloadKind, String>, List<MediaCandidate>> = emptyMap(),
+    /** Stored picks for downloads whose metadata came from an override. */
+    val metadataOverrides: Map<Pair<DownloadKind, String>, MetadataOverride> = emptyMap(),
     val loading: Boolean = true,
     /** A refresh of an already-loaded list: rows stay visible and
      *  only the pull indicator shows. Distinct from [loading], the
      *  initial full-screen spinner. */
     val refreshing: Boolean = false,
     val signedOut: Boolean = false,
+    /** Loaded-so-far rows across tabs: the union of [pagedByTab]
+     *  loaded rows. Search sees the whole tab only after its full
+     *  sync (see [DownloadsViewModel.setQuery]). */
     val downloads: List<DebridDownload> = emptyList(),
     /** "Essential" etc., from the connected account; null when signed out. */
     val accountLabel: String? = null,
@@ -54,13 +102,25 @@ data class DownloadsUiState(
     val filePicker: DebridDownload? = null,
     val addedConfirmation: DownloadKind? = null,
     val deleteConfirm: DebridDownload? = null,
+    val visibleByTab: Map<DownloadKind, List<DebridDownload>> = emptyMap(),
+    /** Per-tab viewport paging state (Step 2). */
+    val pagedByTab: Map<DownloadKind, PagedTabState> = freshPagedStates(),
+    /** Pending scroll anchor (Step 2b), consumed once restored or
+     *  once its tab is fully loaded without the anchor row. */
+    val pendingAnchor: ScrollAnchor? = null,
 ) {
     override fun toString(): String = "DownloadsUiState([redacted])"
 }
 
 class DownloadsViewModel(
     private val repository: TroveRepository,
+    private val backgroundDispatcher: CoroutineDispatcher = Dispatchers.Default,
 ) : ViewModel() {
+
+    companion object {
+        /** Rows per viewport append (Step 2). */
+        const val PAGE_SIZE = 100
+    }
 
     private val _state = MutableStateFlow(DownloadsUiState())
     val state: StateFlow<DownloadsUiState> = _state.asStateFlow()
@@ -70,17 +130,29 @@ class DownloadsViewModel(
     private var libraryProvider: DebridProvider? = null
     private var fileLookupJob: Job? = null
     private var playbackJob: Job? = null
+    private var pageJobs = mutableMapOf<DownloadKind, Job>()
+    private var fullSyncJob: Job? = null
+    private var fullSyncTab: DownloadKind? = null
 
     private var sortChanged = false
     private val sortWrites = Mutex()
+    private var preparationJob: Job? = null
+    private var searchDebouncePending = false
+    private var prepared: PreparedVisible? = null
 
     init {
         viewModelScope.launch {
             val savedSort = repository.loadDownloadSort()
             val preferWords = repository.loadPreferWords()
             val showClutterFiles = repository.loadShowClutterFiles()
-            if (!sortChanged) _state.update { it.copy(sort = savedSort) }
-            _state.update { it.copy(preferWords = preferWords, showClutterFiles = showClutterFiles) }
+            val previous = _state.value
+            _state.update {
+                it.copy(sort = if (sortChanged) it.sort else savedSort,
+                    preferWords = preferWords, showClutterFiles = showClutterFiles)
+            }
+            if (previous.sort != _state.value.sort || previous.preferWords != preferWords) {
+                schedulePreparation(debounced = searchDebouncePending)
+            }
         }
         refresh()
     }
@@ -92,9 +164,17 @@ class DownloadsViewModel(
      *  every fresh load costs uncached calls against the provider's
      *  rate limit. It is required (no default) on this overload so the
      *  no-arg entry above stays the only overload that adapts to
-     *  `() -> Unit` for `viewModel::refresh` references. */
+     *  `() -> Unit` for `viewModel::refresh` references.
+     *
+     *  A refresh resets pagination to page 0 for every tab (offsets
+     *  to 0, end-reached cleared) and reloads page 0 of the visible
+     *  tab only; other tabs reload page 0 on first visit. Loaded rows
+     *  stay visible until page 0 replaces them. */
     fun refresh(showIndicator: Boolean = true, fresh: Boolean) {
         refreshJob?.cancel()
+        cancelPageJobs()
+        fullSyncJob?.cancel()
+        fullSyncTab = null
         val version = ++refreshVersion
         // Set feedback synchronously, then do all account/Keystore reads in
         // the repository's suspending IO path, after construction can return.
@@ -117,49 +197,35 @@ class DownloadsViewModel(
                     fileLookupJob?.cancel()
                     playbackJob?.cancel()
                     _state.update {
-                        it.copy(downloads = emptyList(), metadata = emptyMap(), accountLabel = null,
+                        it.copy(downloads = emptyList(), metadata = emptyMap(), candidates = emptyMap(),
+                            metadataOverrides = emptyMap(), accountLabel = null,
+                            visibleByTab = emptyMap(), pagedByTab = freshPagedStates(),
+                            pendingAnchor = null,
                             filePicker = null, deleteConfirm = null, playUrl = null, playFileName = null,
                             askEveryTime = false, resolvingDownload = null, resolvingFileId = null)
                     }
+                    prepared = null
+                    if (provider != null) schedulePreparation(debounced = false)
                 }
                 if (provider == null) {
                     _state.update {
                         it.copy(
                             loading = false, refreshing = false, signedOut = true,
-                            downloads = emptyList(), metadata = emptyMap(), accountLabel = null, loadError = null,
+                            downloads = emptyList(), metadata = emptyMap(), candidates = emptyMap(),
+                            metadataOverrides = emptyMap(), accountLabel = null, loadError = null,
                             authenticationRequired = false,
                             filePicker = null, playUrl = null, playFileName = null,
+                            pagedByTab = freshPagedStates(), pendingAnchor = null,
                         )
                     }
+                    schedulePreparation(debounced = false)
                     return@launch
                 }
-                val list = repository.listDownloads(provider, bypassCache = fresh).getOrThrow()
-                if (version != refreshVersion) return@launch
                 libraryProvider = provider
-                val currentNames = list.associate { (it.kind to it.id) to it.name }
-                _state.update {
-                    val oldNames = it.downloads.associate { row -> (row.kind to row.id) to row.name }
-                    it.copy(
-                        loading = false, refreshing = false, signedOut = false,
-                        downloads = list,
-                        metadata = it.metadata.filterKeys { key ->
-                            key in currentNames && currentNames[key] == oldNames[key]
-                        }, loadError = null, authenticationRequired = false,
-                        accountLabel = accountLabel,
-                    )
-                }
-                // Rows are already visible. Sequential enrichment bounds network and memory.
-                for (download in list) {
-                    // Retained successes already match this row's name and identity.
-                    if ((download.kind to download.id) in _state.value.metadata) continue
-                    val query = app.trove.debrid.core.parseMediaName(download.name)
-                    val metadata = try { repository.resolveMetadata(query) }
-                        catch (e: CancellationException) { throw e }
-                        catch (_: Exception) { null }
-                        ?: continue
-                    if (version != refreshVersion) return@launch
-                    _state.update { it.copy(metadata = it.metadata + ((download.kind to download.id) to metadata)) }
-                }
+                _state.update { it.copy(signedOut = false, accountLabel = accountLabel) }
+                resetPagination(keepRows = true, currentTab = _state.value.tab)
+                launchPage(provider, _state.value.tab, offset = 0, bypassCache = fresh,
+                    version = version, replace = true)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -172,6 +238,7 @@ class DownloadsViewModel(
                         authenticationRequired = e is DebridError.AuthInvalid,
                     )
                 }
+                schedulePreparation(debounced = false)
             }
         }
     }
@@ -187,15 +254,39 @@ class DownloadsViewModel(
 
     fun setTab(tab: DownloadKind) {
         _state.update { it.copy(tab = tab) }
+        ensureTabLoaded(tab)
     }
 
     fun setQuery(query: String) {
         _state.update { it.copy(query = query) }
+        schedulePreparation(debounced = query.isNotEmpty())
+        if (query.isNotBlank()) {
+            // Search matches the whole tab, not just loaded rows: finish
+            // the tab's sync before matching (Step 2).
+            ensureFullSync(_state.value.tab)
+        } else {
+            fullSyncJob?.cancel()
+            fullSyncTab = null
+        }
     }
 
+    /** A sort change resets pagination to page 0 for every tab and
+     *  reloads page 0 of the visible tab. In-flight pages belong to
+     *  the old sort, so the refresh version is bumped to drop them. */
     fun setSort(sort: DownloadSort) {
         sortChanged = true
-        _state.update { it.copy(sort = sort) }
+        cancelPageJobs()
+        fullSyncJob?.cancel()
+        fullSyncTab = null
+        ++refreshVersion
+        _state.update { it.copy(sort = sort, pendingAnchor = null) }
+        resetPagination(keepRows = true, currentTab = _state.value.tab)
+        schedulePreparation(debounced = false)
+        val provider = libraryProvider
+        if (provider != null) {
+            launchPage(provider, _state.value.tab, offset = 0, bypassCache = false,
+                version = refreshVersion, replace = true)
+        }
         viewModelScope.launch {
             sortWrites.withLock { repository.saveDownloadSort(sort) }
         }
@@ -208,20 +299,415 @@ class DownloadsViewModel(
         setSort(DownloadSort.NEWEST)
     }
 
+    // ------------------------------------------------------------------
+    // Viewport paging (Step 2 + item 29)
+    // ------------------------------------------------------------------
+
+    /** Loads the next page of [tab] when more pages exist. A failed
+     *  page keeps its offset, so [retryPage] re-requests only that
+     *  page; loaded rows and scroll position are never cleared. */
+    fun loadNextPage(tab: DownloadKind = _state.value.tab) {
+        val provider = libraryProvider ?: return
+        val current = _state.value.pagedByTab[tab] ?: PagedTabState()
+        if (current.pageLoading || current.endReached) return
+        launchPage(provider, tab, offset = current.nextOffset, bypassCache = false,
+            version = refreshVersion, replace = false)
+    }
+
+    /** Re-requests only the failed page of [tab]. */
+    fun retryPage(tab: DownloadKind = _state.value.tab) = loadNextPage(tab)
+
+    /** Item 29: only the visible tab loads eagerly. Other tabs load
+     *  page 0 on first visit; a visited tab with an active query
+     *  finishes its sync instead, so search sees the whole tab. */
+    private fun ensureTabLoaded(tab: DownloadKind) {
+        val provider = libraryProvider ?: return
+        val current = _state.value.pagedByTab[tab] ?: PagedTabState()
+        if (current.visited) {
+            if (_state.value.query.isNotBlank()) ensureFullSync(tab)
+            return
+        }
+        launchPage(provider, tab, offset = 0, bypassCache = false,
+            version = refreshVersion, replace = true)
+    }
+
+    /** Loads the rest of [tab], page by page, until the end or a page
+     *  error. Used for search: the tab must be complete before it is
+     *  matched. A page error stops the sync and stays visible as the
+     *  tab's page error with Retry. */
+    private fun ensureFullSync(tab: DownloadKind) {
+        val provider = libraryProvider ?: return
+        if (fullSyncJob?.isActive == true && fullSyncTab == tab) return
+        fullSyncJob?.cancel()
+        fullSyncTab = tab
+        val version = refreshVersion
+        fullSyncJob = viewModelScope.launch {
+            while (version == refreshVersion) {
+                val current = _state.value.pagedByTab[tab] ?: return@launch
+                if (current.endReached || current.pageError != null) return@launch
+                if (current.pageLoading) {
+                    delay(50)
+                    continue
+                }
+                val outcome = fetchPage(provider, tab, current.nextOffset,
+                    bypassCache = false, version = version, replace = false)
+                if (outcome != PageOutcome.LOADED) return@launch
+            }
+        }
+    }
+
+    private fun launchPage(
+        provider: DebridProvider,
+        tab: DownloadKind,
+        offset: Int,
+        bypassCache: Boolean,
+        version: Int,
+        replace: Boolean,
+    ) {
+        pageJobs[tab]?.cancel()
+        _state.update { state ->
+            val current = state.pagedByTab[tab] ?: PagedTabState()
+            state.copy(pagedByTab = state.pagedByTab +
+                (tab to current.copy(pageLoading = true, pageError = null, visited = true)))
+        }
+        pageJobs[tab] = viewModelScope.launch {
+            fetchPage(provider, tab, offset, bypassCache, version, replace)
+        }
+    }
+
+    /** Fetches one page, publishes it, and hydrates metadata for its
+     *  new rows. Returns STALE when a newer refresh / sort change /
+     *  provider switch has superseded this page: nothing is
+     *  published. A failed page never clears loaded rows. */
+    private suspend fun fetchPage(
+        provider: DebridProvider,
+        tab: DownloadKind,
+        offset: Int,
+        bypassCache: Boolean,
+        version: Int,
+        replace: Boolean,
+    ): PageOutcome {
+        _state.update { state ->
+            val current = state.pagedByTab[tab] ?: PagedTabState()
+            state.copy(pagedByTab = state.pagedByTab +
+                (tab to current.copy(pageLoading = true, pageError = null, visited = true)))
+        }
+        val page: DownloadPage = try {
+            repository.listDownloadPage(provider, tab, offset, PAGE_SIZE, bypassCache).getOrThrow()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            if (version != refreshVersion) return PageOutcome.STALE
+            _state.update { state ->
+                val current = state.pagedByTab[tab] ?: PagedTabState()
+                state.copy(
+                    loading = false,
+                    refreshing = if (offset == 0 && tab == state.tab) false else state.refreshing,
+                    pagedByTab = state.pagedByTab + (tab to current.copy(
+                        pageLoading = false,
+                        pageError = userMessage(e, "Couldn't load downloads. Try again or check Settings."),
+                    )),
+                    // A failed page 0 is the list failing: keep the
+                    // global load error (and rows, if any) as today.
+                    // A failed append only gets the per-page error row.
+                    loadError = if (offset == 0) {
+                        userMessage(e, "Couldn't load downloads. Try again or check Settings.")
+                    } else state.loadError,
+                    authenticationRequired = e is DebridError.AuthInvalid,
+                )
+            }
+            return PageOutcome.FAILED
+        }
+        if (version != refreshVersion || libraryProvider !== provider) return PageOutcome.STALE
+        val oldTab = _state.value.pagedByTab[tab] ?: PagedTabState()
+        val merged = if (replace) {
+            page.rows
+        } else {
+            val byKey = LinkedHashMap<Pair<DownloadKind, String>, DebridDownload>()
+            for (row in oldTab.loaded) byKey[row.kind to row.id] = row
+            for (row in page.rows) byKey.putIfAbsent(row.kind to row.id, row)
+            byKey.values.toList()
+        }
+        _state.update { state ->
+            val tabState = state.pagedByTab[tab] ?: PagedTabState()
+            val byTab = state.pagedByTab + (tab to tabState.copy(
+                loaded = merged,
+                nextOffset = offset + page.fetchedCount,
+                endReached = page.endReached,
+                pageLoading = false,
+                pageError = null,
+                visited = true,
+            ))
+            val union = byTab.values.flatMap { it.loaded }
+            // Retain metadata only for rows still loaded with the same
+            // name. Rows on not-yet-loaded pages re-resolve when their
+            // page arrives; that keeps a refresh from resurrecting
+            // metadata for rows that are gone (stale-batch guard).
+            val oldNames = state.downloads.associate { row -> (row.kind to row.id) to row.name }
+            val currentNames = union.associate { row -> (row.kind to row.id) to row.name }
+            val keep: (Pair<DownloadKind, String>) -> Boolean = { key ->
+                key in currentNames && currentNames[key] == oldNames[key]
+            }
+            state.copy(
+                pagedByTab = byTab,
+                downloads = union,
+                loading = false,
+                refreshing = if (offset == 0 && tab == state.tab) false else state.refreshing,
+                loadError = if (offset == 0) null else state.loadError,
+                metadata = state.metadata.filterKeys(keep),
+                candidates = state.candidates.filterKeys(keep),
+                metadataOverrides = state.metadataOverrides.filterKeys(keep),
+            )
+        }
+        schedulePreparation(debounced = false)
+        if (offset == 0 && _state.value.query.isNotBlank()) ensureFullSync(tab)
+        // Rows that still lack metadata after the publish need
+        // resolution: new keys, renamed rows (their retained metadata
+        // was dropped by the name check above), and previous misses
+        // (never stored). Retained successes are already in the map,
+        // so they are skipped here and again inside hydrateRows.
+        val newRows = merged.filter { (it.kind to it.id) !in _state.value.metadata }
+        hydrateRows(newRows, version)
+        return PageOutcome.LOADED
+    }
+
+    /** Resets every tab's cursor to page 0. Loaded rows are kept
+     *  visible until their tab's page 0 replaces them; unvisited tabs
+     *  reload on first visit. */
+    private fun resetPagination(keepRows: Boolean, currentTab: DownloadKind) {
+        _state.update { state ->
+            val byTab = DownloadKind.entries.associateWith { kind ->
+                val old = state.pagedByTab[kind] ?: PagedTabState()
+                PagedTabState(
+                    loaded = if (keepRows) old.loaded else emptyList(),
+                    nextOffset = 0,
+                    endReached = false,
+                    pageLoading = false,
+                    pageError = null,
+                    visited = kind == currentTab,
+                )
+            }
+            state.copy(
+                pagedByTab = byTab,
+                downloads = if (keepRows) state.downloads else emptyList(),
+            )
+        }
+    }
+
+    private fun cancelPageJobs() {
+        pageJobs.values.forEach { it.cancel() }
+        pageJobs.clear()
+    }
+
+    // ------------------------------------------------------------------
+    // Scroll anchor (Step 2b)
+    // ------------------------------------------------------------------
+
+    /** Opaque identity of the account the anchor belongs to: the
+     *  provider service name, never a key or label detail. */
+    fun currentAccountIdentity(): String? = libraryProvider?.service?.name
+
+    /** Captures the anchor for the visible row at [index] in [tab]'s
+     *  visible list, or null when the index is out of range. */
+    fun captureAnchor(tab: DownloadKind, index: Int): ScrollAnchor? {
+        val rows = visibleDownloads(_state.value, tab)
+        val row = rows.getOrNull(index) ?: return null
+        val current = _state.value
+        return ScrollAnchor(row.kind, row.id, index, current.sort, current.query)
+    }
+
+    /** Index of the anchor row in the currently loaded visible list,
+     *  or null when the criteria changed or the row is not loaded yet. */
+    fun anchorRowIndex(anchor: ScrollAnchor): Int? {
+        val current = _state.value
+        if (anchor.sort != current.sort || anchor.query != current.query) return null
+        return visibleDownloads(current, anchor.kind)
+            .indexOfFirst { it.id == anchor.id }.takeIf { it >= 0 }
+    }
+
+    /** Stages an anchor restored from saved state. It is ignored when
+     *  it belongs to another account, so a sign-in change never
+     *  restores a stale position. */
+    fun setPendingAnchor(anchor: ScrollAnchor?, accountIdentity: String?) {
+        if (anchor != null && accountIdentity != null &&
+            currentAccountIdentity() != accountIdentity
+        ) return
+        _state.update { it.copy(pendingAnchor = anchor) }
+    }
+
+    fun consumePendingAnchor() {
+        _state.update { it.copy(pendingAnchor = null) }
+    }
+
+    // ------------------------------------------------------------------
+    // Metadata hydration (per page, batched as before)
+    // ------------------------------------------------------------------
+
+    /** Resolves metadata for [rows] only, in arrival order, flushing
+     *  every 10 rows / 200 ms. The [version] guard drops stale
+     *  batches after a refresh, sort change, or provider switch. */
+    private suspend fun hydrateRows(rows: List<DebridDownload>, version: Int) {
+        val pending = LinkedHashMap<Pair<DownloadKind, String>, MediaMetadata>()
+        val pendingOverrides = LinkedHashMap<Pair<DownloadKind, String>, MetadataOverride>()
+        var lastFlush = System.currentTimeMillis()
+
+        fun flushMetadata() {
+            if (version != refreshVersion || (pending.isEmpty() && pendingOverrides.isEmpty())) return
+            _state.update {
+                it.copy(metadata = it.metadata + pending,
+                    metadataOverrides = it.metadataOverrides + pendingOverrides)
+            }
+            pending.clear()
+            pendingOverrides.clear()
+            lastFlush = System.currentTimeMillis()
+        }
+
+        // Resolve sequentially to preserve arrival order and bound Cinemeta traffic.
+        for (download in rows) {
+            if (version != refreshVersion) return
+            val key = download.kind to download.id
+            // Retained successes already match this row's name and identity.
+            if (key in _state.value.metadata) continue
+            val query = app.trove.debrid.core.parseMediaName(download.name)
+            // A stored pick wins over the automatic match, so the
+            // card and the details sheet show the picked title.
+            val storedOverride = try { repository.loadMetadataOverride(DownloadRef(download.kind, download.id)) }
+                catch (e: CancellationException) { throw e }
+                catch (_: Exception) { null }
+            val metadata = try {
+                storedOverride?.let { repository.resolveMetadataById(it.imdbId, it.type) }
+                    ?: repository.resolveMetadata(query)
+            } catch (e: CancellationException) { throw e }
+              catch (_: Exception) { null }
+            if (version != refreshVersion) return
+            if (metadata != null) {
+                pending[key] = metadata
+                if (storedOverride != null) pendingOverrides[key] = storedOverride
+            }
+            if (pending.size >= 10 || System.currentTimeMillis() - lastFlush >= 200) {
+                flushMetadata()
+            }
+        }
+        flushMetadata()
+    }
+
     /** Each pager page filters its own kind, including while it is offscreen. */
     fun visibleDownloads(state: DownloadsUiState, tab: DownloadKind = state.tab): List<DebridDownload> {
-        val byTab = state.downloads.filter { it.kind == tab }
-        val q = state.query.trim()
-        val filtered = if (q.isEmpty()) byTab else byTab.filter { it.name.contains(q, ignoreCase = true) }
-        return sortDownloads(filtered, state.sort, state.preferWords)
+        val cached = prepared
+        if (cached != null && cached.inputs.matchesLibrary(state) &&
+            (cached.inputs.query == state.query || searchDebouncePending)
+        ) {
+            return cached.byTab[tab].orEmpty()
+        }
+        return prepareVisible(state.downloads, state.query, state.sort, state.preferWords)[tab].orEmpty()
+    }
+
+    private fun schedulePreparation(debounced: Boolean) {
+        preparationJob?.cancel()
+        searchDebouncePending = debounced
+        preparationJob = viewModelScope.launch {
+            if (debounced) {
+                delay(250)
+                searchDebouncePending = false
+            }
+            prepareAndPublish()
+        }
+    }
+
+    private suspend fun prepareAndPublish() {
+        val current = _state.value
+        val inputs = VisibleInputs(current.downloads, current.query, current.sort, current.preferWords)
+        val byTab = withContext(backgroundDispatcher) {
+            prepareVisible(inputs.downloads, inputs.query, inputs.sort, inputs.preferWords)
+        }
+        val latest = _state.value
+        if (!inputs.matchesLibrary(latest) || inputs.query != latest.query) return
+        prepared = PreparedVisible(inputs, byTab)
+        _state.update { it.copy(visibleByTab = byTab) }
     }
 
     fun openDownload(download: DebridDownload) {
         if (_state.value.resolvingDownload != null || _state.value.playUrl != null) return
         if (download.files.isNotEmpty()) {
             _state.update { it.copy(filePicker = download) }
+            loadCandidatesFor(download)
         } else {
             loadFiles(download, autoPlay = false)
+        }
+    }
+
+    /** Loads the picker for the open download only: a stored pick
+     *  resolves first; otherwise the candidates for the parsed title.
+     *  Runs only when the automatic match left no metadata. */
+    private fun loadCandidatesFor(download: DebridDownload) {
+        val key = download.kind to download.id
+        viewModelScope.launch {
+            if (key in _state.value.metadata) return@launch
+            val storedOverride = try { repository.loadMetadataOverride(DownloadRef(download.kind, download.id)) }
+                catch (e: CancellationException) { throw e }
+                catch (_: Exception) { null }
+            if (storedOverride != null) {
+                val metadata = try { repository.resolveMetadataById(storedOverride.imdbId, storedOverride.type) }
+                    catch (e: CancellationException) { throw e }
+                    catch (_: Exception) { null }
+                if (metadata != null) {
+                    _state.update {
+                        it.copy(metadata = it.metadata + (key to metadata),
+                            metadataOverrides = it.metadataOverrides + (key to storedOverride))
+                    }
+                    return@launch
+                }
+            }
+            val candidates = try {
+                repository.resolveMetadataCandidates(app.trove.debrid.core.parseMediaName(download.name))
+            } catch (e: CancellationException) { throw e }
+              catch (_: Exception) { emptyList() }
+            if (candidates.isNotEmpty()) {
+                _state.update { it.copy(candidates = it.candidates + (key to candidates)) }
+            }
+        }
+    }
+
+    /** Stores the user's pick for this download only, then shows the
+     *  picked title. The pick is keyed by (kind, id). */
+    fun pickCandidate(download: DebridDownload, candidate: MediaCandidate) {
+        val key = download.kind to download.id
+        if (_state.value.filePicker?.let { it.kind to it.id } != key) return
+        viewModelScope.launch {
+            val pick = MetadataOverride(candidate.imdbId, candidate.type, candidate.title)
+            try { repository.saveMetadataOverride(DownloadRef(download.kind, download.id), pick) }
+                catch (e: CancellationException) { throw e }
+                catch (_: Exception) { return@launch }
+            val metadata = try { repository.resolveMetadataById(candidate.imdbId, candidate.type) }
+                catch (e: CancellationException) { throw e }
+                catch (_: Exception) { null }
+            _state.update {
+                it.copy(
+                    metadataOverrides = it.metadataOverrides + (key to pick),
+                    metadata = if (metadata != null) it.metadata + (key to metadata) else it.metadata,
+                )
+            }
+        }
+    }
+
+    /** Drops the stored pick and re-resolves normally, so the parsed
+     *  title — and the picker, when the match still fails — comes back. */
+    fun clearMetadataOverride(download: DebridDownload) {
+        val key = download.kind to download.id
+        if (_state.value.filePicker?.let { it.kind to it.id } != key) return
+        viewModelScope.launch {
+            try { repository.clearMetadataOverride(DownloadRef(download.kind, download.id)) }
+                catch (e: CancellationException) { throw e }
+                catch (_: Exception) { return@launch }
+            _state.update { it.copy(metadataOverrides = it.metadataOverrides - key, metadata = it.metadata - key) }
+            val metadata = try { repository.resolveMetadata(app.trove.debrid.core.parseMediaName(download.name)) }
+                catch (e: CancellationException) { throw e }
+                catch (_: Exception) { null }
+            if (metadata != null) {
+                _state.update { it.copy(metadata = it.metadata + (key to metadata)) }
+            } else {
+                loadCandidatesFor(download)
+            }
         }
     }
 
@@ -238,20 +724,19 @@ class DownloadsViewModel(
         fileLookupJob = viewModelScope.launch {
             try {
                 val provider = requireCurrentProvider(source)
-                val detail = if (provider is app.trove.debrid.core.TorBoxProvider) {
-                    provider.getDownload(download.id, download.kind)
-                } else {
-                    provider.getDownload(download.id)
-                }.getOrThrow()
+                val detail = provider.getDownload(app.trove.debrid.core.DownloadRef(download.kind, download.id)).getOrThrow()
                 ensureActive()
                 if (autoPlay && detail.files.isNotEmpty()) {
                     _state.update { it.copy(resolvingDownload = null) }
                     play(detail)
                 }
-                else _state.update {
-                    it.copy(resolvingDownload = null,
-                        filePicker = if (autoPlay || it.filePicker != null) detail else null,
-                        error = if (autoPlay) "No files are available yet. Refresh and try again." else null)
+                else {
+                    _state.update {
+                        it.copy(resolvingDownload = null,
+                            filePicker = if (autoPlay || it.filePicker != null) detail else null,
+                            error = if (autoPlay) "No files are available yet. Refresh and try again." else null)
+                    }
+                    if (!autoPlay) loadCandidatesFor(detail)
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -372,5 +857,72 @@ class DownloadsViewModel(
 
     fun clearError() {
         _state.update { it.copy(error = null, authenticationRequired = false) }
+    }
+}
+
+private data class VisibleInputs(
+    val downloads: List<DebridDownload>,
+    val query: String,
+    val sort: DownloadSort,
+    val preferWords: List<String>,
+) {
+    fun matchesLibrary(state: DownloadsUiState): Boolean =
+        downloads === state.downloads && sort == state.sort && preferWords == state.preferWords
+}
+
+private data class PreparedVisible(
+    val inputs: VisibleInputs,
+    val byTab: Map<DownloadKind, List<DebridDownload>>,
+)
+
+private data class DownloadSortKeys(
+    val download: DebridDownload,
+    val name: String,
+    val date: Long?,
+    val size: Long?,
+    val progress: Float,
+    val preference: Int,
+)
+
+private val releaseSeparators = Regex("""[._\-\s\p{Ps}\p{Pe}<>]+""")
+
+private fun prepareVisible(
+    downloads: List<DebridDownload>,
+    query: String,
+    sort: DownloadSort,
+    preferWords: List<String>,
+): Map<DownloadKind, List<DebridDownload>> {
+    val lowerQuery = query.trim().lowercase(Locale.ROOT)
+    val preferred = preferWords.asSequence().map { it.trim().lowercase(Locale.ROOT) }
+        .filter { it.isNotEmpty() }.toSet()
+
+    // Match core sortDownloads, including preference priority and stable ties.
+    // DownloadsLibraryPerformanceTest pins the ordering.
+    val sortComparator: Comparator<DownloadSortKeys> = when (sort) {
+        DownloadSort.NEWEST -> compareBy<DownloadSortKeys, Long?>(nullsLast(reverseOrder())) { it.date }
+        DownloadSort.OLDEST -> compareBy<DownloadSortKeys, Long?>(nullsLast(naturalOrder())) { it.date }
+        DownloadSort.NAME_ASC -> compareBy { it.name }
+        DownloadSort.NAME_DESC -> compareByDescending { it.name }
+        DownloadSort.LARGEST -> compareBy<DownloadSortKeys, Long?>(nullsLast(reverseOrder())) { it.size }
+        DownloadSort.SMALLEST -> compareBy<DownloadSortKeys, Long?>(nullsLast(naturalOrder())) { it.size }
+        DownloadSort.PROGRESS -> compareByDescending { it.progress }
+    }
+    val comparator = compareByDescending<DownloadSortKeys> { it.preference }.then(sortComparator)
+
+    return downloads.groupBy { it.kind }.mapValues { (_, rows) ->
+        rows.mapNotNull { download ->
+            val name = download.name.lowercase(Locale.ROOT)
+            if (!name.contains(lowerQuery)) return@mapNotNull null
+            val preference = if (preferred.isEmpty()) 0 else releaseSeparators.splitToSequence(name)
+                .filter { it in preferred }.distinct().count()
+            DownloadSortKeys(
+                download = download,
+                name = name,
+                date = download.createdAtEpochMs,
+                size = download.sizeBytes?.takeIf { it >= 0 },
+                progress = download.progress.takeIf { it.isFinite() && it > 0f }?.coerceAtMost(1f) ?: 0f,
+                preference = preference,
+            )
+        }.sortedWith(comparator).map { it.download }
     }
 }
