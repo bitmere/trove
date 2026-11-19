@@ -7,22 +7,14 @@ import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.net.URI
 
 class DebridLinkProviderTest {
-    private class FakeTransport(private val handler: (HttpRequest) -> HttpResponse) : HttpTransport {
-        val requests = mutableListOf<HttpRequest>()
-
-        override suspend fun execute(request: HttpRequest): HttpResponse {
-            requests += request
-            return handler(request)
-        }
-    }
-
-    private fun provider(handler: (HttpRequest) -> HttpResponse): Pair<DebridLinkProvider, FakeTransport> {
-        val fake = FakeTransport(handler)
+    private fun provider(handler: (HttpRequest) -> HttpResponse): Pair<DebridLinkProvider, RecordingTransport> {
+        val fake = RecordingTransport(handler)
         return DebridLinkProvider(KEY, fake, TokenBucket(2.0, 100), TokenBucket(0.2, 20), pollDelayMs = 0) to fake
     }
 
@@ -113,6 +105,48 @@ class DebridLinkProviderTest {
                 }
             }
             assertEquals("DELETE" to "/seedbox/t1/remove", fake.requests.last().let { it.method to it.route })
+        }
+    }
+
+    @Test
+    fun `a JVM Error escapes instead of mapping to a network failure`() = runBlocking {
+        val error = OutOfMemoryError("test")
+        val (provider, _) = provider { throw error }
+        assertSame(error, runCatching { provider.validateAccount() }.exceptionOrNull())
+    }
+
+    @Test
+    fun `string and numeric JSON fields parse identically after the opt migration`() = runBlocking {
+        fun torrentJson(status: String, percent: String, size: String, totalSize: String, created: String) =
+            """{"id":"t1","name":"Dune","status":$status,"downloadPercent":$percent,"totalSize":$totalSize,"created":$created,"files":[{"id":"f1","name":"dune.mkv","size":$size,"downloadUrl":"$LINK"}]}"""
+        suspend fun downloadFor(torrent: String): DebridDownload {
+            val (provider, _) = provider { request ->
+                when (request.route) {
+                    "/seedbox/list" -> page(listOf(torrent))
+                    "/downloader/list" -> page(emptyList())
+                    else -> unexpected(request)
+                }
+            }
+            return provider.listDownloads().getOrThrow().single()
+        }
+        val asNumbers = downloadFor(torrentJson("8", "50", "12", "1200", "1700000000"))
+        val asStrings = downloadFor(torrentJson("\"8\"", "\"50\"", "\"12\"", "\"1200\"", "\"1700000000\""))
+        assertEquals(asNumbers, asStrings)
+        assertEquals(1200L, asNumbers.sizeBytes)
+        assertEquals(DownloadStatus.DOWNLOADING, asNumbers.status)
+        assertEquals(0.5f, asNumbers.progress, 0.001f)
+        assertEquals(1_700_000_000_000L, asNumbers.createdAtEpochMs)
+        assertEquals(12L, asNumbers.files.single().sizeBytes)
+    }
+
+    @Test
+    fun `account fields read numbers and numeric strings alike`() = runBlocking {
+        for (body in listOf(
+            """{"pseudo":"legacy","accountType":2,"pts":500}""",
+            """{"pseudo":"legacy","accountType":"2","pts":"500"}""",
+        )) {
+            val (provider, _) = provider { ok(body) }
+            assertEquals(AccountInfo("legacy", true, "Premium · 500 pts"), provider.validateAccount().getOrThrow())
         }
     }
 

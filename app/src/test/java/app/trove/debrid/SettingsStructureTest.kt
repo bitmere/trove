@@ -1,10 +1,12 @@
 package app.trove.debrid
 
 import app.trove.debrid.ui.settings.SettingsDestination
-import org.junit.Assert.*
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
-class SettingsDestinationTest {
+/** Structural shape of Settings: the six groups, in order. */
+class SettingsStructureTest {
     @Test fun sixGroupsInOrderWithDistinctTitles() {
         val groups = SettingsDestination.entries
         assertEquals(

@@ -47,6 +47,9 @@ data class DebridDownload(
     val etaSeconds: Long? = null,
     val seeds: Int? = null,
     val peers: Int? = null,
+    val active: Boolean? = null,
+    val cached: Boolean? = null,
+    val expiresAtEpochMs: Long? = null,
 )
 
 sealed interface AddInput {

@@ -6,11 +6,22 @@ import app.trove.debrid.R
 import app.trove.debrid.core.VideoPlayer
 import app.trove.debrid.core.PlayerComponent
 import app.trove.debrid.PlayerDiscovery
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import app.trove.debrid.core.AccountInfo
+import app.trove.debrid.core.AllDebridProvider
 import app.trove.debrid.core.DebridAccount
 import app.trove.debrid.core.DebridError
+import app.trove.debrid.core.DebridLinkProvider
+import app.trove.debrid.core.DebridProvider
 import app.trove.debrid.core.DebridService
+import app.trove.debrid.core.HttpTransport
+import app.trove.debrid.core.OffcloudProvider
+import app.trove.debrid.core.PremiumizeProvider
+import app.trove.debrid.core.RealDebridProvider
+import app.trove.debrid.core.TorBoxProvider
 import app.trove.debrid.core.update.UpdateChannel
 import app.trove.debrid.data.BackupSettings
 import app.trove.debrid.data.BackupUnlockFailed
@@ -22,6 +33,7 @@ import app.trove.debrid.data.TroveRepository
 import app.trove.debrid.data.defaultExcludeWords
 import app.trove.debrid.data.defaultPreferWords
 import app.trove.debrid.data.normalizeReleaseWords
+import app.trove.debrid.ui.theme.TroveSpace
 import java.io.ByteArrayOutputStream
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -37,50 +49,36 @@ import kotlinx.coroutines.launch
 
 internal const val SAVED_CREDENTIAL_MASK = "••••••••••••"
 
-data class SettingsUiState(
-    val defaultPlayer: PlayerComponent? = null,
-    val players: List<VideoPlayer> = emptyList(),
-    val loadingPlayers: Boolean = true,
-    val savingPlayer: Boolean = false,
-    val playerError: Boolean = false,
+/** One provider's account state: whether a credential is saved, the
+ *  saved label, the credential field being typed, and whether a
+ *  test/save is in flight. One record per service lives in the same
+ *  [SettingsUiState] snapshot, so a state update touches one service
+ *  without disturbing the others, and backup eligibility (which
+ *  reads every record's `saving`) can never see a half-updated set. */
+data class ProviderAccountState(
     val hasKey: Boolean = false,
     val accountLabel: String? = null,
     val maskedKey: String = "",
     val keyField: String = "",
     val showKey: Boolean = false,
     val saving: Boolean = false,
-    val rdHasKey: Boolean = false,
-    val rdAccountLabel: String? = null,
-    val rdTokenField: String = "",
-    val rdShowToken: Boolean = false,
-    val rdSaving: Boolean = false,
-    val adHasKey: Boolean = false,
-    val adAccountLabel: String? = null,
-    val adKeyField: String = "",
-    val adShowKey: Boolean = false,
-    val adSaving: Boolean = false,
-    val pmHasKey: Boolean = false,
-    val pmAccountLabel: String? = null,
-    val pmKeyField: String = "",
-    val pmShowKey: Boolean = false,
-    val pmSaving: Boolean = false,
-    val ocHasKey: Boolean = false,
-    val dlHasKey: Boolean = false,
-    val ocAccountLabel: String? = null,
-    val dlAccountLabel: String? = null,
-    val ocKeyField: String = "",
-    val dlKeyField: String = "",
-    val ocShowKey: Boolean = false,
-    val dlShowKey: Boolean = false,
-    val ocSaving: Boolean = false,
-    val dlSaving: Boolean = false,
+    val feedback: Boolean = false,
+)
+
+data class SettingsUiState(
+    val defaultPlayer: PlayerComponent? = null,
+    val players: List<VideoPlayer> = emptyList(),
+    val loadingPlayers: Boolean = true,
+    val savingPlayer: Boolean = false,
+    val playerError: Boolean = false,
+    val torbox: ProviderAccountState = ProviderAccountState(),
+    val realDebrid: ProviderAccountState = ProviderAccountState(),
+    val allDebrid: ProviderAccountState = ProviderAccountState(),
+    val premiumize: ProviderAccountState = ProviderAccountState(),
+    val offcloud: ProviderAccountState = ProviderAccountState(),
+    val debridLink: ProviderAccountState = ProviderAccountState(),
     val accounts: List<DebridAccount> = emptyList(),
     val activeService: DebridService? = null,
-    val rdFeedback: Boolean = false,
-    val adFeedback: Boolean = false,
-    val pmFeedback: Boolean = false,
-    val ocFeedback: Boolean = false,
-    val dlFeedback: Boolean = false,
     val messageResource: Int? = null,
     val messageArgument: String? = null,
     val message: String? = null,
@@ -89,6 +87,14 @@ data class SettingsUiState(
     val loadingClutterFiles: Boolean = true,
     val savingClutterFiles: Boolean = false,
     val clutterFilesError: Boolean = false,
+    val metadataCacheCleared: Boolean = false,
+    val tmdbKeyField: String = "",
+    val showTmdbKey: Boolean = false,
+    val hasTmdbKey: Boolean = false,
+    val maskedTmdbKey: String = "",
+    val savingTmdbKey: Boolean = false,
+    val tmdbKeyError: Boolean = false,
+    val tmdbKeySaved: Boolean = false,
     val clipboardOffersEnabled: Boolean = true,
     val loadingClipboardOffers: Boolean = true,
     val savingClipboardOffers: Boolean = false,
@@ -109,9 +115,36 @@ data class SettingsUiState(
     val backupError: Boolean = false,
 ) {
     val canStartBackup: Boolean
-        get() = !backupBusy && !restoreNeedsPassword && !saving && !rdSaving && !adSaving && !pmSaving && !ocSaving && !dlSaving && !savingPlayer &&
+        get() = !backupBusy && !restoreNeedsPassword && !anyProviderSaving && !savingPlayer &&
             !savingClutterFiles && !savingClipboardOffers && !savingReleaseWords &&
             !loadingTheme && !savingTheme && !loadingPlayers && !loadingClutterFiles && !loadingClipboardOffers && !loadingReleaseWords
+
+    /** True while any provider's test/save is in flight. */
+    val anyProviderSaving: Boolean
+        get() = torbox.saving || realDebrid.saving || allDebrid.saving ||
+            premiumize.saving || offcloud.saving || debridLink.saving
+
+    /** The account record for one service, for screens that render
+     *  all six the same way. */
+    fun providerAccount(service: DebridService): ProviderAccountState = when (service) {
+        DebridService.TORBOX -> torbox
+        DebridService.REAL_DEBRID -> realDebrid
+        DebridService.ALLDEBRID -> allDebrid
+        DebridService.PREMIUMIZE -> premiumize
+        DebridService.OFFCLOUD -> offcloud
+        DebridService.DEBRID_LINK -> debridLink
+    }
+
+    /** A copy with no provider section showing feedback. TorBox has
+     *  no record flag of its own: its section shows the message
+     *  exactly when no other section claims it. */
+    fun clearFeedback(): SettingsUiState = copy(
+        realDebrid = realDebrid.copy(feedback = false),
+        allDebrid = allDebrid.copy(feedback = false),
+        premiumize = premiumize.copy(feedback = false),
+        offcloud = offcloud.copy(feedback = false),
+        debridLink = debridLink.copy(feedback = false),
+    )
 
     override fun toString(): String = "SettingsUiState([redacted])"
 }
@@ -317,6 +350,11 @@ class SettingsViewModel(
             }
         }
         pendingRestore = null
+        // Restoring a sign-in clears every typed credential field, so
+        // no stale secret stays visible; without a sign-in the typed
+        // fields are left exactly as they were.
+        fun ProviderAccountState.clearTypedField() =
+            if (signIn != null) copy(keyField = "", showKey = false) else this
         _state.update {
             it.copy(
                 theme = settings.theme,
@@ -330,18 +368,12 @@ class SettingsViewModel(
                 releaseWordsError = false,
                 clipboardOffersEnabled = settings.clipboardOffersEnabled,
                 clipboardOffersError = false,
-                keyField = if (signIn != null) "" else it.keyField,
-                showKey = if (signIn != null) false else it.showKey,
-                rdTokenField = if (signIn != null) "" else it.rdTokenField,
-                rdShowToken = if (signIn != null) false else it.rdShowToken,
-                adKeyField = if (signIn != null) "" else it.adKeyField,
-                pmKeyField = if (signIn != null) "" else it.pmKeyField,
-                ocKeyField = if (signIn != null) "" else it.ocKeyField,
-                dlKeyField = if (signIn != null) "" else it.dlKeyField,
-                adShowKey = if (signIn != null) false else it.adShowKey,
-                pmShowKey = if (signIn != null) false else it.pmShowKey,
-                ocShowKey = if (signIn != null) false else it.ocShowKey,
-                dlShowKey = if (signIn != null) false else it.dlShowKey,
+                torbox = it.torbox.clearTypedField(),
+                realDebrid = it.realDebrid.clearTypedField(),
+                allDebrid = it.allDebrid.clearTypedField(),
+                premiumize = it.premiumize.clearTypedField(),
+                offcloud = it.offcloud.clearTypedField(),
+                debridLink = it.debridLink.clearTypedField(),
                 restoreNeedsPassword = false,
                 backupFeedback = R.string.restore_done,
             )
@@ -427,25 +459,45 @@ class SettingsViewModel(
                 val torboxConnection = listOfNotNull(active, connection.provider?.service, connection.account?.service)
                     .all { it == DebridService.TORBOX }
                 val hasTorboxKey = DebridService.TORBOX in servicesWithKeys || (torboxConnection && connection.hasKey)
+                val tmdbKey = withContext(accountDispatcher) {
+                    repository.hasTmdbKey() to repository.maskedTmdbKey()
+                }
                 val torbox = accounts.firstOrNull { it.service == DebridService.TORBOX }
                 val realDebrid = accounts.firstOrNull { it.service == DebridService.REAL_DEBRID }
                 _state.update {
                     it.copy(
-                        hasKey = hasTorboxKey,
-                        accountLabel = torbox?.label ?: connection.account?.label.takeIf { torboxConnection },
-                        maskedKey = if (hasTorboxKey) SAVED_CREDENTIAL_MASK else "",
-                        rdHasKey = DebridService.REAL_DEBRID in servicesWithKeys,
-                        rdAccountLabel = realDebrid?.label,
-                        adHasKey = DebridService.ALLDEBRID in servicesWithKeys,
-                        adAccountLabel = accounts.firstOrNull { it.service == DebridService.ALLDEBRID }?.label,
-                        pmHasKey = DebridService.PREMIUMIZE in servicesWithKeys,
-                        ocHasKey = DebridService.OFFCLOUD in servicesWithKeys,
-                        dlHasKey = DebridService.DEBRID_LINK in servicesWithKeys,
-                        pmAccountLabel = accounts.firstOrNull { it.service == DebridService.PREMIUMIZE }?.label,
-                        ocAccountLabel = accounts.firstOrNull { it.service == DebridService.OFFCLOUD }?.label,
-                        dlAccountLabel = accounts.firstOrNull { it.service == DebridService.DEBRID_LINK }?.label,
+                        // One snapshot rewrites all six records: a
+                        // refresh never reports a half-updated set, and
+                        // typed fields and in-flight saves survive it.
+                        torbox = it.torbox.copy(
+                            hasKey = hasTorboxKey,
+                            accountLabel = torbox?.label ?: connection.account?.label.takeIf { torboxConnection },
+                            maskedKey = if (hasTorboxKey) SAVED_CREDENTIAL_MASK else "",
+                        ),
+                        realDebrid = it.realDebrid.copy(
+                            hasKey = DebridService.REAL_DEBRID in servicesWithKeys,
+                            accountLabel = realDebrid?.label,
+                        ),
+                        allDebrid = it.allDebrid.copy(
+                            hasKey = DebridService.ALLDEBRID in servicesWithKeys,
+                            accountLabel = accounts.firstOrNull { it.service == DebridService.ALLDEBRID }?.label,
+                        ),
+                        premiumize = it.premiumize.copy(
+                            hasKey = DebridService.PREMIUMIZE in servicesWithKeys,
+                            accountLabel = accounts.firstOrNull { it.service == DebridService.PREMIUMIZE }?.label,
+                        ),
+                        offcloud = it.offcloud.copy(
+                            hasKey = DebridService.OFFCLOUD in servicesWithKeys,
+                            accountLabel = accounts.firstOrNull { it.service == DebridService.OFFCLOUD }?.label,
+                        ),
+                        debridLink = it.debridLink.copy(
+                            hasKey = DebridService.DEBRID_LINK in servicesWithKeys,
+                            accountLabel = accounts.firstOrNull { it.service == DebridService.DEBRID_LINK }?.label,
+                        ),
                         accounts = accounts,
                         activeService = active,
+                        hasTmdbKey = tmdbKey.first,
+                        maskedTmdbKey = tmdbKey.second,
                         message = it.message.takeUnless { message -> message == accountReadError },
                         messageIsError = it.messageIsError && it.message != accountReadError,
                     )
@@ -454,8 +506,8 @@ class SettingsViewModel(
                 throw e
             } catch (_: Exception) {
                 _state.update {
-                    it.copy(message = accountReadError, messageIsError = true,
-                        rdFeedback = false, adFeedback = false, pmFeedback = false, ocFeedback = false, dlFeedback = false, messageResource = null, messageArgument = null)
+                    it.clearFeedback().copy(message = accountReadError, messageIsError = true,
+                        messageResource = null, messageArgument = null)
                 }
             }
         }
@@ -518,6 +570,87 @@ class SettingsViewModel(
         }
     }
 
+    /** Best-effort: the disk cache itself never throws, so a failure here
+     *  just leaves the cache in place with no banner. */
+    fun clearCachedMetadata() {
+        _state.update { it.copy(metadataCacheCleared = false) }
+        viewModelScope.launch {
+            try {
+                repository.clearCachedMetadata()
+                _state.update { it.copy(metadataCacheCleared = true) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                // Leave the flag false; the cached entries stay.
+            }
+        }
+    }
+
+    fun setTmdbKeyField(text: String) {
+        _state.update { it.copy(tmdbKeyField = text, tmdbKeySaved = false, tmdbKeyError = false) }
+    }
+
+    fun toggleShowTmdbKey() {
+        _state.update { it.copy(showTmdbKey = !it.showTmdbKey) }
+    }
+
+    /** Checks the typed key against TMDB before storing it, so a
+     *  mistyped key is caught here instead of silently disabling the
+     *  fallback. The key itself is never copied into state or a
+     *  message; only its masked form is ever shown. */
+    fun saveTmdbKey() {
+        if (backupBlocksEdits() || _state.value.savingTmdbKey) return
+        val key = _state.value.tmdbKeyField.trim()
+        if (key.isEmpty()) {
+            _state.update { it.copy(tmdbKeyError = true) }
+            return
+        }
+        _state.update { it.copy(savingTmdbKey = true, tmdbKeyError = false, tmdbKeySaved = false) }
+        viewModelScope.launch {
+            try {
+                // Result.fold's lambdas are not suspending, so branch
+                // on the outcome instead of folding over it.
+                if (repository.validateTmdbKey(key).isSuccess) {
+                    repository.saveTmdbKey(key)
+                    val masked = withContext(accountDispatcher) { repository.maskedTmdbKey() }
+                    _state.update {
+                        it.copy(
+                            hasTmdbKey = true, maskedTmdbKey = masked,
+                            tmdbKeyField = "", showTmdbKey = false, tmdbKeySaved = true,
+                        )
+                    }
+                } else {
+                    _state.update { it.copy(tmdbKeyError = true) }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                _state.update { it.copy(tmdbKeyError = true) }
+            } finally {
+                _state.update { it.copy(savingTmdbKey = false) }
+            }
+        }
+    }
+
+    fun clearTmdbKey() {
+        if (backupBlocksEdits() || _state.value.savingTmdbKey) return
+        viewModelScope.launch {
+            try {
+                repository.clearTmdbKey()
+                _state.update {
+                    it.copy(
+                        hasTmdbKey = false, maskedTmdbKey = "",
+                        tmdbKeyField = "", showTmdbKey = false, tmdbKeySaved = false,
+                    )
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                _state.update { it.copy(tmdbKeyError = true) }
+            }
+        }
+    }
+
     fun setTheme(theme: ThemePreference) {
         val state = _state.value
         if (backupBlocksEdits() || state.loadingTheme || state.savingTheme || state.theme == theme) return
@@ -554,411 +687,147 @@ class SettingsViewModel(
     }
 
     fun setKeyField(text: String) {
-        _state.update { it.copy(keyField = text, message = null, rdFeedback = false, adFeedback = false, pmFeedback = false, ocFeedback = false, dlFeedback = false, messageResource = null, messageArgument = null) }
+        _state.update {
+            it.clearFeedback().copy(
+                torbox = it.torbox.copy(keyField = text),
+                message = null, messageResource = null, messageArgument = null,
+            )
+        }
     }
 
     fun toggleShowKey() {
-        _state.update { it.copy(showKey = !it.showKey) }
-    }
-
-    fun testAndSave() {
-        if (backupBlocksEdits()) return
-        val key = _state.value.keyField.trim()
-        if (key.isEmpty()) {
-            _state.update { it.copy(message = "Paste your TorBox API key first", messageIsError = true,
-                rdFeedback = false, adFeedback = false, pmFeedback = false, ocFeedback = false, dlFeedback = false, messageResource = null, messageArgument = null) }
-            return
-        }
-        if (_state.value.saving) return
-        _state.update { it.copy(saving = true, message = null, rdFeedback = false, adFeedback = false, pmFeedback = false, ocFeedback = false, dlFeedback = false, messageResource = null, messageArgument = null) }
-        viewModelScope.launch {
-            try {
-                repository.validateAndSaveTorboxKey(key).fold(
-                    onSuccess = { account ->
-                        _state.update {
-                            it.copy(
-                                keyField = "",
-                                showKey = false,
-                                message = "TorBox connected — ${account.label}",
-                                messageIsError = false,
-                                rdFeedback = false, adFeedback = false, pmFeedback = false, ocFeedback = false, dlFeedback = false,
-                                messageResource = null,
-                                messageArgument = null,
-                            )
-                        }
-                        refresh()
-                        _accountChanged.value = true
-                    },
-                    onFailure = { e ->
-                        _state.update {
-                            it.copy(
-                                message = (e as? DebridError)?.message ?: "Key didn't work",
-                                messageIsError = true,
-                                rdFeedback = false, adFeedback = false, pmFeedback = false, ocFeedback = false, dlFeedback = false,
-                                messageResource = null,
-                                messageArgument = null,
-                            )
-                        }
-                    },
-                )
-            } catch (e: CancellationException) {
-                // The coroutine was cancelled; saving must still reset.
-                throw e
-            } catch (e: Exception) {
-                // Defensive: the repository promises a Result, but a
-                // thrown exception must never close the app.
-                _state.update {
-                    it.copy(message = "Couldn't check that key", messageIsError = true,
-                        rdFeedback = false, adFeedback = false, pmFeedback = false, ocFeedback = false, dlFeedback = false, messageResource = null, messageArgument = null)
-                }
-            } finally {
-                _state.update { it.copy(saving = false) }
-            }
-        }
-    }
-
-    fun signOut() {
-        if (backupBlocksEdits()) return
-        refreshJob?.cancel()
-        repository.signOutTorbox()
-        _state.update {
-            it.copy(hasKey = false, accountLabel = null, maskedKey = "",
-                keyField = "", showKey = false, message = "TorBox signed out", messageIsError = false,
-                rdFeedback = false, adFeedback = false, pmFeedback = false, ocFeedback = false, dlFeedback = false, messageResource = null, messageArgument = null)
-        }
-        refresh()
-        _accountChanged.value = true
+        _state.update { it.copy(torbox = it.torbox.copy(showKey = !it.torbox.showKey)) }
     }
 
     fun setRdTokenField(text: String) {
         _state.update {
-            it.copy(rdTokenField = text, message = null, messageResource = null, messageArgument = null)
+            it.copy(
+                realDebrid = it.realDebrid.copy(keyField = text),
+                message = null, messageResource = null, messageArgument = null,
+            )
         }
     }
 
     fun toggleShowRdToken() {
-        _state.update { it.copy(rdShowToken = !it.rdShowToken) }
-    }
-
-    fun testAndSaveRealDebrid() {
-        if (backupBlocksEdits() || _state.value.rdSaving) return
-        val token = _state.value.rdTokenField.trim()
-        if (token.isEmpty()) {
-            _state.update { it.withRdFeedback(resource = R.string.rd_token_empty, error = true) }
-            return
-        }
-        _state.update { it.withRdFeedback().copy(rdSaving = true) }
-        viewModelScope.launch {
-            try {
-                repository.validateAndSaveRealDebridToken(token).fold(
-                    onSuccess = { account ->
-                        _state.update {
-                            it.withRdFeedback(resource = R.string.rd_connected, argument = account.label)
-                                .copy(rdTokenField = "", rdShowToken = false)
-                        }
-                        refresh()
-                        _accountChanged.value = true
-                    },
-                    onFailure = { error ->
-                        if (error is CancellationException) throw error
-                        showRdFailure(error)
-                    },
-                )
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                showRdFailure(e)
-            } finally {
-                _state.update { it.copy(rdSaving = false) }
-            }
-        }
-    }
-
-    fun signOutRealDebrid() {
-        if (backupBlocksEdits() || _state.value.rdSaving) return
-        refreshJob?.cancel()
-        _state.update { it.withRdFeedback().copy(rdSaving = true) }
-        viewModelScope.launch {
-            try {
-                withContext(accountDispatcher) { repository.signOutRealDebrid() }
-                _state.update {
-                    it.withRdFeedback(resource = R.string.rd_signed_out).copy(
-                        rdHasKey = false, rdAccountLabel = null, rdTokenField = "", rdShowToken = false,
-                    )
-                }
-                refresh()
-                _accountChanged.value = true
-            } catch (e: CancellationException) {
-                throw e
-            } catch (_: Exception) {
-                _state.update { it.withRdFeedback(resource = R.string.rd_sign_out_failed, error = true) }
-            } finally {
-                _state.update { it.copy(rdSaving = false) }
-            }
-        }
+        _state.update { it.copy(realDebrid = it.realDebrid.copy(showKey = !it.realDebrid.showKey)) }
     }
 
     fun setAdKeyField(text: String) {
         _state.update {
-            it.copy(adKeyField = text, message = null, messageResource = null, messageArgument = null)
+            it.copy(
+                allDebrid = it.allDebrid.copy(keyField = text),
+                message = null, messageResource = null, messageArgument = null,
+            )
         }
     }
 
     fun toggleShowAdKey() {
-        _state.update { it.copy(adShowKey = !it.adShowKey) }
-    }
-
-    fun testAndSaveAllDebrid() {
-        if (backupBlocksEdits() || _state.value.adSaving) return
-        val key = _state.value.adKeyField.trim()
-        if (key.isEmpty()) {
-            _state.update { it.withAdFeedback(resource = R.string.ad_key_empty, error = true) }
-            return
-        }
-        _state.update { it.withAdFeedback().copy(adSaving = true) }
-        viewModelScope.launch {
-            try {
-                repository.validateAndSaveAllDebridKey(key).fold(
-                    onSuccess = { account ->
-                        _state.update {
-                            it.withAdFeedback(resource = R.string.ad_connected, argument = account.label)
-                                .copy(adKeyField = "", adShowKey = false)
-                        }
-                        refresh()
-                        _accountChanged.value = true
-                    },
-                    onFailure = { error ->
-                        if (error is CancellationException) throw error
-                        showAdFailure(error)
-                    },
-                )
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                showAdFailure(e)
-            } finally {
-                _state.update { it.copy(adSaving = false) }
-            }
-        }
-    }
-
-    fun signOutAllDebrid() {
-        if (backupBlocksEdits() || _state.value.adSaving) return
-        refreshJob?.cancel()
-        _state.update { it.withAdFeedback().copy(adSaving = true) }
-        viewModelScope.launch {
-            try {
-                withContext(accountDispatcher) { repository.signOutAllDebrid() }
-                _state.update {
-                    it.withAdFeedback(resource = R.string.ad_signed_out).copy(
-                        adHasKey = false, adAccountLabel = null, adKeyField = "", adShowKey = false,
-                    )
-                }
-                refresh()
-                _accountChanged.value = true
-            } catch (e: CancellationException) {
-                throw e
-            } catch (_: Exception) {
-                _state.update { it.withAdFeedback(resource = R.string.ad_sign_out_failed, error = true) }
-            } finally {
-                _state.update { it.copy(adSaving = false) }
-            }
-        }
+        _state.update { it.copy(allDebrid = it.allDebrid.copy(showKey = !it.allDebrid.showKey)) }
     }
 
     fun setPmKeyField(text: String) {
         _state.update {
-            it.copy(pmKeyField = text, message = null, messageResource = null, messageArgument = null)
+            it.copy(
+                premiumize = it.premiumize.copy(keyField = text),
+                message = null, messageResource = null, messageArgument = null,
+            )
         }
     }
 
     fun toggleShowPmKey() {
-        _state.update { it.copy(pmShowKey = !it.pmShowKey) }
-    }
-
-    fun testAndSavePremiumize() {
-        if (backupBlocksEdits() || _state.value.pmSaving) return
-        val key = _state.value.pmKeyField.trim()
-        if (key.isEmpty()) {
-            _state.update { it.withPmFeedback(resource = R.string.pm_key_empty, error = true) }
-            return
-        }
-        _state.update { it.withPmFeedback().copy(pmSaving = true) }
-        viewModelScope.launch {
-            try {
-                repository.validateAndSavePremiumizeKey(key).fold(
-                    onSuccess = { account ->
-                        _state.update {
-                            it.withPmFeedback(resource = R.string.pm_connected, argument = account.label)
-                                .copy(pmKeyField = "", pmShowKey = false)
-                        }
-                        refresh()
-                        _accountChanged.value = true
-                    },
-                    onFailure = { error ->
-                        if (error is CancellationException) throw error
-                        showPmFailure(error)
-                    },
-                )
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                showPmFailure(e)
-            } finally {
-                _state.update { it.copy(pmSaving = false) }
-            }
-        }
-    }
-
-    fun signOutPremiumize() {
-        if (backupBlocksEdits() || _state.value.pmSaving) return
-        refreshJob?.cancel()
-        _state.update { it.withPmFeedback().copy(pmSaving = true) }
-        viewModelScope.launch {
-            try {
-                withContext(accountDispatcher) { repository.signOutPremiumize() }
-                _state.update {
-                    it.withPmFeedback(resource = R.string.pm_signed_out).copy(
-                        pmHasKey = false, pmAccountLabel = null, pmKeyField = "", pmShowKey = false,
-                    )
-                }
-                refresh()
-                _accountChanged.value = true
-            } catch (e: CancellationException) {
-                throw e
-            } catch (_: Exception) {
-                _state.update { it.withPmFeedback(resource = R.string.pm_sign_out_failed, error = true) }
-            } finally {
-                _state.update { it.copy(pmSaving = false) }
-            }
-        }
+        _state.update { it.copy(premiumize = it.premiumize.copy(showKey = !it.premiumize.showKey)) }
     }
 
     fun setOcKeyField(text: String) {
         _state.update {
-            it.copy(ocKeyField = text, message = null, messageResource = null, messageArgument = null)
+            it.copy(
+                offcloud = it.offcloud.copy(keyField = text),
+                message = null, messageResource = null, messageArgument = null,
+            )
         }
     }
 
     fun toggleShowOcKey() {
-        _state.update { it.copy(ocShowKey = !it.ocShowKey) }
-    }
-
-    fun testAndSaveOffcloud() {
-        if (backupBlocksEdits() || _state.value.ocSaving) return
-        val key = _state.value.ocKeyField.trim()
-        if (key.isEmpty()) {
-            _state.update { it.withOcFeedback(resource = R.string.oc_key_empty, error = true) }
-            return
-        }
-        _state.update { it.withOcFeedback().copy(ocSaving = true) }
-        viewModelScope.launch {
-            try {
-                repository.validateAndSaveOffcloudKey(key).fold(
-                    onSuccess = { account ->
-                        _state.update {
-                            it.withOcFeedback(resource = R.string.oc_connected, argument = account.label)
-                                .copy(ocKeyField = "", ocShowKey = false)
-                        }
-                        refresh()
-                        _accountChanged.value = true
-                    },
-                    onFailure = { error ->
-                        if (error is CancellationException) throw error
-                        showOcFailure(error)
-                    },
-                )
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                showOcFailure(e)
-            } finally {
-                _state.update { it.copy(ocSaving = false) }
-            }
-        }
-    }
-
-    fun signOutOffcloud() {
-        if (backupBlocksEdits() || _state.value.ocSaving) return
-        refreshJob?.cancel()
-        _state.update { it.withOcFeedback().copy(ocSaving = true) }
-        viewModelScope.launch {
-            try {
-                withContext(accountDispatcher) { repository.signOutOffcloud() }
-                _state.update {
-                    it.withOcFeedback(resource = R.string.oc_signed_out).copy(
-                        ocHasKey = false, ocAccountLabel = null, ocKeyField = "", ocShowKey = false,
-                    )
-                }
-                refresh()
-                _accountChanged.value = true
-            } catch (e: CancellationException) {
-                throw e
-            } catch (_: Exception) {
-                _state.update { it.withOcFeedback(resource = R.string.oc_sign_out_failed, error = true) }
-            } finally {
-                _state.update { it.copy(ocSaving = false) }
-            }
-        }
+        _state.update { it.copy(offcloud = it.offcloud.copy(showKey = !it.offcloud.showKey)) }
     }
 
     fun setDlKeyField(text: String) {
         _state.update {
-            it.copy(
-                dlKeyField = text, message = null, messageResource = null, messageArgument = null,
-                rdFeedback = false, adFeedback = false, pmFeedback = false, ocFeedback = false, dlFeedback = false,
+            it.clearFeedback().copy(
+                debridLink = it.debridLink.copy(keyField = text),
+                message = null, messageResource = null, messageArgument = null,
             )
         }
     }
 
     fun toggleShowDlKey() {
-        _state.update { it.copy(dlShowKey = !it.dlShowKey) }
+        _state.update { it.copy(debridLink = it.debridLink.copy(showKey = !it.debridLink.showKey)) }
     }
 
-    fun testAndSaveDebridLink() {
-        if (backupBlocksEdits() || _state.value.dlSaving) return
-        val key = _state.value.dlKeyField.trim()
-        if (key.isEmpty()) {
-            _state.update { it.withDlFeedback(resource = R.string.dl_key_empty, error = true) }
+    fun testAndSave(service: DebridService) {
+        val descriptor = providerSectionDescriptors.getValue(service)
+        if (backupBlocksEdits()) return
+        val state = _state.value
+        val plain = descriptor.plainFeedback
+        if (!plain && descriptor.saving(state)) return
+        val credential = descriptor.field(state).trim()
+        if (credential.isEmpty()) {
+            _state.update {
+                descriptor.feedback(it, text = if (plain) "Paste your TorBox API key first" else null,
+                    resource = descriptor.emptyCredential, error = true)
+            }
             return
         }
-        _state.update { it.withDlFeedback().copy(dlSaving = true) }
+        if (descriptor.saving(state)) return
+        _state.update {
+            descriptor.setSaving(descriptor.feedback(it, error = plain && it.messageIsError), true)
+        }
         viewModelScope.launch {
             try {
-                repository.validateAndSaveDebridLinkKey(key).fold(
+                repository.validateAndSave(service, credential, descriptor.factory, descriptor.accountLabel).fold(
                     onSuccess = { account ->
                         _state.update {
-                            it.withDlFeedback(resource = R.string.dl_connected, argument = account.label)
-                                .copy(dlKeyField = "", dlShowKey = false)
+                            descriptor.feedback(
+                                descriptor.clearField(it),
+                                text = if (plain) "TorBox connected — ${account.label}" else null,
+                                resource = descriptor.connected,
+                                argument = if (plain) null else account.label,
+                            )
                         }
                         refresh()
                         _accountChanged.value = true
                     },
                     onFailure = { error ->
-                        if (error is CancellationException) throw error
-                        showDlFailure(error)
+                        if (!plain && error is CancellationException) throw error
+                        showSaveFailure(descriptor, error)
                     },
                 )
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                showDlFailure(e)
+                showSaveFailure(descriptor, e, thrown = true)
             } finally {
-                _state.update { it.copy(dlSaving = false) }
+                _state.update { descriptor.setSaving(it, false) }
             }
         }
     }
 
-    fun signOutDebridLink() {
-        if (backupBlocksEdits() || _state.value.dlSaving) return
+    fun signOut(service: DebridService) {
+        val descriptor = providerSectionDescriptors.getValue(service)
+        if (backupBlocksEdits() || descriptor.saving(_state.value)) return
         refreshJob?.cancel()
-        _state.update { it.withDlFeedback().copy(dlSaving = true) }
+        val plain = descriptor.plainFeedback
+        _state.update {
+            descriptor.setSaving(if (plain) it else descriptor.feedback(it), true)
+        }
         viewModelScope.launch {
             try {
-                withContext(accountDispatcher) { repository.signOutDebridLink() }
+                withContext(accountDispatcher) { repository.signOut(service) }
                 _state.update {
-                    it.withDlFeedback(resource = R.string.dl_signed_out).copy(
-                        dlHasKey = false, dlAccountLabel = null, dlKeyField = "", dlShowKey = false,
+                    descriptor.feedback(
+                        descriptor.clearAccount(descriptor.clearField(it)),
+                        text = if (plain) "TorBox signed out" else null,
+                        resource = descriptor.signedOut,
                     )
                 }
                 refresh()
@@ -966,9 +835,12 @@ class SettingsViewModel(
             } catch (e: CancellationException) {
                 throw e
             } catch (_: Exception) {
-                _state.update { it.withDlFeedback(resource = R.string.dl_sign_out_failed, error = true) }
+                _state.update {
+                    descriptor.feedback(it, text = if (plain) "Couldn't sign out of TorBox" else null,
+                        resource = descriptor.signOutFailed, error = true)
+                }
             } finally {
-                _state.update { it.copy(dlSaving = false) }
+                _state.update { descriptor.setSaving(it, false) }
             }
         }
     }
@@ -988,107 +860,24 @@ class SettingsViewModel(
                 throw e
             } catch (_: Exception) {
                 _state.update {
-                    it.copy(message = accountReadError, messageIsError = true,
-                        rdFeedback = false, adFeedback = false, pmFeedback = false, ocFeedback = false, dlFeedback = false, messageResource = null, messageArgument = null)
+                    it.clearFeedback().copy(message = accountReadError, messageIsError = true,
+                        messageResource = null, messageArgument = null)
                 }
             }
         }
     }
 
-    private fun showRdFailure(error: Throwable) {
-        val detail = (error as? DebridError)?.message
+    private fun showSaveFailure(descriptor: ProviderSectionDescriptor, error: Throwable, thrown: Boolean = false) {
+        val plain = descriptor.plainFeedback
+        val detail = when {
+            plain && thrown -> "Couldn't check that key"
+            else -> (error as? DebridError)?.message ?: if (plain) "Key didn't work" else null
+        }
         _state.update {
-            it.withRdFeedback(
-                text = detail,
-                resource = R.string.rd_token_failed.takeIf { detail == null },
-                error = true,
-            )
+            descriptor.feedback(it, text = detail, resource = descriptor.saveFailed.takeIf { detail == null },
+                error = true)
         }
     }
-
-    private fun SettingsUiState.withRdFeedback(
-        text: String? = null,
-        resource: Int? = null,
-        argument: String? = null,
-        error: Boolean = false,
-    ) = copy(message = text, messageIsError = error, rdFeedback = true, adFeedback = false, pmFeedback = false, ocFeedback = false, dlFeedback = false,
-        messageResource = resource, messageArgument = argument)
-
-    private fun showAdFailure(error: Throwable) {
-        val detail = (error as? DebridError)?.message
-        _state.update {
-            it.withAdFeedback(
-                text = detail,
-                resource = R.string.ad_key_failed.takeIf { detail == null },
-                error = true,
-            )
-        }
-    }
-
-    private fun SettingsUiState.withAdFeedback(
-        text: String? = null,
-        resource: Int? = null,
-        argument: String? = null,
-        error: Boolean = false,
-    ) = copy(message = text, messageIsError = error, rdFeedback = false, adFeedback = true, pmFeedback = false, ocFeedback = false, dlFeedback = false,
-        messageResource = resource, messageArgument = argument)
-
-    private fun showPmFailure(error: Throwable) {
-        val detail = (error as? DebridError)?.message
-        _state.update {
-            it.withPmFeedback(
-                text = detail,
-                resource = R.string.pm_key_failed.takeIf { detail == null },
-                error = true,
-            )
-        }
-    }
-
-    private fun SettingsUiState.withPmFeedback(
-        text: String? = null,
-        resource: Int? = null,
-        argument: String? = null,
-        error: Boolean = false,
-    ) = copy(message = text, messageIsError = error, rdFeedback = false, adFeedback = false, pmFeedback = true, ocFeedback = false, dlFeedback = false,
-        messageResource = resource, messageArgument = argument)
-
-    private fun showOcFailure(error: Throwable) {
-        val detail = (error as? DebridError)?.message
-        _state.update {
-            it.withOcFeedback(
-                text = detail,
-                resource = R.string.oc_key_failed.takeIf { detail == null },
-                error = true,
-            )
-        }
-    }
-
-    private fun SettingsUiState.withOcFeedback(
-        text: String? = null,
-        resource: Int? = null,
-        argument: String? = null,
-        error: Boolean = false,
-    ) = copy(message = text, messageIsError = error, rdFeedback = false, adFeedback = false, pmFeedback = false, ocFeedback = true, dlFeedback = false,
-        messageResource = resource, messageArgument = argument)
-
-    private fun showDlFailure(error: Throwable) {
-        val detail = (error as? DebridError)?.message
-        _state.update {
-            it.withDlFeedback(
-                text = detail,
-                resource = R.string.dl_key_failed.takeIf { detail == null },
-                error = true,
-            )
-        }
-    }
-
-    private fun SettingsUiState.withDlFeedback(
-        text: String? = null,
-        resource: Int? = null,
-        argument: String? = null,
-        error: Boolean = false,
-    ) = copy(message = text, messageIsError = error, rdFeedback = false, adFeedback = false, pmFeedback = false, ocFeedback = false, dlFeedback = true,
-        messageResource = resource, messageArgument = argument)
 
     private fun backupBlocksEdits(): Boolean =
         _state.value.backupBusy || _state.value.restoreNeedsPassword
@@ -1097,6 +886,235 @@ class SettingsViewModel(
         _accountChanged.value = false
     }
 }
+
+internal class ProviderSectionDescriptor(
+    val service: DebridService,
+    val factory: (String, HttpTransport) -> DebridProvider,
+    val accountLabel: (AccountInfo?) -> String,
+    val title: Int,
+    val credentialSaved: Int,
+    val savedCredential: Int,
+    val replaceCredential: Int,
+    val credentialLabel: Int,
+    val checkingCredential: Int,
+    val helpLines: List<Int>,
+    val hasKey: (SettingsUiState) -> Boolean,
+    val savedLabel: (SettingsUiState) -> String?,
+    val field: (SettingsUiState) -> String,
+    val showCredential: (SettingsUiState) -> Boolean,
+    val saving: (SettingsUiState) -> Boolean,
+    val showFeedback: (SettingsUiState) -> Boolean,
+    val setField: (SettingsViewModel, String) -> Unit,
+    val toggleShow: (SettingsViewModel) -> Unit,
+    val setSaving: (SettingsUiState, Boolean) -> SettingsUiState,
+    val clearField: (SettingsUiState) -> SettingsUiState,
+    val clearAccount: (SettingsUiState) -> SettingsUiState,
+    val emptyCredential: Int? = null,
+    val connected: Int? = null,
+    val saveFailed: Int? = null,
+    val signedOut: Int? = null,
+    val signOutFailed: Int? = null,
+    val maskedCredential: (SettingsUiState) -> String = { SAVED_CREDENTIAL_MASK },
+    val connectionHeading: Int? = null,
+    val buttonPadding: Dp = TroveSpace.medium,
+    val progressStroke: Dp? = null,
+) {
+    val plainFeedback: Boolean get() = service == DebridService.TORBOX
+
+    fun feedback(
+        state: SettingsUiState,
+        text: String? = null,
+        resource: Int? = null,
+        argument: String? = null,
+        error: Boolean = false,
+    ): SettingsUiState = state.copy(
+        message = text,
+        messageResource = resource,
+        messageArgument = argument,
+        messageIsError = error,
+        // Exactly one section claims the message. TorBox has no
+        // record flag of its own: it shows the message when no other
+        // section claims it, so all five stay false for TorBox.
+        realDebrid = state.realDebrid.copy(feedback = service == DebridService.REAL_DEBRID),
+        allDebrid = state.allDebrid.copy(feedback = service == DebridService.ALLDEBRID),
+        premiumize = state.premiumize.copy(feedback = service == DebridService.PREMIUMIZE),
+        offcloud = state.offcloud.copy(feedback = service == DebridService.OFFCLOUD),
+        debridLink = state.debridLink.copy(feedback = service == DebridService.DEBRID_LINK),
+    )
+}
+
+internal val providerSectionDescriptors = listOf(
+    ProviderSectionDescriptor(
+        service = DebridService.TORBOX,
+        factory = { credential, transport -> TorBoxProvider(credential, transport) },
+        accountLabel = { "TorBox (${it?.detail ?: "Essential"})" },
+        title = R.string.torbox,
+        credentialSaved = R.string.key_saved,
+        savedCredential = R.string.saved_key,
+        replaceCredential = R.string.replace_key,
+        credentialLabel = R.string.api_key,
+        checkingCredential = R.string.checking_key,
+        helpLines = listOf(R.string.key_help),
+        hasKey = { it.torbox.hasKey },
+        savedLabel = { it.torbox.accountLabel },
+        field = { it.torbox.keyField },
+        showCredential = { it.torbox.showKey },
+        saving = { it.torbox.saving },
+        showFeedback = {
+            !it.realDebrid.feedback && !it.allDebrid.feedback && !it.premiumize.feedback &&
+                !it.offcloud.feedback && !it.debridLink.feedback
+        },
+        setField = SettingsViewModel::setKeyField,
+        toggleShow = SettingsViewModel::toggleShowKey,
+        setSaving = { state, saving -> state.copy(torbox = state.torbox.copy(saving = saving)) },
+        clearField = { it.copy(torbox = it.torbox.copy(keyField = "", showKey = false)) },
+        clearAccount = { it.copy(torbox = it.torbox.copy(hasKey = false, accountLabel = null, maskedKey = "")) },
+        maskedCredential = { it.torbox.maskedKey },
+        connectionHeading = R.string.connection,
+        buttonPadding = 18.dp,
+        progressStroke = 2.dp,
+    ),
+    ProviderSectionDescriptor(
+        service = DebridService.REAL_DEBRID,
+        factory = { credential, transport -> RealDebridProvider(credential, transport) },
+        accountLabel = { "Real-Debrid (${it?.detail})" },
+        title = R.string.real_debrid,
+        credentialSaved = R.string.rd_token_saved,
+        savedCredential = R.string.rd_saved_token,
+        replaceCredential = R.string.rd_replace_token,
+        credentialLabel = R.string.real_debrid_api_token,
+        checkingCredential = R.string.rd_checking_token,
+        helpLines = listOf(R.string.rd_token_help, R.string.rd_token_note),
+        hasKey = { it.realDebrid.hasKey },
+        savedLabel = { it.realDebrid.accountLabel },
+        field = { it.realDebrid.keyField },
+        showCredential = { it.realDebrid.showKey },
+        saving = { it.realDebrid.saving },
+        showFeedback = { it.realDebrid.feedback },
+        setField = SettingsViewModel::setRdTokenField,
+        toggleShow = SettingsViewModel::toggleShowRdToken,
+        setSaving = { state, saving -> state.copy(realDebrid = state.realDebrid.copy(saving = saving)) },
+        clearField = { it.copy(realDebrid = it.realDebrid.copy(keyField = "", showKey = false)) },
+        clearAccount = { it.copy(realDebrid = it.realDebrid.copy(hasKey = false, accountLabel = null)) },
+        emptyCredential = R.string.rd_token_empty,
+        connected = R.string.rd_connected,
+        saveFailed = R.string.rd_token_failed,
+        signedOut = R.string.rd_signed_out,
+        signOutFailed = R.string.rd_sign_out_failed,
+    ),
+    ProviderSectionDescriptor(
+        service = DebridService.ALLDEBRID,
+        factory = { credential, transport -> AllDebridProvider(credential, transport) },
+        accountLabel = { "AllDebrid (${it?.detail})" },
+        title = R.string.all_debrid,
+        credentialSaved = R.string.ad_key_saved,
+        savedCredential = R.string.ad_saved_key,
+        replaceCredential = R.string.ad_replace_key,
+        credentialLabel = R.string.all_debrid_api_key,
+        checkingCredential = R.string.ad_checking_key,
+        helpLines = listOf(R.string.ad_key_help, R.string.ad_key_note),
+        hasKey = { it.allDebrid.hasKey },
+        savedLabel = { it.allDebrid.accountLabel },
+        field = { it.allDebrid.keyField },
+        showCredential = { it.allDebrid.showKey },
+        saving = { it.allDebrid.saving },
+        showFeedback = { it.allDebrid.feedback },
+        setField = SettingsViewModel::setAdKeyField,
+        toggleShow = SettingsViewModel::toggleShowAdKey,
+        setSaving = { state, saving -> state.copy(allDebrid = state.allDebrid.copy(saving = saving)) },
+        clearField = { it.copy(allDebrid = it.allDebrid.copy(keyField = "", showKey = false)) },
+        clearAccount = { it.copy(allDebrid = it.allDebrid.copy(hasKey = false, accountLabel = null)) },
+        emptyCredential = R.string.ad_key_empty,
+        connected = R.string.ad_connected,
+        saveFailed = R.string.ad_key_failed,
+        signedOut = R.string.ad_signed_out,
+        signOutFailed = R.string.ad_sign_out_failed,
+    ),
+    ProviderSectionDescriptor(
+        service = DebridService.PREMIUMIZE,
+        factory = { credential, transport -> PremiumizeProvider(credential, transport) },
+        accountLabel = { "Premiumize (${it?.detail})" },
+        title = R.string.premiumize,
+        credentialSaved = R.string.pm_key_saved,
+        savedCredential = R.string.pm_saved_key,
+        replaceCredential = R.string.pm_replace_key,
+        credentialLabel = R.string.premiumize_api_key,
+        checkingCredential = R.string.pm_checking_key,
+        helpLines = listOf(R.string.pm_key_help),
+        hasKey = { it.premiumize.hasKey },
+        savedLabel = { it.premiumize.accountLabel },
+        field = { it.premiumize.keyField },
+        showCredential = { it.premiumize.showKey },
+        saving = { it.premiumize.saving },
+        showFeedback = { it.premiumize.feedback },
+        setField = SettingsViewModel::setPmKeyField,
+        toggleShow = SettingsViewModel::toggleShowPmKey,
+        setSaving = { state, saving -> state.copy(premiumize = state.premiumize.copy(saving = saving)) },
+        clearField = { it.copy(premiumize = it.premiumize.copy(keyField = "", showKey = false)) },
+        clearAccount = { it.copy(premiumize = it.premiumize.copy(hasKey = false, accountLabel = null)) },
+        emptyCredential = R.string.pm_key_empty,
+        connected = R.string.pm_connected,
+        saveFailed = R.string.pm_key_failed,
+        signedOut = R.string.pm_signed_out,
+        signOutFailed = R.string.pm_sign_out_failed,
+    ),
+    ProviderSectionDescriptor(
+        service = DebridService.OFFCLOUD,
+        factory = { credential, transport -> OffcloudProvider(credential, transport) },
+        accountLabel = { "Offcloud" },
+        title = R.string.offcloud,
+        credentialSaved = R.string.oc_key_saved,
+        savedCredential = R.string.oc_saved_key,
+        replaceCredential = R.string.oc_replace_key,
+        credentialLabel = R.string.offcloud_api_key,
+        checkingCredential = R.string.oc_checking_key,
+        helpLines = listOf(R.string.oc_key_help),
+        hasKey = { it.offcloud.hasKey },
+        savedLabel = { it.offcloud.accountLabel },
+        field = { it.offcloud.keyField },
+        showCredential = { it.offcloud.showKey },
+        saving = { it.offcloud.saving },
+        showFeedback = { it.offcloud.feedback },
+        setField = SettingsViewModel::setOcKeyField,
+        toggleShow = SettingsViewModel::toggleShowOcKey,
+        setSaving = { state, saving -> state.copy(offcloud = state.offcloud.copy(saving = saving)) },
+        clearField = { it.copy(offcloud = it.offcloud.copy(keyField = "", showKey = false)) },
+        clearAccount = { it.copy(offcloud = it.offcloud.copy(hasKey = false, accountLabel = null)) },
+        emptyCredential = R.string.oc_key_empty,
+        connected = R.string.oc_connected,
+        saveFailed = R.string.oc_key_failed,
+        signedOut = R.string.oc_signed_out,
+        signOutFailed = R.string.oc_sign_out_failed,
+    ),
+    ProviderSectionDescriptor(
+        service = DebridService.DEBRID_LINK,
+        factory = { credential, transport -> DebridLinkProvider(credential, transport) },
+        accountLabel = { "Debrid-Link (${it?.detail})" },
+        title = R.string.debrid_link,
+        credentialSaved = R.string.dl_key_saved,
+        savedCredential = R.string.dl_saved_key,
+        replaceCredential = R.string.dl_replace_key,
+        credentialLabel = R.string.debridlink_api_key,
+        checkingCredential = R.string.dl_checking_key,
+        helpLines = listOf(R.string.dl_key_help),
+        hasKey = { it.debridLink.hasKey },
+        savedLabel = { it.debridLink.accountLabel },
+        field = { it.debridLink.keyField },
+        showCredential = { it.debridLink.showKey },
+        saving = { it.debridLink.saving },
+        showFeedback = { it.debridLink.feedback },
+        setField = SettingsViewModel::setDlKeyField,
+        toggleShow = SettingsViewModel::toggleShowDlKey,
+        setSaving = { state, saving -> state.copy(debridLink = state.debridLink.copy(saving = saving)) },
+        clearField = { it.copy(debridLink = it.debridLink.copy(keyField = "", showKey = false)) },
+        clearAccount = { it.copy(debridLink = it.debridLink.copy(hasKey = false, accountLabel = null)) },
+        emptyCredential = R.string.dl_key_empty,
+        connected = R.string.dl_connected,
+        saveFailed = R.string.dl_key_failed,
+        signedOut = R.string.dl_signed_out,
+        signOutFailed = R.string.dl_sign_out_failed,
+    ),
+).associateBy(ProviderSectionDescriptor::service)
 
 /** Providers after TorBox, in the build order from the research. */
 val COMING_SOON_SERVICES: List<Pair<DebridService, String>> = emptyList()

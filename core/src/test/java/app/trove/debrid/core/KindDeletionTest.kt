@@ -21,7 +21,12 @@ class KindDeletionTest {
             val provider = TorBoxProvider("test-key", transport)
             val download = DebridDownload("11", DebridService.TORBOX, "File", 100, DownloadStatus.READY, 1f, kind = kind)
             assertTrue(provider.delete(download).isSuccess)
-            val request = requests.single()
+            val adapter: DebridProvider = provider
+            assertTrue(adapter.delete(DownloadRef(download.kind, download.id)).isSuccess)
+            assertEquals(2, requests.size)
+            assertEquals(requests.first().url, requests.last().url)
+            assertEquals(requests.first().jsonBody, requests.last().jsonBody)
+            val request = requests.first()
             assertEquals("${TorBoxProvider.BASE}/$path", request.url)
             assertEquals("""{"operation":"delete","$field":11}""", request.jsonBody)
         }

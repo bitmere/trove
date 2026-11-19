@@ -8,7 +8,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
 
-class FakeRepositoryBatchDeleteTest {
+class FakeRepositoryBatchDeleteContractTest {
     @Test
     fun `batch delegates to single delete once per selected item`() = runTest {
         val first = sampleDownload(id = "1")

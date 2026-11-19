@@ -1,5 +1,7 @@
 package app.trove.debrid.data
 
+import app.trove.debrid.core.AccountInfo
+import app.trove.debrid.core.HttpTransport
 import app.trove.debrid.core.PlayerComponent
 import app.trove.debrid.core.CachedInfo
 import app.trove.debrid.core.ClassifiedShare
@@ -41,6 +43,22 @@ data class SavedConnection(
 /** The outcome for one download, retaining its kind because IDs can repeat across kinds. */
 data class BatchDeleteItemResult(val download: DebridDownload, val result: Result<Unit>)
 
+/** A user's picked Cinemeta title for one download, keyed by
+ *  (kind, id) because provider IDs repeat across kinds. An IMDb id is
+ *  not a secret, so this lives in plain preferences, separately from
+ *  both the metadata cache and the encrypted credential store. */
+data class MetadataOverride(val imdbId: String, val type: String, val title: String)
+
+/** One viewport page of one kind. `endReached` is true when the
+ *  provider has no more rows for the kind after this page, and
+ *  `fetchedCount` is the raw row count before release-word filtering,
+ *  so the next offset advances past excluded rows too. */
+data class DownloadPage(
+    val rows: List<DebridDownload>,
+    val endReached: Boolean,
+    val fetchedCount: Int = rows.size,
+)
+
 /** The seam the ViewModels program against, so tests can use a fake
  *  without an Android Context. The production implementation is
  *  [DebridRepository]. */
@@ -64,6 +82,35 @@ interface TroveRepository {
     suspend fun restoreBackupSignIn(signIn: BackupSignIn): Unit = error("Backup sign-in unavailable")
     suspend fun claimClipboardOffer(text: String?): Boolean = false
     suspend fun resolveMetadata(query: app.trove.debrid.core.MediaQuery): app.trove.debrid.core.MediaMetadata? = null
+    /** Title matches for the picker when the automatic match fails.
+     *  Listing candidates never resolves one. */
+    suspend fun resolveMetadataCandidates(
+        query: app.trove.debrid.core.MediaQuery,
+    ): List<app.trove.debrid.core.MediaCandidate> = emptyList()
+    /** Detail for a user-picked candidate id. */
+    suspend fun resolveMetadataById(imdbId: String, type: String): app.trove.debrid.core.MediaMetadata? = null
+    /** The stored pick for one download, or null when the download
+     *  resolves normally. Keyed by (kind, id). */
+    suspend fun loadMetadataOverride(ref: app.trove.debrid.core.DownloadRef): MetadataOverride? = null
+    suspend fun saveMetadataOverride(ref: app.trove.debrid.core.DownloadRef, pick: MetadataOverride) = Unit
+    /** Removing the pick restores the parsed title and normal resolution. */
+    suspend fun clearMetadataOverride(ref: app.trove.debrid.core.DownloadRef) = Unit
+    /** Best-effort: clears the durable metadata disk cache when one is wired in. */
+    suspend fun clearCachedMetadata() = Unit
+    /** Whether the user's own TMDB key is stored (encrypted). */
+    fun hasTmdbKey(): Boolean = false
+    /** Masked form of the stored TMDB key, e.g. "••••••••ab12" —
+     *  the only form a key may take outside the credential store. */
+    fun maskedTmdbKey(): String = ""
+    /** Stores the user's own TMDB key, encrypted. Blank keys are rejected. */
+    suspend fun saveTmdbKey(key: String) = Unit
+    /** Removes the stored TMDB key; later lookups skip TMDB silently. */
+    suspend fun clearTmdbKey() = Unit
+    /** Checks a TMDB key against the live API without storing it, so
+     *  a mistyped key is caught at save time instead of silently
+     *  disabling the fallback. */
+    suspend fun validateTmdbKey(key: String): Result<Unit> =
+        Result.failure(UnsupportedOperationException("TMDB key unavailable"))
     fun accounts(): List<DebridAccount>
     fun torboxAccount(): DebridAccount?
     fun hasTorboxKey(): Boolean
@@ -79,21 +126,23 @@ interface TroveRepository {
     fun hasDebridLinkKey(): Boolean = false
     fun activeService(): DebridService? = torboxAccount()?.let { DebridService.TORBOX }
     suspend fun setActiveService(service: DebridService) = Unit
-    suspend fun validateAndSaveRealDebridToken(token: String): Result<DebridAccount> =
-        Result.failure(UnsupportedOperationException("Real-Debrid sign-in unavailable"))
-    fun signOutRealDebrid() = Unit
-    suspend fun validateAndSaveAllDebridKey(key: String): Result<DebridAccount> =
-        Result.failure(UnsupportedOperationException("AllDebrid sign-in unavailable"))
-    fun signOutAllDebrid() = Unit
-    suspend fun validateAndSavePremiumizeKey(key: String): Result<DebridAccount> =
-        Result.failure(UnsupportedOperationException("Premiumize sign-in unavailable"))
-    fun signOutPremiumize() = Unit
-    suspend fun validateAndSaveOffcloudKey(key: String): Result<DebridAccount> =
-        Result.failure(UnsupportedOperationException("Offcloud sign-in unavailable"))
-    fun signOutOffcloud() = Unit
-    suspend fun validateAndSaveDebridLinkKey(key: String): Result<DebridAccount> =
-        Result.failure(UnsupportedOperationException("Debrid-Link sign-in unavailable"))
-    fun signOutDebridLink() = Unit
+    suspend fun validateAndSave(
+        service: DebridService,
+        credential: String,
+        factory: (String, HttpTransport) -> DebridProvider,
+        label: (AccountInfo?) -> String,
+    ): Result<DebridAccount> {
+        val name = when (service) {
+            DebridService.TORBOX -> "TorBox"
+            DebridService.REAL_DEBRID -> "Real-Debrid"
+            DebridService.ALLDEBRID -> "AllDebrid"
+            DebridService.PREMIUMIZE -> "Premiumize"
+            DebridService.OFFCLOUD -> "Offcloud"
+            DebridService.DEBRID_LINK -> "Debrid-Link"
+        }
+        return Result.failure(UnsupportedOperationException("$name sign-in unavailable"))
+    }
+    fun signOut(service: DebridService) = Unit
     fun provider(): DebridProvider?
     fun providerFor(service: DebridService): DebridProvider? =
         provider()?.takeIf { it.service == service }
@@ -109,8 +158,6 @@ interface TroveRepository {
     /** Production overrides this to dispatch disk and Keystore access to IO. */
     suspend fun loadConnection(): SavedConnection =
         SavedConnection(torboxAccount(), hasTorboxKey(), provider())
-    suspend fun validateAndSaveTorboxKey(key: String): Result<DebridAccount>
-    fun signOutTorbox()
     /** All downloads of every kind this provider holds, newest first.
      *  When [bypassCache] is true the provider is asked to bypass its
      *  server-side list cache; only user-initiated refreshes pass true.
@@ -120,6 +167,41 @@ interface TroveRepository {
      *  against the delegate and bypass a decorator's override — the
      *  full-suite gate caught exactly that in StartupRegressionTest. */
     suspend fun listDownloads(provider: DebridProvider, bypassCache: Boolean = false): Result<List<DebridDownload>>
+
+    /** One page of one kind, for per-tab viewport paging (`limit=100`
+     *  per append). The default slices the provider's full list, so
+     *  providers without a per-kind page API keep working unchanged;
+     *  the production repository overrides this for TorBox with a
+     *  single network page. This default calls the abstract
+     *  [listDownloads] (not an overload of itself), so a `by`
+     *  decorator's override still applies. A failure is returned
+     *  as-is, including for Usenet — unlike the full sync, a page
+     *  error is surfaced so the UI can retry just that page. */
+    /** One page of one kind, newest first. TorBox overrides this with
+     *  a single network call per page; other providers use the default
+     *  slice of the full list below.
+     *
+     *  TRAP (same as the listDownloads comment below): this default
+     *  calls the virtual [listDownloads], so a `by`-delegating
+     *  decorator that overrides only [listDownloads] is BYPASSED —
+     *  the call runs against the delegate. A decorator that wants to
+     *  fail or fake the list must override [listDownloadPage] itself,
+     *  as StartupRegressionTest does. */
+    suspend fun listDownloadPage(
+        provider: DebridProvider,
+        kind: DownloadKind,
+        offset: Int,
+        limit: Int,
+        bypassCache: Boolean = false,
+    ): Result<DownloadPage> {
+        require(offset >= 0) { "offset must be >= 0" }
+        require(limit > 0) { "limit must be > 0" }
+        return listDownloads(provider, bypassCache).map { all ->
+            val kindRows = all.filter { it.kind == kind }
+            val page = kindRows.drop(offset).take(limit)
+            DownloadPage(page, offset + page.size >= kindRows.size)
+        }
+    }
 
     suspend fun delete(provider: DebridProvider, id: String): Result<Unit>
     suspend fun delete(provider: DebridProvider, download: DebridDownload): Result<Unit> = delete(provider, download.id)

@@ -61,17 +61,12 @@ fun formatSize(bytes: Long?): String {
 fun baseFileName(name: String): String = name.replace('\\', '/').substringAfterLast('/').ifBlank { "Unnamed file" }
 
 
-/** File detail label; never used as the card header. */
-fun downloadFormat(download: DebridDownload): String {
-    val extensions = download.files.map { baseFileName(it.name).substringAfterLast('.', "") }
-        .filter { it.matches(Regex("[A-Za-z0-9]{1,5}")) }.map { it.uppercase(Locale.ROOT) }.distinct()
-    return extensions.singleOrNull() ?: if (extensions.size > 1) "MIXED" else "FILE"
-}
+private val addedDateFormatter =
+    java.time.format.DateTimeFormatter.ofLocalizedDate(java.time.format.FormatStyle.MEDIUM)
 
 fun addedDate(epochMs: Long?, zone: java.time.ZoneId = java.time.ZoneId.systemDefault(),
     locale: Locale = Locale.getDefault()): String? = epochMs?.let {
-    java.time.format.DateTimeFormatter.ofLocalizedDate(java.time.format.FormatStyle.MEDIUM)
-        .withLocale(locale).withZone(zone).format(java.time.Instant.ofEpochMilli(it))
+    addedDateFormatter.withLocale(locale).withZone(zone).format(java.time.Instant.ofEpochMilli(it))
 }
 
 /** Local identity remains useful while offline or when a lookup is ambiguous. */

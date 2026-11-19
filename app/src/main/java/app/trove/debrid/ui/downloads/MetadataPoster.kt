@@ -30,15 +30,20 @@ import app.trove.debrid.core.HttpRequest
 import app.trove.debrid.core.OkHttpTransport
 import app.trove.debrid.core.publicPosterUrl
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
-/** Small session cache. Decoding is sampled and serialized to protect low-memory phones. */
+/** Small session cache with sampled decoding and one in-flight load per URL. */
 private object PosterLoader {
     private val transport = OkHttpTransport()
     private val mutex = Mutex()
+    private val inFlight = mutableMapOf<String, CompletableDeferred<Bitmap?>>()
     private val bitmaps = object : LruCache<String, Bitmap>(4 * 1024 * 1024) {
         override fun sizeOf(key: String, value: Bitmap) = value.allocationByteCount
     }
@@ -46,7 +51,19 @@ private object PosterLoader {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Long>?) = size > 128
     }
 
+    private val sourceLock = Any()
     private var source: PosterSource<Bitmap>? = null
+
+    private fun posterSource(cacheDirectory: () -> File): PosterSource<Bitmap> = synchronized(sourceLock) {
+        source ?: PosterSource(
+            runCatching { PosterDiskCache(File(cacheDirectory(), "posters")) }
+                .onFailure { if (it is CancellationException) throw it }.getOrNull(),
+            { posterUrl ->
+                transport.executeBytes(HttpRequest("GET", posterUrl), PosterDiskCache.MAX_ENTRY_BYTES)
+            },
+            ::decode,
+        ).also { source = it }
+    }
 
     private fun decode(bytes: ByteArray): Bitmap? {
         val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -61,28 +78,52 @@ private object PosterLoader {
     }
 
     suspend fun load(url: String, cacheDirectory: () -> File): Bitmap? = withContext(Dispatchers.IO) {
-        mutex.withLock {
-            bitmaps.get(url)?.let { return@withLock it }
-            if ((misses[url] ?: 0) > System.currentTimeMillis()) return@withLock null
+        loadOnIo(url, cacheDirectory)
+    }
+
+    private suspend fun loadOnIo(url: String, cacheDirectory: () -> File): Bitmap? {
+        while (true) {
+            var ownsLoad = false
+            val pending = mutex.withLock {
+                bitmaps.get(url)?.let { return it }
+                if ((misses[url] ?: 0) > System.currentTimeMillis()) return null
+                inFlight[url] ?: CompletableDeferred<Bitmap?>().also {
+                    inFlight[url] = it
+                    ownsLoad = true
+                }
+            }
+            if (ownsLoad) return fetchPoster(url, cacheDirectory, pending)
+
             try {
-                val posterSource = source ?: PosterSource(
-                    runCatching { PosterDiskCache(File(cacheDirectory(), "posters")) }.getOrNull(),
-                    { posterUrl ->
-                        transport.executeBytes(HttpRequest("GET", posterUrl), PosterDiskCache.MAX_ENTRY_BYTES)
-                    },
-                    ::decode,
-                ).also { source = it }
-                val bitmap = posterSource.load(url)
-                if (bitmap != null) bitmaps.put(url, bitmap)
-                else misses[url] = System.currentTimeMillis() + 60_000
-                bitmap
-            } catch (e: CancellationException) {
-                throw e
-            } catch (_: Exception) {
-                misses[url] = System.currentTimeMillis() + 60_000
-                null
+                return pending.await()
+            } catch (_: CancellationException) {
+                // A visible card can take over if the original caller scrolled away.
+                currentCoroutineContext().ensureActive()
             }
         }
+    }
+
+    private suspend fun fetchPoster(
+        url: String,
+        cacheDirectory: () -> File,
+        pending: CompletableDeferred<Bitmap?>,
+    ): Bitmap? {
+        val result = runCatching { posterSource(cacheDirectory).load(url) }.recoverCatching {
+            if (it is CancellationException || it !is Exception) throw it
+            null
+        }
+        withContext(NonCancellable) {
+            mutex.withLock {
+                if (result.isSuccess) {
+                    val bitmap = result.getOrNull()
+                    if (bitmap != null) bitmaps.put(url, bitmap)
+                    else misses[url] = System.currentTimeMillis() + 60_000
+                }
+                inFlight.remove(url)
+            }
+            result.fold(pending::complete, pending::completeExceptionally)
+        }
+        return result.getOrThrow()
     }
 }
 

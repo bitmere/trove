@@ -1,27 +1,20 @@
 package app.trove.debrid.core
 
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class TorBoxProviderTest {
 
-    class FakeTransport(
-        private val handler: (HttpRequest) -> HttpResponse,
-    ) : HttpTransport {
-        val requests = mutableListOf<HttpRequest>()
-        override suspend fun execute(request: HttpRequest): HttpResponse {
-            requests += request
-            return handler(request)
-        }
-    }
-
     private fun provider(
         apiKey: String = "test-key-123",
         handler: (HttpRequest) -> HttpResponse,
-    ): Pair<TorBoxProvider, FakeTransport> {
-        val transport = FakeTransport(handler)
+    ): Pair<TorBoxProvider, RecordingTransport> {
+        val transport = RecordingTransport(handler)
         return TorBoxProvider(apiKey, transport) to transport
     }
 
@@ -71,6 +64,183 @@ class TorBoxProviderTest {
         assertEquals(1, list[2].files.size)
         assertTrue(transport.requests.all { it.headers["Authorization"] == "Bearer test-key-123" })
         assertTrue(transport.requests.none { it.url.contains("test-key-123") })
+    }
+
+    @Test
+    fun `torrent error wins when web fails first`() {
+        val webResponded = CompletableDeferred<Unit>()
+        val transport = object : HttpTransport {
+            override suspend fun execute(request: HttpRequest): HttpResponse =
+                when {
+                    request.url.contains("/torrents/mylist") -> {
+                        webResponded.await()
+                        HttpResponse(503, """{"success":false,"error":"torrent_failure"}""")
+                    }
+                    request.url.contains("/webdl/mylist") -> {
+                        webResponded.complete(Unit)
+                        HttpResponse(503, """{"success":false,"error":"web_failure"}""")
+                    }
+                    else -> HttpResponse(200, envelope("[]"))
+                }
+        }
+        val p = TorBoxProvider("test-key-123", transport)
+
+        val result = kotlinx.coroutines.runBlocking { withTimeout(2_000) { p.listDownloads() } }
+
+        assertEquals("torrent_failure", (result.exceptionOrNull() as? DebridError.Provider)?.code)
+    }
+
+    @Test
+    fun `web list failure fails the download list`() {
+        val (p, _) = provider { request ->
+            if (request.url.contains("/webdl/mylist")) {
+                HttpResponse(503, """{"success":false,"error":"web_failure"}""")
+            } else {
+                HttpResponse(200, envelope("[]"))
+            }
+        }
+
+        val result = kotlinx.coroutines.runBlocking { p.listDownloads() }
+
+        assertEquals("web_failure", (result.exceptionOrNull() as? DebridError.Provider)?.code)
+    }
+
+    @Test
+    fun `usenet failure keeps both torrent and web rows in date order`() {
+        val (p, _) = provider { request ->
+            when {
+                request.url.contains("/torrents/mylist") -> HttpResponse(200, envelope(torrentListJson))
+                request.url.contains("/webdl/mylist") -> HttpResponse(
+                    200,
+                    envelope("""[{"id":21,"name":"Web row","created_at":"2026-11-15T09:30:00Z"}]"""),
+                )
+                else -> HttpResponse(403, """{"success":false,"error":"pro"}""")
+            }
+        }
+
+        val rows = kotlinx.coroutines.runBlocking { p.listDownloads() }.getOrThrow()
+
+        assertEquals(listOf("13", "21", "12", "11"), rows.map { it.id })
+        assertEquals(DownloadKind.WEB, rows[1].kind)
+    }
+
+    @Test
+    fun `all three mylist calls overlap`() {
+        val expectedPaths = setOf("/torrents/mylist", "/webdl/mylist", "/usenet/mylist")
+        val arrived = mutableSetOf<String>()
+        val allArrived = CompletableDeferred<Unit>()
+        val transport = object : HttpTransport {
+            override suspend fun execute(request: HttpRequest): HttpResponse {
+                val path = request.url.removePrefix(TorBoxProvider.BASE).substringBefore('?')
+                assertTrue(path in expectedPaths && arrived.add(path))
+                if (arrived == expectedPaths) allArrived.complete(Unit)
+                allArrived.await()
+                return HttpResponse(200, envelope("[]"))
+            }
+        }
+        val p = TorBoxProvider("test-key-123", transport)
+
+        val rows = kotlinx.coroutines.runBlocking { withTimeout(2_000) { p.listDownloads() } }.getOrThrow()
+
+        assertTrue(rows.isEmpty())
+        assertEquals(expectedPaths, arrived)
+    }
+
+    @Test
+    fun `three mylist calls finish within the default bucket burst`() {
+        val (p, transport) = provider { HttpResponse(200, envelope("[]")) }
+
+        // A missing burst permit takes about 200 ms to refill at five permits per second.
+        val rows = kotlinx.coroutines.runBlocking { withTimeout(150) { p.listDownloads() } }.getOrThrow()
+
+        assertTrue(rows.isEmpty())
+        assertEquals(3, transport.requests.size)
+    }
+
+    private fun HttpRequest.queryParameters(): Map<String, String> =
+        java.net.URI(url).rawQuery.orEmpty().split("&").filter { it.isNotEmpty() }.associate {
+            it.substringBefore("=") to it.substringAfter("=")
+        }
+
+    private fun pagedTorrents(vararg pages: List<Int>): Pair<TorBoxProvider, RecordingTransport> {
+        val transport = RecordingTransport { request ->
+            assertTrue(request.url.contains("/mylist"))
+            val rows = if (request.url.contains("/torrents/mylist")) {
+                val offset = request.queryParameters().getValue("offset").toInt()
+                assertEquals(0, offset % 2)
+                pages[offset / 2].joinToString(",", "[", "]") { id ->
+                    """{"id":$id,"name":"Item $id at offset $offset"}"""
+                }
+            } else "[]"
+            HttpResponse(200, envelope(rows))
+        }
+        return TorBoxProvider("test-key-123", transport, listPageSize = 2) to transport
+    }
+
+    @Test
+    fun `listDownloads accumulates three torrent pages in server order`() {
+        val (p, transport) = pagedTorrents(listOf(1, 2), listOf(3, 4), listOf(5))
+        val rows = kotlinx.coroutines.runBlocking { p.listDownloads() }.getOrThrow()
+        assertEquals(listOf("1", "2", "3", "4", "5"), rows.map { it.id })
+        assertTrue(rows.all { it.kind == DownloadKind.TORRENT })
+        val queries = transport.requests.filter { it.url.contains("/torrents/mylist") }
+            .map { it.queryParameters() }
+        assertEquals(listOf("0", "2", "4"), queries.map { it["offset"] })
+        assertTrue(queries.all { it["limit"] == "2" && "bypass_cache" !in it })
+    }
+
+    @Test
+    fun `fresh list stops after a short page and bypasses cache on both pages`() {
+        val (p, transport) = pagedTorrents(listOf(1, 2), listOf(3))
+        val rows = kotlinx.coroutines.runBlocking { p.listDownloadsFresh() }.getOrThrow()
+        assertEquals(listOf("1", "2", "3"), rows.map { it.id })
+        val queries = transport.requests.filter { it.url.contains("/torrents/mylist") }
+            .map { it.queryParameters() }
+        assertEquals(listOf("0", "2"), queries.map { it["offset"] })
+        assertTrue(queries.all { it["bypass_cache"] == "true" })
+    }
+
+    @Test
+    fun `listDownloads keeps the first occurrence and counts duplicates toward page size`() {
+        val (p, _) = pagedTorrents(listOf(1, 2), listOf(2, 3), listOf(4))
+        val rows = kotlinx.coroutines.runBlocking { p.listDownloads() }.getOrThrow()
+        assertEquals(listOf("1", "2", "3", "4"), rows.map { it.id })
+        assertEquals("Item 2 at offset 0", rows.single { it.id == "2" }.name)
+    }
+
+    @Test
+    fun `empty torrent list stops after its first page`() {
+        val (p, transport) = pagedTorrents(emptyList())
+        val rows = kotlinx.coroutines.runBlocking { p.listDownloads() }.getOrThrow()
+        assertTrue(rows.isEmpty())
+        val request = transport.requests.single { it.url.contains("/torrents/mylist") }
+        assertEquals("0", request.queryParameters()["offset"])
+    }
+
+    @Test
+    fun `getDownload makes one ID request per kind attempted`() {
+        val transport = RecordingTransport { request ->
+            val rows = if (request.url.contains("/webdl/mylist")) {
+                """{"id":11,"name":"Web download"}"""
+            } else {
+                """[{"id":1},{"id":2}]"""
+            }
+            HttpResponse(200, envelope(rows))
+        }
+        val p = TorBoxProvider("test-key-123", transport, listPageSize = 2)
+        val row = kotlinx.coroutines.runBlocking { p.getDownload("11") }.getOrThrow()
+        assertEquals("11", row.id)
+        assertEquals(DownloadKind.WEB, row.kind)
+        assertEquals(
+            listOf("/v1/api/torrents/mylist", "/v1/api/webdl/mylist"),
+            transport.requests.map { java.net.URI(it.url).path },
+        )
+        for (request in transport.requests) {
+            val query = request.queryParameters()
+            assertEquals("11", query["id"])
+            assertEquals("true", query["bypass_cache"])
+            assertFalse("offset" in query)
+        }
     }
 
     @Test
@@ -269,13 +439,36 @@ class TorBoxProviderTest {
                 HttpResponse(200, envelope("\"$link\""))
             }
             val download = DebridDownload("11", DebridService.TORBOX, "Movie", 100, DownloadStatus.READY, 1f, kind = kind)
-            val stream = kotlinx.coroutines.runBlocking { p.getStreamUrl(download, "7") }.getOrThrow()
+            val adapter: DebridProvider = p
+            val stream = kotlinx.coroutines.runBlocking {
+                adapter.getStreamUrl(DownloadRef(download.kind, download.id), "7")
+            }.getOrThrow()
             assertEquals(link, stream.url)
             assertFalse(stream.toString().contains(link))
             assertFalse(stream.toString().contains("test-key-123"))
             assertFalse(transport.requests.toString().contains("test-key-123"))
             assertEquals(1, transport.requests.size)
             assertTrue(transport.requests.none { it.url.contains("/stream/") })
+        }
+    }
+
+    @Test
+    fun `reference looks up only the selected kind when IDs overlap`() {
+        for ((kind, namespace) in listOf(
+            DownloadKind.TORRENT to "torrents",
+            DownloadKind.WEB to "webdl",
+            DownloadKind.USENET to "usenet",
+        )) {
+            val (provider, transport) = provider {
+                HttpResponse(200, envelope("""{"id":11,"name":"Movie"}"""))
+            }
+            val adapter: DebridProvider = provider
+            val detail = kotlinx.coroutines.runBlocking {
+                adapter.getDownload(DownloadRef(kind, "11")).getOrThrow()
+            }
+            assertEquals(kind, detail.kind)
+            assertEquals("11", detail.id)
+            assertEquals("${TorBoxProvider.BASE}/$namespace/mylist", transport.requests.single().url.substringBefore('?'))
         }
     }
 
@@ -403,7 +596,7 @@ class TorBoxProviderTest {
 
     @Test
     fun `metaDL stalled and checking_resume_data map to downloading with progress`() {
-        val states = listOf("metaDL", "stalled (no seeds)", "checking_resume_data")
+        val states = listOf("metaDL", "stalled (no seeds)", "checkingResumeData", "checking_resume_data")
         val (p, _) = provider { request ->
             val rows = states.mapIndexed { i, state ->
                 """{"id":$i,"download_state":"$state","progress":0.37,"eta":900,"seeds":3,"peers":5,"download_speed":8000}"""
@@ -411,7 +604,7 @@ class TorBoxProviderTest {
             HttpResponse(200, envelope(if (request.url.contains("/torrents/")) rows else "[]"))
         }
         val list = kotlinx.coroutines.runBlocking { p.listDownloads() }.getOrThrow()
-        assertEquals(3, list.size)
+        assertEquals(states.size, list.size)
         for (row in list) {
             assertEquals(DownloadStatus.DOWNLOADING, row.status)
             assertEquals(0.37f, row.progress, 0.001f)
@@ -420,6 +613,54 @@ class TorBoxProviderTest {
             assertEquals(5, row.peers)
             assertEquals(8_000L, row.downloadSpeedBytesPerSec)
         }
+    }
+
+    @Test
+    fun `readiness uses download booleans and retains uploading fallback`() {
+        val rowsJson = """[
+            {"id":1,"download_state":"completed","download_finished":false,"progress":0.4},
+            {"id":2,"download_state":"completed","download_finished":true,"progress":0.4},
+            {"id":3,"download_state":"downloading","download_present":true,"progress":0.4},
+            {"id":4,"download_state":"downloading","cached":true,"progress":0.4},
+            {"id":5,"download_state":"uploading","progress":0.4}
+        ]"""
+        val (p, _) = provider { request ->
+            HttpResponse(200, envelope(if (request.url.contains("/torrents/mylist")) rowsJson else "[]"))
+        }
+        val rows = kotlinx.coroutines.runBlocking { p.listDownloads() }.getOrThrow().associateBy { it.id }
+        assertEquals(DownloadStatus.UNKNOWN, rows.getValue("1").status)
+        for (id in listOf("2", "3", "4", "5")) {
+            val row = rows.getValue(id)
+            assertEquals(DownloadStatus.READY, row.status)
+            assertEquals(1f, row.progress)
+        }
+    }
+
+    @Test
+    fun `mylist exposes nullable active cached and expiry fields`() {
+        val rowsJson = """[
+            {"id":1,"active":true,"cached":true,"expires_at":"2026-12-01T00:00:00Z"},
+            {"id":2,"download_state":"cached"},
+            {"id":3,"active":false,"cached":false,"expires_at":"invalid"}
+        ]"""
+        val (p, _) = provider { request ->
+            HttpResponse(200, envelope(if (request.url.contains("/torrents/mylist")) rowsJson else "[]"))
+        }
+        val rows = kotlinx.coroutines.runBlocking { p.listDownloads() }.getOrThrow().associateBy { it.id }
+        val present = rows.getValue("1")
+        assertEquals(true, present.active)
+        assertEquals(true, present.cached)
+        assertEquals(java.time.Instant.parse("2026-12-01T00:00:00Z").toEpochMilli(), present.expiresAtEpochMs)
+
+        val absent = rows.getValue("2")
+        assertEquals(null, absent.active)
+        assertEquals(null, absent.cached)
+        assertEquals(null, absent.expiresAtEpochMs)
+
+        val explicitFalse = rows.getValue("3")
+        assertEquals(false, explicitFalse.active)
+        assertEquals(false, explicitFalse.cached)
+        assertEquals(null, explicitFalse.expiresAtEpochMs)
     }
 
     @Test
@@ -454,6 +695,73 @@ class TorBoxProviderTest {
             assertEquals(null, row.seeds)
             assertEquals(null, row.peers)
         }
+    }
+
+    @Test
+    fun `listPage fetches one kind page with offset and limit and touches no other kind`() {
+        val (p, transport) = pagedTorrents(listOf(1, 2), listOf(3, 4), listOf(5))
+        val rows = kotlinx.coroutines.runBlocking { p.listPage(DownloadKind.TORRENT, 2, 2) }.getOrThrow()
+        assertEquals(listOf("3", "4"), rows.map { it.id })
+        assertTrue(rows.all { it.kind == DownloadKind.TORRENT })
+        val requests = transport.requests.filter { it.url.contains("/mylist") }
+        assertEquals(1, requests.size)
+        val query = requests.single().queryParameters()
+        assertEquals("2", query["offset"])
+        assertEquals("2", query["limit"])
+        assertTrue("bypass_cache" !in query)
+    }
+
+    @Test
+    fun `listPage passes bypass cache through for fresh pages`() {
+        val (p, transport) = pagedTorrents(listOf(1, 2), listOf(3))
+        val rows = kotlinx.coroutines.runBlocking {
+            p.listPage(DownloadKind.TORRENT, 0, 2, bypassCache = true)
+        }.getOrThrow()
+        assertEquals(listOf("1", "2"), rows.map { it.id })
+        val query = transport.requests.single { it.url.contains("/torrents/mylist") }.queryParameters()
+        assertEquals("true", query["bypass_cache"])
+    }
+
+    @Test
+    fun `listPage dedupes within a page and keeps the first row`() {
+        val (p, _) = provider { request ->
+            val rows = if (request.url.contains("/torrents/mylist")) {
+                """[{"id":7,"name":"First"},{"id":7,"name":"Second"},{"id":8,"name":"Other"}]"""
+            } else "[]"
+            HttpResponse(200, envelope(rows))
+        }
+        val rows = kotlinx.coroutines.runBlocking { p.listPage(DownloadKind.TORRENT, 0, 3) }.getOrThrow()
+        assertEquals(listOf("7", "8"), rows.map { it.id })
+        assertEquals("First", rows.single { it.id == "7" }.name)
+    }
+
+    @Test
+    fun `listPage returns a usenet failure instead of swallowing it`() {
+        val (p, _) = provider { request ->
+            if (request.url.contains("/usenet/mylist")) {
+                HttpResponse(403, """{"success":false,"error":"pro","detail":"Usenet is Pro only"}""")
+            } else {
+                HttpResponse(200, envelope("[]"))
+            }
+        }
+        val result = kotlinx.coroutines.runBlocking { p.listPage(DownloadKind.USENET, 0, 100) }
+        assertTrue(result.isFailure)
+        assertEquals("pro", (result.exceptionOrNull() as? DebridError.Provider)?.code)
+        // The full sync still swallows the same failure (unchanged).
+        val full = kotlinx.coroutines.runBlocking { p.listDownloads() }.getOrThrow()
+        assertTrue(full.isEmpty())
+    }
+
+    @Test
+    fun `a JVM Error escapes instead of mapping to a network failure`() {
+        // Stage 1 decision: TorBox used to wrap non-Exception
+        // throwables in Network; the shared mapError rethrows them.
+        val error = OutOfMemoryError("test")
+        val (p, _) = provider { throw error }
+        val thrown = kotlinx.coroutines.runBlocking {
+            runCatching { p.validateAccount() }.exceptionOrNull()
+        }
+        assertSame(error, thrown)
     }
 
     private fun readyDownload() = DebridDownload("11", DebridService.TORBOX, "Movie", 100,

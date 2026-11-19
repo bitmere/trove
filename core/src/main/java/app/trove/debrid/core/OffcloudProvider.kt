@@ -84,7 +84,7 @@ class OffcloudProvider(
         val safeId = resourceId(id)
         var entry: DebridDownload? = null
         visitHistory { entries ->
-            entry = entries.firstOrNull { it.value("requestId") == safeId }?.toDownload()
+            entry = entries.firstOrNull { it.optNonBlankString("requestId") == safeId }?.toDownload()
             entry != null
         }
         val fresh = status(safeId, entry)
@@ -105,7 +105,7 @@ class OffcloudProvider(
         if (containsKey(url)) throw DebridError.Provider("invalid-input", "Invalid source link")
         addBudget.acquire()
         val created = call("POST", "/api/cloud", form = mapOf("url" to url)).obj()
-        val id = resourceId(created.value("requestId") ?: throw unreadableResponse())
+        val id = resourceId(created.optNonBlankString("requestId") ?: throw unreadableResponse())
         try {
             var download = created.toDownload(id = id, kind = kind)
             repeat(if (poll) MAX_POLLS else 0) {
@@ -156,7 +156,7 @@ class OffcloudProvider(
 
     override suspend fun delete(id: String): Result<Unit> = runCatching {
         val response = call("GET", "/cloud/remove/${resourceId(id)}").obj()
-        if (response.value("success") != "true") {
+        if (response.optNonBlankString("success") != "true") {
             throw DebridError.Provider("delete-failed", "Offcloud could not remove the download")
         }
     }.mapError()
@@ -169,8 +169,8 @@ class OffcloudProvider(
                 ?: throw unreadableResponse()
             sites.any { site ->
                 val entry = site as? JsonObject
-                val state = (entry?.value("status") ?: entry?.value("isActive"))?.lowercase()
-                val domain = (entry?.value("host") ?: entry?.value("domain") ?: site.text())
+                val state = (entry?.optNonBlankString("status") ?: entry?.optNonBlankString("isActive"))?.lowercase()
+                val domain = (entry?.optNonBlankString("host") ?: entry?.optNonBlankString("domain") ?: site.text())
                     ?.lowercase()?.takeIf { DOMAIN.matches(it) } ?: return@any false
                 (state == null || state in ACTIVE_SITE_STATES) &&
                     (host == domain || host.endsWith(".$domain"))
@@ -189,9 +189,9 @@ class OffcloudProvider(
                 ?: throw unreadableResponse()
             val records = entries.map { it.obj() }
             if (visit(records) || entries.size() == 0 || response is JsonArray ||
-                response.obj().value("isEnd") != "false"
+                response.obj().optNonBlankString("isEnd") != "false"
             ) return
-            if (!seen.addAll(records.mapNotNull { it.value("requestId") })) throw unreadableResponse()
+            if (!seen.addAll(records.mapNotNull { it.optNonBlankString("requestId") })) throw unreadableResponse()
         }
     }
 
@@ -214,7 +214,7 @@ class OffcloudProvider(
             ?: throw unreadableResponse()
         return files.mapNotNull { entry ->
             val metadata = entry as? JsonObject
-            val link = metadata?.value("url") ?: entry.text() ?: return@mapNotNull null
+            val link = metadata?.optNonBlankString("url") ?: entry.text() ?: return@mapNotNull null
             val uri = webUri(link)?.takeUnless { containsKey(link) } ?: return@mapNotNull null
             val path = metadata?.safeValue("path") ?: safeText(uri.path) ?: return@mapNotNull null
             val name = metadata?.safeValue("name") ?: path.substringAfterLast('/').takeIf { it.isNotBlank() }
@@ -222,25 +222,26 @@ class OffcloudProvider(
             val fileId = metadata?.safeValue("id")?.takeIf { RESOURCE_ID.matches(it) }
                 ?: UUID.nameUUIDFromBytes(path.toByteArray(Charsets.UTF_8)).toString()
             if (containsKey(fileId)) return@mapNotNull null
-            CloudFile(DebridFile(fileId, name, metadata?.number("size") ?: 0L, path), StreamUrl(link))
+            val fileSize = metadata?.optLong("size")?.takeIf { it >= 0 } ?: 0L
+            CloudFile(DebridFile(fileId, name, fileSize, path), StreamUrl(link))
         }.distinctBy { it.file.id }
     }
 
     private fun JsonObject.toDownload(
-        id: String = resourceId(value("requestId") ?: throw unreadableResponse()),
+        id: String = resourceId(optNonBlankString("requestId") ?: throw unreadableResponse()),
         kind: DownloadKind? = null,
         previous: DebridDownload? = null,
     ): DebridDownload {
-        val status = when (value("status")?.lowercase()) {
+        val status = when (optNonBlankString("status")?.lowercase()) {
             "created", "queued" -> DownloadStatus.QUEUED
             "downloading" -> DownloadStatus.DOWNLOADING
             "downloaded" -> DownloadStatus.READY
             "error", "failed", "canceled", "cancelled" -> DownloadStatus.ERROR
             else -> DownloadStatus.UNKNOWN
         }
-        val size = number("fileSize") ?: previous?.sizeBytes
-        val amount = number("amount")
-        val link = value("originalLink")
+        val size = optLong("fileSize")?.takeIf { it >= 0 } ?: previous?.sizeBytes
+        val amount = optLong("amount")?.takeIf { it >= 0 }
+        val link = optNonBlankString("originalLink")
         return DebridDownload(
             id = id,
             service = service,
@@ -253,9 +254,11 @@ class OffcloudProvider(
                     .coerceIn(0f, 1f)
                 else -> 0f
             },
-            kind = kind ?: previous?.kind ?: downloadKind(link, value("site")),
-            createdAtEpochMs = value("createdOn")?.let(::epochMillis) ?: previous?.createdAtEpochMs,
-            errorMessage = if (status == DownloadStatus.ERROR) safeText(value("error") ?: value("message")) else null,
+            kind = kind ?: previous?.kind ?: downloadKind(link, optNonBlankString("site")),
+            createdAtEpochMs = optNonBlankString("createdOn")?.let(::epochMillis) ?: previous?.createdAtEpochMs,
+            errorMessage = if (status == DownloadStatus.ERROR) {
+                safeText(optNonBlankString("error") ?: optNonBlankString("message"))
+            } else null,
         )
     }
 
@@ -288,9 +291,9 @@ class OffcloudProvider(
             null
         }
         val fields = body as? JsonObject
-        val error = fields?.value("error")?.takeUnless { it == "false" || it == "0" }
-            ?: fields?.value("not_available")
-        val detail = fields?.value("message") ?: error
+        val error = fields?.optNonBlankString("error")?.takeUnless { it == "false" || it == "0" }
+            ?: fields?.optNonBlankString("not_available")
+        val detail = fields?.optNonBlankString("message") ?: error
         val marker = listOfNotNull(error, detail).joinToString(" ").lowercase()
         when {
             response.status in setOf(401, 403) || error.equals("NOAUTH", true) ||
@@ -298,7 +301,7 @@ class OffcloudProvider(
             response.status == 429 || RATE_ERROR.containsMatchIn(marker) ->
                 throw DebridError.RateLimited(response.headers.entries
                     .firstOrNull { it.key.equals("Retry-After", true) }?.value?.toLongOrNull())
-            response.status !in 200..299 || error != null || fields?.value("success") == "false" ->
+            response.status !in 200..299 || error != null || fields?.optNonBlankString("success") == "false" ->
                 throw DebridError.Provider("http${response.status}", safeText(detail).orEmpty())
         }
         return body?.takeIf { it.isJsonObject || it.isJsonArray } ?: throw unreadableResponse()
@@ -330,19 +333,11 @@ class OffcloudProvider(
     }
 
     private fun JsonElement.obj(): JsonObject = this as? JsonObject ?: throw unreadableResponse()
-    private fun JsonObject.safeValue(key: String): String? = safeText(value(key))
-    private fun JsonObject.value(key: String): String? = get(key).text()
-    private fun JsonObject.number(key: String): Long? = value(key)?.toLongOrNull()?.takeIf { it >= 0 }
+    private fun JsonObject.safeValue(key: String): String? = safeText(optNonBlankString(key))
     private fun JsonElement?.text(): String? = this?.takeIf { it.isJsonPrimitive }
         ?.asString?.takeIf { it.isNotBlank() }
 
     private fun unreadableResponse() = DebridError.Provider("bad-response", "Offcloud returned an unreadable response")
-
-    private fun <T> Result<T>.mapError(): Result<T> {
-        val failure = exceptionOrNull() ?: return this
-        if (failure is CancellationException || failure !is Exception) throw failure
-        return Result.failure(if (failure is DebridError) failure else DebridError.Network(failure))
-    }
 
     companion object {
         const val BASE = "https://offcloud.com"

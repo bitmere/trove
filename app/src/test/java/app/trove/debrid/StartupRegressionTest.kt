@@ -2,7 +2,9 @@ package app.trove.debrid
 
 import app.trove.debrid.core.DebridAccount
 import app.trove.debrid.core.DebridService
+import app.trove.debrid.core.DownloadKind
 import app.trove.debrid.data.DebridRepository
+import app.trove.debrid.data.DownloadPage
 import app.trove.debrid.data.SavedConnection
 import app.trove.debrid.data.StoredAccounts
 import app.trove.debrid.data.TroveRepository
@@ -12,6 +14,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runCurrent
@@ -26,6 +29,17 @@ import org.junit.Test
 class StartupRegressionTest {
     @Before fun setUp() { Dispatchers.setMain(StandardTestDispatcher()) }
     @After fun tearDown() { Dispatchers.resetMain() }
+
+    // Preparation must run on the runTest scheduler, as in
+    // DownloadsLibraryPerformanceTest: the default Dispatchers.Default
+    // escapes virtual time, and its resume onto Main can land after
+    // resetMain(), when Main is again the unmocked-Looper MissingMain
+    // dispatcher. That resume fails fatally on the Default worker and the
+    // shared ExceptionCollector charges it to the next test in the fork
+    // (UncaughtExceptionsBeforeTest). Injecting the test dispatcher keeps
+    // preparation and the return to Main on the drainable scheduler.
+    private fun TestScope.viewModel(repo: TroveRepository) =
+        DownloadsViewModel(repo, StandardTestDispatcher(testScheduler))
 
     private val account = DebridAccount("torbox-1", DebridService.TORBOX, "TorBox (Essential)", 123L, 456L)
 
@@ -84,7 +98,7 @@ class StartupRegressionTest {
                 return SavedConnection(account, true, base.provider)
             }
         }
-        val downloads = DownloadsViewModel(repo)
+        val downloads = viewModel(repo)
         val settings = SettingsViewModel(repo)
         assertEquals(0, reads) // Constructors can finish before storage is touched.
         runCurrent()
@@ -92,7 +106,7 @@ class StartupRegressionTest {
         ready.complete(Unit)
         advanceUntilIdle()
         assertFalse(downloads.state.value.loading)
-        assertTrue(settings.state.value.hasKey)
+        assertTrue(settings.state.value.torbox.hasKey)
     }
 
     @Test fun `saved account failure is visible in both models and retry can load`() = runTest {
@@ -104,7 +118,7 @@ class StartupRegressionTest {
                 return SavedConnection(account, true, base.provider)
             }
         }
-        val downloads = DownloadsViewModel(repo)
+        val downloads = viewModel(repo)
         val settings = SettingsViewModel(repo)
         advanceUntilIdle()
         assertFalse(downloads.state.value.loading)
@@ -118,17 +132,30 @@ class StartupRegressionTest {
         advanceUntilIdle()
         assertEquals(1, downloads.state.value.downloads.size)
         assertNull(downloads.state.value.loadError)
-        assertTrue(settings.state.value.hasKey)
+        assertTrue(settings.state.value.torbox.hasKey)
     }
 
     @Test fun `thrown list error stops loading and preserves rows on refresh`() = runTest {
         var fail = false
+        // Override the page seam the ViewModel actually calls: a
+        // `by` decorator's listDownloads override is bypassed by the
+        // default listDownloadPage (same trap the TroveRepository
+        // comment documents for listDownloads), so failing the list
+        // must be expressed here.
         val repo = object : TroveRepository by FakeRepository() {
-            override suspend fun listDownloads(provider: app.trove.debrid.core.DebridProvider, bypassCache: Boolean) =
+            override suspend fun listDownloadPage(
+                provider: app.trove.debrid.core.DebridProvider,
+                kind: DownloadKind,
+                offset: Int,
+                limit: Int,
+                bypassCache: Boolean,
+            ): Result<DownloadPage> {
                 if (fail) throw IllegalStateException("transport failed")
-                else Result.success(listOf(sampleDownload()))
+                val rows = if (kind == DownloadKind.TORRENT) listOf(sampleDownload()) else emptyList()
+                return Result.success(DownloadPage(rows, true))
+            }
         }
-        val vm = DownloadsViewModel(repo)
+        val vm = viewModel(repo)
         advanceUntilIdle()
         fail = true
         vm.refresh()

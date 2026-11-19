@@ -18,6 +18,18 @@ class DownloadsOrderingRegressionTest {
     @Before fun setUp() { Dispatchers.setMain(StandardTestDispatcher()) }
     @After fun tearDown() { Dispatchers.resetMain() }
 
+    // Preparation must run on the runTest scheduler: the default
+    // Dispatchers.Default escapes virtual time, and its resume onto Main
+    // can land after resetMain(), when Main is again the unmocked-Looper
+    // MissingMain dispatcher. That resume fails fatally on the Default
+    // worker and the shared ExceptionCollector charges it to the next test
+    // in the fork (UncaughtExceptionsBeforeTest), even in a class that
+    // never builds a ViewModel. Injecting the test dispatcher keeps
+    // preparation, the 250 ms debounce and the return to Main on the
+    // drainable scheduler.
+    private fun TestScope.viewModel(repo: TroveRepository) =
+        DownloadsViewModel(repo, StandardTestDispatcher(testScheduler))
+
     @Test fun `newest first survives filtering and missing dates preserve provider order`() = runTest {
         val rows = listOf(
             sampleDownload(id = "unknown-a", name = "Match A").copy(createdAtEpochMs = null),
@@ -27,12 +39,15 @@ class DownloadsOrderingRegressionTest {
             sampleDownload(id = "tie", name = "Match tie").copy(createdAtEpochMs = 300),
             sampleDownload(id = "unknown-b", name = "Match B").copy(createdAtEpochMs = null),
         )
-        val vm = DownloadsViewModel(FakeRepository(provider = FakeProvider(downloads = rows.toMutableList())))
+        val vm = viewModel(FakeRepository(provider = FakeProvider(downloads = rows.toMutableList())))
         advanceUntilIdle()
         vm.setQuery("match")
+        advanceUntilIdle()
         assertEquals(listOf("new", "tie", "old", "unknown-a", "unknown-b"),
             vm.visibleDownloads(vm.state.value).map { it.id })
         vm.setQuery("")
+        vm.setTab(DownloadKind.WEB)
+        advanceUntilIdle()
         assertEquals(listOf("web"), vm.visibleDownloads(vm.state.value, DownloadKind.WEB).map { it.id })
     }
 
@@ -48,7 +63,7 @@ class DownloadsOrderingRegressionTest {
             override suspend fun loadDownloadSort() = saved
             override suspend fun saveDownloadSort(sort: DownloadSort) { saved = sort }
         }
-        val vm = DownloadsViewModel(repo)
+        val vm = viewModel(repo)
         advanceUntilIdle()
         vm.setQuery("Match")
         vm.setSort(DownloadSort.LARGEST)
@@ -58,9 +73,11 @@ class DownloadsOrderingRegressionTest {
         advanceUntilIdle()
         assertEquals(DownloadSort.LARGEST, vm.state.value.sort)
         assertEquals(listOf("b", "a"), vm.visibleDownloads(vm.state.value).map { it.id })
-        val restarted = DownloadsViewModel(repo)
+        val restarted = viewModel(repo)
         advanceUntilIdle()
         assertEquals(DownloadSort.LARGEST, restarted.state.value.sort)
+        vm.setTab(DownloadKind.WEB)
+        advanceUntilIdle()
         assertEquals(listOf("web"), vm.visibleDownloads(vm.state.value, DownloadKind.WEB).map { it.id })
     }
 
@@ -71,7 +88,7 @@ class DownloadsOrderingRegressionTest {
             override suspend fun loadDownloadSort() = gate.await()
             override suspend fun saveDownloadSort(sort: DownloadSort) { writes += sort }
         }
-        val vm = DownloadsViewModel(repo)
+        val vm = viewModel(repo)
         runCurrent()
         vm.setSort(DownloadSort.OLDEST)
         vm.setSort(DownloadSort.NAME_DESC)

@@ -1,0 +1,255 @@
+package app.trove.debrid.core
+
+import kotlinx.coroutines.runBlocking
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+/**
+ * TMDB fallback, verified against fake transports only — no live
+ * TMDB key exists, so no test here ever touches the real API.
+ */
+class TmdbResolverTest {
+    private val key = "test-read-access-token"
+
+    private val configJson = """
+        {"images":{"secure_base_url":"https://images.example.invalid/t/p/",
+        "poster_sizes":["w92","w154","w185","w342","w500","w780","original"]}}
+    """.trimIndent()
+
+    private val findMovieJson = """
+        {"movie_results":[{"id":123,"title":"Example Film","release_date":"2026-03-01",
+        "overview":"Found via id.","poster_path":"/find.jpg","vote_average":7.5}],"tv_results":[]}
+    """.trimIndent()
+
+    private val findTvJson = """
+        {"movie_results":[],"tv_results":[{"id":456,"name":"Example Show",
+        "first_air_date":"2026-01-15","overview":"Found series via id.","poster_path":"/find-tv.jpg",
+        "vote_average":8.1}]}
+    """.trimIndent()
+
+    private val movieDetailJson = """
+        {"id":123,"title":"Example Film","release_date":"2026-03-01","overview":"A synopsis.",
+        "genres":[{"name":"Drama"},{"name":"Mystery"}],"runtime":148,
+        "poster_path":"/detail.jpg","vote_average":7.5}
+    """.trimIndent()
+
+    private val tvDetailJson = """
+        {"id":456,"name":"Example Show","first_air_date":"2026-01-15","overview":"A series synopsis.",
+        "genres":[{"name":"Drama"}],"episode_run_time":[45],"poster_path":"/show.jpg",
+        "created_by":[{"name":"Show Runner"}]}
+    """.trimIndent()
+
+    private val movieCreditsJson = """
+        {"cast":[{"name":"Actor One"},{"name":"Actor Two"}],
+        "crew":[{"name":"Director One","job":"Director"},{"name":"Writer","job":"Writer"}]}
+    """.trimIndent()
+
+    private val tvCreditsJson = """
+        {"cast":[{"name":"Lead Actor"}],
+        "crew":[{"name":"Episode Director","job":"Director"}]}
+    """.trimIndent()
+
+    private inner class FakeTmdb : HttpTransport {
+        val requests = mutableListOf<HttpRequest>()
+        var configStatus = 200
+        var creditsStatus = 200
+        var findJson = """{"movie_results":[],"tv_results":[]}"""
+        var searchMovieJson = """{"results":[]}"""
+        var searchTvJson = """{"results":[]}"""
+        var detailJson = """{}"""
+        var creditsJson = """{"cast":[],"crew":[]}"""
+        override suspend fun execute(request: HttpRequest): HttpResponse {
+            requests += request
+            val body = when {
+                request.url.endsWith("/3/configuration") ->
+                    if (configStatus == 200) configBody else return HttpResponse(configStatus, "{}")
+                "/3/find/" in request.url -> findJson
+                "/3/search/movie" in request.url -> searchMovieJson
+                "/3/search/tv" in request.url -> searchTvJson
+                request.url.endsWith("/credits") ->
+                    if (creditsStatus == 200) creditsJson else return HttpResponse(creditsStatus, "{}")
+                "/3/movie/" in request.url || "/3/tv/" in request.url -> detailJson
+                else -> error("Unexpected TMDB request: ${request.url}")
+            }
+            return HttpResponse(200, body)
+        }
+        var configBody: String = configJson
+    }
+
+    private fun resolver(http: FakeTmdb, apiKey: String? = key) =
+        TmdbResolver(http) { apiKey }
+
+    @Test fun `find bridges an IMDb id to a movie`() = runBlocking {
+        val http = FakeTmdb().apply {
+            findJson = findMovieJson
+            detailJson = movieDetailJson
+            creditsJson = movieCreditsJson
+        }
+        val result = resolver(http).resolveById("tt0000001", "movie")
+        assertEquals(
+            MediaMetadata(
+                "Example Film", 2026, "movie",
+                "https://images.example.invalid/t/p/w500/detail.jpg",
+                imdbId = "tt0000001", overview = "A synopsis.",
+                genres = listOf("Drama", "Mystery"),
+                cast = listOf("Actor One", "Actor Two"), director = "Director One",
+                runtime = "148 min",
+            ),
+            result,
+        )
+        assertTrue(http.requests.first().url.endsWith("/3/configuration"))
+        assertTrue(http.requests.any { it.url.contains("/3/find/tt0000001?external_source=imdb_id") })
+        assertTrue(http.requests.all { it.headers["Authorization"] == "Bearer $key" })
+        assertTrue(http.requests.none { it.url.contains(key) })
+    }
+
+    @Test fun `find bridges an IMDb id to a series`() = runBlocking {
+        val http = FakeTmdb().apply {
+            findJson = findTvJson
+            detailJson = tvDetailJson
+            creditsJson = tvCreditsJson
+        }
+        val result = resolver(http).resolveById("tt0000001", "series")
+        assertEquals(
+            MediaMetadata(
+                "Example Show", 2026, "series",
+                "https://images.example.invalid/t/p/w500/show.jpg",
+                imdbId = "tt0000001", overview = "A series synopsis.",
+                genres = listOf("Drama"), cast = listOf("Lead Actor"),
+                director = "Episode Director", runtime = "45 min",
+            ),
+            result,
+        )
+    }
+
+    @Test fun `find with the wrong type or an invalid id resolves nothing`() = runBlocking {
+        val http = FakeTmdb().apply { findJson = findMovieJson }
+        assertNull(resolver(http).resolveById("tt0000001", "series"))
+        assertNull(resolver(http).resolveById("not-an-id", "movie"))
+        assertNull(resolver(http).resolveById("tt0000001", "other"))
+        // The first call made two requests (configuration + /find);
+        // the invalid id and the bad type never reach the network.
+        assertEquals(2, http.requests.size)
+    }
+
+    @Test fun `title search falls back when no IMDb id is known`() = runBlocking {
+        val http = FakeTmdb().apply {
+            searchMovieJson = """
+                {"results":[{"id":123,"title":"Example Film","release_date":"2026-03-01",
+                "overview":"Search hit.","poster_path":"/search.jpg","vote_average":7.5}]}
+            """.trimIndent()
+            searchTvJson = """{"results":[]}"""
+            detailJson = movieDetailJson
+            creditsJson = movieCreditsJson
+        }
+        val result = resolver(http).resolve(MediaQuery("Example Film", 2026, "movie"))
+        assertEquals("Example Film", result?.title)
+        // Title search knows no IMDb id, so none is claimed.
+        assertNull(result?.imdbId)
+        assertEquals("148 min", result?.runtime)
+        assertEquals("https://images.example.invalid/t/p/w500/detail.jpg", result?.posterUrl)
+        assertTrue(http.requests.any { it.url.contains("/3/search/movie?query=Example%20Film") })
+        assertTrue(http.requests.none { "/3/find/" in it.url })
+    }
+
+    @Test fun `title search keeps the strict single-candidate year gate`() = runBlocking {
+        // Two exact-title, same-year hits: ambiguous, no auto-apply.
+        val ambiguous = FakeTmdb().apply {
+            searchMovieJson = """
+                {"results":[
+                {"id":1,"title":"Example Film","release_date":"2026-01-01","poster_path":"/a.jpg"},
+                {"id":2,"title":"Example Film","release_date":"2026-06-01","poster_path":"/b.jpg"}]}
+            """.trimIndent()
+            detailJson = movieDetailJson
+        }
+        assertNull(resolver(ambiguous).resolve(MediaQuery("Example Film", 2026, "movie")))
+
+        // A one-year drift resolves, like the Cinemeta ±1 fallback.
+        val drifted = FakeTmdb().apply {
+            searchMovieJson = """
+                {"results":[{"id":123,"title":"Example Film","release_date":"2025-03-01",
+                "overview":"Drifted.","poster_path":"/d.jpg"}]}
+            """.trimIndent()
+            detailJson = movieDetailJson
+        }
+        assertEquals("Example Film", resolver(drifted).resolve(MediaQuery("Example Film", 2026, "movie"))?.title)
+
+        // A different title never matches, however close the year is.
+        val wrongTitle = FakeTmdb().apply {
+            searchMovieJson = """
+                {"results":[{"id":123,"title":"Other Film","release_date":"2026-03-01",
+                "overview":"Wrong.","poster_path":"/w.jpg"}]}
+            """.trimIndent()
+            detailJson = movieDetailJson
+        }
+        assertNull(resolver(wrongTitle).resolve(MediaQuery("Example Film", 2026, "movie")))
+    }
+
+    @Test fun `no key means no TMDB request at all`() = runBlocking {
+        val http = FakeTmdb()
+        assertNull(resolver(http, apiKey = null).resolve(MediaQuery("Example Film", 2026, "movie")))
+        assertNull(resolver(http, apiKey = "").resolve(MediaQuery("Example Film", 2026, "movie")))
+        assertNull(resolver(http, apiKey = "   ").resolveById("tt0000001", "movie"))
+        assertTrue(http.requests.isEmpty())
+    }
+
+    @Test fun `poster URLs come from configuration never a hardcoded host`() = runBlocking {
+        val http = FakeTmdb().apply {
+            configBody = """
+                {"images":{"secure_base_url":"https://cdn.example.invalid/t/p/",
+                "poster_sizes":["w185","w342","original"]}}
+            """.trimIndent()
+            findJson = findMovieJson
+            detailJson = movieDetailJson
+            creditsJson = movieCreditsJson
+        }
+        val result = resolver(http).resolveById("tt0000001", "movie")
+        // w500 is absent from this configuration, so w342 is used;
+        // the host and the size both come from /3/configuration.
+        assertEquals("https://cdn.example.invalid/t/p/w342/detail.jpg", result?.posterUrl)
+    }
+
+    @Test fun `a failed configuration still resolves the title without a poster`() = runBlocking {
+        val http = FakeTmdb().apply {
+            configStatus = 500
+            findJson = findMovieJson
+            detailJson = movieDetailJson
+            creditsJson = movieCreditsJson
+        }
+        val result = resolver(http).resolveById("tt0000001", "movie")
+        assertEquals("Example Film", result?.title)
+        assertNull(result?.posterUrl)
+    }
+
+    @Test fun `validateKey reports the configuration check`() = runBlocking {
+        val ok = FakeTmdb()
+        assertTrue(resolver(ok).validateKey(key))
+        assertTrue(ok.requests.single().headers["Authorization"] == "Bearer $key")
+        val denied = FakeTmdb().apply { configStatus = 401 }
+        assertEquals(false, resolver(denied).validateKey("bad-key"))
+    }
+
+    @Test fun `detail for a different id is rejected`() = runBlocking {
+        val http = FakeTmdb().apply {
+            findJson = findMovieJson
+            // Detail returns an object for a different id: rejected.
+            detailJson = """{"id":999,"title":"Wrong Film"}"""
+            creditsJson = movieCreditsJson
+        }
+        assertNull(resolver(http).resolveById("tt0000001", "movie"))
+    }
+
+    @Test fun `credit failures degrade instead of failing the resolve`() = runBlocking {
+        val http = FakeTmdb().apply {
+            findJson = findMovieJson
+            detailJson = movieDetailJson
+            creditsStatus = 500
+        }
+        val result = resolver(http).resolveById("tt0000001", "movie")
+        assertEquals("Example Film", result?.title)
+        assertTrue(result?.cast?.isEmpty() == true)
+        assertNull(result?.director)
+    }
+}
