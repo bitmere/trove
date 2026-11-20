@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.27 — 2026-11-20
+
+- Search placeholder (PR 33): the "Search downloads" placeholder no longer wraps to three lines once Reset search appears after sorting; it is now single-line with an ellipsis, so the search bar stays 56dp.
+- Play after sort (PR 33): the Play button no longer goes dead after changing the sort; the current-download check now compares structurally instead of by object identity, and the resolving state is cleared in a finally so Play can never stick disabled.
+- Baseline: 586 JVM tests, lint 0 errors.
+
 ## 0.1.26 — 2026-11-19
 
 - Impeccable design setup (PR 31): the Impeccable design skill/CLI is vendored into the repo (vendor submodule, Codex hooks, design docs) so UI work is reviewed against the same design checks; no app code changed.
