@@ -196,7 +196,10 @@ class ProviderAccountRegistry(
         val key = credential(service) ?: return null
         providers[service]?.takeIf { it.credential == key }?.let { return it.provider }
         val provider = when (service) {
-            DebridService.TORBOX -> TorBoxProvider(key, transport)
+            DebridService.TORBOX -> TorBoxProvider(
+                key, transport,
+                diagnosticLog = { android.util.Log.d("TorBox", it) },
+            )
             DebridService.REAL_DEBRID -> RealDebridProvider(key, transport)
             DebridService.ALLDEBRID -> AllDebridProvider(key, transport)
             DebridService.PREMIUMIZE -> PremiumizeProvider(key, transport)

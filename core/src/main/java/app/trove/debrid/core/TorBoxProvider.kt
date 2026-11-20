@@ -4,6 +4,7 @@ import com.google.gson.JsonArray
 import com.google.gson.JsonElement
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
+import com.google.gson.JsonPrimitive
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
@@ -31,6 +32,8 @@ class TorBoxProvider(
     private val createTorrentBudget: HourlyBudget = HourlyBudget(50),
     private val createWebBudget: HourlyBudget = HourlyBudget(25),
     private val listPageSize: Int = 1000,
+    /** Redacted diagnostic sink for creates that return no id; no-op by default. */
+    private val diagnosticLog: (String) -> Unit = {},
 ) : DebridProvider {
 
     init {
@@ -122,12 +125,44 @@ class TorBoxProvider(
         } ?: fallback
 
     private fun safeDetail(obj: JsonObject): String {
-        val detail = obj.optString("detail")?.takeIf { it.isNotBlank() }
+        val detail = detailText(obj)
             ?: return "TorBox could not complete this request. Try again."
+        return redactDetail(detail) ?: "TorBox couldn't complete this request. Try again."
+    }
+
+    /** The redacted `detail` when the envelope carries a usable one, else null. */
+    private fun safeDetailOrNull(obj: JsonObject): String? =
+        detailText(obj)?.let { redactDetail(it) }
+
+    /** Renders the envelope `detail` without redaction: a plain string,
+     *  or the first `ValidationError.msg` with its `loc` when `detail`
+     *  is a 422 array. Null when absent or unusable. */
+    private fun detailText(obj: JsonObject): String? {
+        return when (val el = obj["detail"]) {
+            null -> null
+            is JsonArray -> {
+                val first = el.firstOrNull() as? JsonObject ?: return null
+                val msg = first.optString("msg")?.takeIf { it.isNotBlank() } ?: return null
+                val loc = (first["loc"] as? JsonArray)
+                    ?.mapNotNull { seg ->
+                        (seg as? JsonPrimitive)?.let { runCatching { it.asString }.getOrNull() }
+                    }
+                    ?.filter { it.isNotEmpty() }
+                    ?.joinToString(".")
+                    .orEmpty()
+                if (loc.isBlank()) msg else "$loc: $msg"
+            }
+            else -> obj.optString("detail")?.takeIf { it.isNotBlank() }
+        }
+    }
+
+    /** Applies the credential/link redaction; null when the text must
+     *  not be shown in UI or logs. The returned text is capped at 300 chars. */
+    private fun redactDetail(detail: String): String? {
         // A server error must never echo a credential-bearing link into UI or logs.
         val decoded = runCatching { java.net.URLDecoder.decode(detail, "UTF-8") }.getOrDefault(detail)
         if (decoded.contains(apiKey) || decoded.contains("requestdl", true) || decoded.contains("http", true)) {
-            return "TorBox couldn't complete this request. Try again."
+            return null
         }
         return detail.take(300)
     }
@@ -205,7 +240,7 @@ class TorBoxProvider(
                 if (!createTorrentBudget.tryConsume()) {
                     throw DebridError.QuotaExceeded("TorBox allows 50 torrent adds per hour")
                 }
-                // Synchronous creation returns the ID and refusal detail; async returns data=null.
+                // Synchronous creation returns the ID and refusal detail.
                 val data = call(
                     "POST", "/torrents/createtorrent",
                     multipart = listOf(
@@ -235,24 +270,51 @@ class TorBoxProvider(
                 if (!createWebBudget.tryConsume()) {
                     throw DebridError.QuotaExceeded("TorBox allows 25 web adds per hour")
                 }
-                val data = call(
-                    "POST", "/webdl/asynccreatewebdownload",
+                val envelope = call(
+                    "POST", "/webdl/createwebdownload",
                     formFields = mapOf("link" to input.url),
-                ).dataObject()
+                )
+                val data = envelope.dataObject()
                 val newId = data?.optLong("webdownload_id") ?: data?.optLong("queued_id")
-                    ?: throw DebridError.Provider("create", "TorBox returned no web download id")
-                resolveCreated(newId, DownloadKind.WEB, input.url)
+                if (newId != null) {
+                    resolveCreated(newId, DownloadKind.WEB, input.url)
+                } else {
+                    logCreateWithoutId(
+                        "/webdl/createwebdownload", envelope, data,
+                        listOf("webdownload_id", "queued_id"),
+                    )
+                    findByHash("/webdl/mylist", DownloadKind.WEB, md5Hex(input.url))
+                        ?: throw DebridError.Provider(
+                            "create",
+                            safeDetailOrNull(envelope) ?: "TorBox returned no web download id",
+                        )
+                }
             }
             is AddInput.Nzb -> {
-                val data = call(
-                    "POST", "/usenet/asynccreateusenetdownload",
+                val envelope = call(
+                    "POST", "/usenet/createusenetdownload",
                     multipart = listOf(
                         MultipartPart("file", input.fileName, input.bytes, "application/x-nzb"),
                     ),
-                ).dataObject()
+                )
+                val data = envelope.dataObject()
                 val newId = data?.optLong("usenetdownload_id") ?: data?.optLong("queued_id")
-                    ?: throw DebridError.Provider("create", "TorBox returned no Usenet id")
-                resolveCreated(newId, DownloadKind.USENET, input.fileName)
+                if (newId != null) {
+                    resolveCreated(newId, DownloadKind.USENET, input.fileName)
+                } else {
+                    logCreateWithoutId(
+                        "/usenet/createusenetdownload", envelope, data,
+                        listOf("usenetdownload_id", "queued_id"),
+                    )
+                    // Without a hash from the create response there is
+                    // nothing to match a mylist row on, so no lookup runs.
+                    val hash = data?.optString("hash")?.takeIf { it.isNotBlank() }
+                    val recovered = hash?.let { findByHash("/usenet/mylist", DownloadKind.USENET, it) }
+                    recovered ?: throw DebridError.Provider(
+                        "create",
+                        safeDetailOrNull(envelope) ?: "TorBox returned no Usenet id",
+                    )
+                }
             }
             is AddInput.NzbUrl ->
                 throw DebridError.UnsupportedCapability("TorBox needs the .nzb file, not a link")
@@ -479,6 +541,60 @@ class TorBoxProvider(
                     kind = kind,
                 )
             }
+    }
+
+    /** MD5 hex (lowercase) of the exact string — TorBox's webdl `hash`
+     *  is the MD5 of the link. The byte is masked before formatting:
+     *  `%x` sign-extends a negative byte. */
+    private fun md5Hex(text: String): String =
+        java.security.MessageDigest.getInstance("MD5")
+            .digest(text.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it.toInt() and 0xFF) }
+
+    /** Finds a mylist row by its `hash` field, paging with
+     *  `bypass_cache=true` so a just-created row is visible. Null when
+     *  no page contains it. The create call is never retried. */
+    private suspend fun findByHash(
+        path: String,
+        kind: DownloadKind,
+        hash: String,
+    ): DebridDownload? {
+        var offset = 0
+        do {
+            val page = listKindPage(path, offset = offset, bypassCache = true)
+            for (item in page) {
+                val row = item as? JsonObject ?: continue
+                if (row.optString("hash")?.equals(hash, ignoreCase = true) == true) {
+                    row.toDownload(kind)?.let { return it }
+                }
+            }
+            offset += listPageSize
+        } while (page.size >= listPageSize)
+        return null
+    }
+
+    /** One redacted diagnostic line for a create that returned success
+     *  without an id: endpoint, 2xx status (only 2xx reaches this
+     *  path), `success`, the redacted `detail`, and which id fields
+     *  were present (names only). Never the link, the key, or the body. */
+    private fun logCreateWithoutId(
+        endpoint: String,
+        envelope: JsonObject,
+        data: JsonObject?,
+        idFields: List<String>,
+    ) {
+        val success = if (envelope.has("success")) {
+            envelope.optBoolean("success", true).toString()
+        } else {
+            "absent"
+        }
+        val detail = (safeDetailOrNull(envelope) ?: "none")
+            .replace('\n', ' ').replace('\r', ' ')
+        val present = idFields.filter { data?.has(it) == true }
+        diagnosticLog(
+            "TorBox create without id: endpoint=$endpoint status=2xx success=$success " +
+                "detail=$detail data=${if (data == null) "null" else "object"} idFields=$present",
+        )
     }
 
     private var hosterCache: Pair<Long, Set<String>>? = null
