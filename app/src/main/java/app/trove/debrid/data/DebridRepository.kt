@@ -162,6 +162,9 @@ class DebridRepository(
     override suspend fun resolveMetadata(query: app.trove.debrid.core.MediaQuery) =
         withContext(ioDispatcher) { metadataResolver.resolve(query) }
 
+    override suspend fun resolveMetadataForRelease(name: String, bypassMiss: Boolean) =
+        withContext(ioDispatcher) { metadataResolver.resolve(app.trove.debrid.core.mediaQueryVariants(name), bypassMiss) }
+
     override suspend fun resolveMetadataCandidates(query: app.trove.debrid.core.MediaQuery) =
         withContext(ioDispatcher) { metadataResolver.candidates(query) }
 

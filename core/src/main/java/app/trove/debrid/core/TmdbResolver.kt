@@ -21,9 +21,8 @@ import kotlin.math.abs
  *
  * Lookup order mirrors the resolver it backs: `/3/find/{imdbId}` first
  * when an IMDb id is known (one call bridges the stored id), title
- * search second (`/3/search/movie`, `/3/search/tv`) with the same
- * strictness as Cinemeta — exact normalized title, a single candidate,
- * exact year then ±1. A match is then expanded with a detail call
+ * search second (`/3/search/movie`, `/3/search/tv`) with exact normalized
+ * localized or original titles and a strict year gate. A match is then expanded with a detail call
  * (genres, runtime, overview) and a best-effort credits call (cast,
  * director), because search and find responses carry neither.
  *
@@ -54,7 +53,17 @@ class TmdbResolver(
     }
 
     private data class ImageConfig(val baseUrl: String, val posterSizes: List<String>)
-    private data class TmdbHit(val tmdbId: Int, val type: String)
+    private data class TmdbHit(val tmdbId: Int, val type: String, val posterPath: String?)
+
+    private data class SearchMatch(
+        val hit: TmdbHit,
+        val year: Int?,
+        val title: String,
+        val originalTitle: String,
+        val language: String?,
+        val popularity: Double?,
+        val localizedTitleMatches: Boolean,
+    )
 
     private val configMutex = Mutex()
     private var imageConfig: ImageConfig? = null
@@ -81,13 +90,31 @@ class TmdbResolver(
         val key = apiKey()?.takeIf { it.isNotBlank() } ?: return null
         if (query.title.isBlank() || query.title.length > 160) return null
         return try {
-            val config = imageConfig(key)
             val hit = if (imdbId?.matches(imdbIdPattern) == true) {
                 findHit(imdbId, query.type, key)
             } else {
                 searchHit(query, key)
             } ?: return null
-            detail(hit, imdbId?.takeIf { it.matches(imdbIdPattern) }, config, key)
+            detail(hit, imdbId?.takeIf { it.matches(imdbIdPattern) }, imageConfig(key), key)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /** Find a poster without fetching the detail and credits used for a full match. */
+    suspend fun resolvePoster(query: MediaQuery, imdbId: String?): String? {
+        val key = apiKey()?.takeIf { it.isNotBlank() } ?: return null
+        return try {
+            val hit = if (imdbId?.matches(imdbIdPattern) == true) {
+                findHit(imdbId, query.type, key)
+            } else {
+                if (query.title.isBlank() || query.title.length > 160) return null
+                searchHit(query, key)
+            } ?: return null
+            val path = hit.posterPath?.takeIf { it.startsWith("/") } ?: return null
+            posterUrl(imageConfig(key), path)
         } catch (e: CancellationException) {
             throw e
         } catch (_: Exception) {
@@ -114,44 +141,53 @@ class TmdbResolver(
 
     private suspend fun findHit(imdbId: String, type: String?, key: String): TmdbHit? {
         val found = get("/3/find/$imdbId?external_source=imdb_id", key)
-        val movieIds = found.results("movie_results")
-        val tvIds = found.results("tv_results")
-        val (tmdbId, hitType) = when (type) {
-            "movie" -> (movieIds.firstOrNull()?.first to "movie")
-            "series" -> (tvIds.firstOrNull()?.first to "series")
-            else -> movieIds.firstOrNull()?.let { it.first to "movie" }
-                ?: tvIds.firstOrNull()?.let { it.first to "series" }
-        } ?: return null
-        return TmdbHit(tmdbId ?: return null, hitType)
+        fun hit(array: String, type: String): TmdbHit? =
+            found.results(array).firstNotNullOfOrNull { (id, obj) ->
+                id?.let { TmdbHit(it, type, obj.optString("poster_path")) }
+            }
+        return when (type) {
+            "movie" -> hit("movie_results", "movie")
+            "series" -> hit("tv_results", "series")
+            else -> hit("movie_results", "movie") ?: hit("tv_results", "series")
+        }
     }
 
     private suspend fun searchHit(query: MediaQuery, key: String): TmdbHit? {
         val encoded = URLEncoder.encode(query.title, "UTF-8").replace("+", "%20")
+        val titleKey = normalizedTitle(query.title)
         val types = query.type?.let { listOf(it) } ?: listOf("movie", "series")
         val hits = types.flatMap { type ->
-            val endpoint = if (type == "series") "tv" else "movie"
+            val series = type == "series"
+            val endpoint = if (series) "tv" else "movie"
             get("/3/search/$endpoint?query=$encoded", key)
-                .results("results").mapNotNull { entry ->
-                    val id = entry.first
-                    val obj = entry.second
-                    val title = obj.optString(if (type == "series") "name" else "title")
-                    val year = releaseYear(obj, type)
-                    if (id == null || title == null ||
-                        normalizedTitle(title) != normalizedTitle(query.title)
-                    ) {
-                        null
-                    } else {
-                        Triple(id, type, year)
-                    }
+                .results("results").mapNotNull { (id, obj) ->
+                    if (id == null) return@mapNotNull null
+                    val title = normalizedTitle(obj.optString(if (series) "name" else "title").orEmpty())
+                    val original = normalizedTitle(obj.optString(if (series) "original_name" else "original_title").orEmpty())
+                    if (title != titleKey && original != titleKey) return@mapNotNull null
+                    SearchMatch(
+                        TmdbHit(id, type, obj.optString("poster_path")), releaseYear(obj, type), title, original,
+                        obj.optString("original_language")?.takeIf { it.isNotBlank() },
+                        obj.optString("popularity")?.toDoubleOrNull()?.takeIf { it.isFinite() },
+                        localizedTitleMatches = title == titleKey,
+                    )
                 }
-        }.distinctBy { it.first to it.second }
-        val exact = hits.filter { matchesYear(it.third, query.year, tolerance = 0) }
-        if (exact.size > 1) return null
-        val tolerance = if (exact.isEmpty() && query.year != null) 1 else 0
-        val match = (if (tolerance == 0) exact.singleOrNull()
-            else hits.singleOrNull { matchesYear(it.third, query.year, tolerance) })
-            ?: return null
-        return TmdbHit(match.first, match.second)
+        }.distinctBy { it.hit.tmdbId to it.hit.type }
+        if (query.year == null) return hits.singleOrNull()?.hit
+        val eligible = hits.filter { matchesYear(it.year, query.year, tolerance = 1) }
+        val titleMatches = eligible.filter { it.localizedTitleMatches }.ifEmpty { eligible }
+        val ranked = titleMatches.filter { it.year == query.year }
+        if (ranked.isEmpty()) return titleMatches.singleOrNull()?.hit
+        val first = ranked.first()
+        if (ranked.size == 1) return first.hit
+        // A shared localized title can hide unrelated titles from different markets.
+        // Use popularity only with the same known language, type, and original title.
+        if (first.language == null || first.originalTitle.isEmpty() || ranked.any {
+            it.language != first.language || it.title != first.title || it.originalTitle != first.originalTitle ||
+                it.hit.type != first.hit.type || it.popularity == null
+        }) return null
+        val highest = ranked.maxOf { it.popularity!! }
+        return ranked.singleOrNull { it.popularity == highest }?.hit
     }
 
     private suspend fun detail(
@@ -222,8 +258,8 @@ class TmdbResolver(
     private fun posterUrl(config: ImageConfig?, path: String?): String? {
         val base = config?.baseUrl?.takeIf { it.startsWith("https://") } ?: return null
         val cleanPath = path?.takeIf { it.startsWith("/") } ?: return null
-        val size = config.posterSizes.firstOrNull { it == "w500" }
-            ?: config.posterSizes.firstOrNull { it == "w342" }
+        val size = config.posterSizes.firstOrNull { it == "w342" }
+            ?: config.posterSizes.firstOrNull { it == "w500" }
             ?: config.posterSizes.firstOrNull { it != "original" }
             ?: config.posterSizes.firstOrNull()
             ?: return null

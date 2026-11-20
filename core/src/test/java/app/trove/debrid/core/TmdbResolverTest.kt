@@ -91,7 +91,7 @@ class TmdbResolverTest {
         assertEquals(
             MediaMetadata(
                 "Example Film", 2026, "movie",
-                "https://images.example.invalid/t/p/w500/detail.jpg",
+                "https://images.example.invalid/t/p/w342/detail.jpg",
                 imdbId = "tt0000001", overview = "A synopsis.",
                 genres = listOf("Drama", "Mystery"),
                 cast = listOf("Actor One", "Actor Two"), director = "Director One",
@@ -115,7 +115,7 @@ class TmdbResolverTest {
         assertEquals(
             MediaMetadata(
                 "Example Show", 2026, "series",
-                "https://images.example.invalid/t/p/w500/show.jpg",
+                "https://images.example.invalid/t/p/w342/show.jpg",
                 imdbId = "tt0000001", overview = "A series synopsis.",
                 genres = listOf("Drama"), cast = listOf("Lead Actor"),
                 director = "Episode Director", runtime = "45 min",
@@ -149,7 +149,7 @@ class TmdbResolverTest {
         // Title search knows no IMDb id, so none is claimed.
         assertNull(result?.imdbId)
         assertEquals("148 min", result?.runtime)
-        assertEquals("https://images.example.invalid/t/p/w500/detail.jpg", result?.posterUrl)
+        assertEquals("https://images.example.invalid/t/p/w342/detail.jpg", result?.posterUrl)
         assertTrue(http.requests.any { it.url.contains("/3/search/movie?query=Example%20Film") })
         assertTrue(http.requests.none { "/3/find/" in it.url })
     }
@@ -187,6 +187,44 @@ class TmdbResolverTest {
         assertNull(resolver(wrongTitle).resolve(MediaQuery("Example Film", 2026, "movie")))
     }
 
+    @Test fun `original title matches and localized title takes priority within the same year`() = runBlocking {
+        val originalTitle = """
+            {"id":123,"title":"Localized Film","original_title":"Example Film","original_language":"en",
+              "release_date":"2026-03-01","popularity":90,"poster_path":"/original.jpg"}
+        """.trimIndent()
+        val localizedTitle = """
+            {"id":124,"title":"Example Film","original_title":"A Different Title","original_language":"fr",
+              "release_date":"2026-03-01","popularity":1,"poster_path":"/localized.jpg"}
+        """.trimIndent()
+        val http = FakeTmdb().apply { searchMovieJson = """{"results":[$originalTitle]}""" }
+        val resolver = resolver(http)
+        val query = MediaQuery("Example Film", 2026, "movie")
+        assertEquals("https://images.example.invalid/t/p/w342/original.jpg", resolver.resolvePoster(query, null))
+        http.searchMovieJson = """{"results":[$originalTitle,$localizedTitle]}"""
+        assertEquals("https://images.example.invalid/t/p/w342/localized.jpg", resolver.resolvePoster(query, null))
+    }
+
+    @Test fun `popularity breaks only compatible exact year ties`() = runBlocking {
+        val lessPopular = """
+            {"id":123,"title":"Example Film","original_title":"Example Film","original_language":"en",
+              "release_date":"2026-03-01","popularity":1,"poster_path":"/less.jpg"}
+        """.trimIndent()
+        val morePopular = """
+            {"id":124,"title":"Example Film","original_title":"Example Film","original_language":"en",
+              "release_date":"2026-03-01","popularity":99,"poster_path":"/more.jpg"}
+        """.trimIndent()
+        val http = FakeTmdb().apply { searchMovieJson = """{"results":[$lessPopular,$morePopular]}""" }
+        val resolver = resolver(http)
+        val query = MediaQuery("Example Film", 2026, "movie")
+        assertEquals("https://images.example.invalid/t/p/w342/more.jpg", resolver.resolvePoster(query, null))
+        assertNull(resolver.resolvePoster(query.copy(year = null), null))
+        val differentLanguage = morePopular.replace("en", "fr")
+        http.searchMovieJson = """{"results":[$lessPopular,$differentLanguage]}"""
+        assertNull(resolver.resolvePoster(query, null))
+        http.searchMovieJson = """{"results":[$lessPopular,${morePopular.replace("2026-03-01", "2025-03-01")}]}"""
+        assertEquals("https://images.example.invalid/t/p/w342/less.jpg", resolver.resolvePoster(query, null))
+    }
+
     @Test fun `no key means no TMDB request at all`() = runBlocking {
         val http = FakeTmdb()
         assertNull(resolver(http, apiKey = null).resolve(MediaQuery("Example Film", 2026, "movie")))
@@ -206,8 +244,7 @@ class TmdbResolverTest {
             creditsJson = movieCreditsJson
         }
         val result = resolver(http).resolveById("tt0000001", "movie")
-        // w500 is absent from this configuration, so w342 is used;
-        // the host and the size both come from /3/configuration.
+        // The host and the preferred size both come from /3/configuration.
         assertEquals("https://cdn.example.invalid/t/p/w342/detail.jpg", result?.posterUrl)
     }
 

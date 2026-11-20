@@ -197,7 +197,7 @@ class DebridRepositoryTest {
         val query = MediaQuery("Example Film", 2026, "movie")
         val result = repo.resolveMetadata(query)
         assertEquals("Example Film", result?.title)
-        assertEquals("https://images.example.invalid/t/p/w500/d.jpg", result?.posterUrl)
+        assertEquals("https://images.example.invalid/t/p/w342/d.jpg", result?.posterUrl)
         assertEquals("tmdb", cache.get(query)?.source)
         assertTrue(cache.get(query)?.isFresh(System.currentTimeMillis()) == true)
     }

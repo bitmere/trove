@@ -4,6 +4,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.util.LruCache
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.Icon
@@ -12,6 +13,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -21,10 +23,12 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
 import app.trove.debrid.R
-import app.trove.debrid.core.MediaMetadata
 import app.trove.debrid.core.PosterDiskCache
 import app.trove.debrid.core.PosterSource
+import app.trove.debrid.core.publicPosterUrl
 import java.io.File
 import androidx.compose.ui.unit.dp
 import app.trove.debrid.core.HttpRequest
@@ -78,6 +82,10 @@ private object PosterLoader {
         return BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
     }
 
+    suspend fun clearMiss(url: String) {
+        mutex.withLock { misses.remove(url) }
+    }
+
     suspend fun load(url: String, cacheDirectory: () -> File): Bitmap? = withContext(Dispatchers.IO) {
         loadOnIo(url, cacheDirectory)
     }
@@ -129,16 +137,25 @@ private object PosterLoader {
 }
 
 @Composable
-internal fun MetadataPoster(url: String?, metadata: MediaMetadata?, refreshing: Boolean) {
+internal fun MetadataPoster(url: String?, refreshing: Boolean) {
     val context = LocalContext.current.applicationContext
-    var bitmap by remember(url) { mutableStateOf<Bitmap?>(null) }
-    LaunchedEffect(url, metadata, refreshing) {
-        if (bitmap == null && !refreshing) {
-            bitmap = loadPosterWithRetry(url, pause = { delay(it) }) { validUrl ->
-                PosterLoader.load(validUrl) { context.cacheDir }
+    val validUrl = remember(url) { publicPosterUrl(url) }
+    var bitmap by remember(validUrl) { mutableStateOf<Bitmap?>(null) }
+    var retry by remember(validUrl) { mutableIntStateOf(0) }
+    var handledRetry by remember(validUrl) { mutableIntStateOf(0) }
+    LaunchedEffect(validUrl, refreshing, retry) {
+        if (validUrl != null && bitmap == null && !refreshing) {
+            if (retry != handledRetry) {
+                PosterLoader.clearMiss(validUrl)
+                handledRetry = retry
+            }
+            bitmap = loadPosterWithRetry(validUrl, pause = { delay(it) }) { posterUrl ->
+                PosterLoader.load(posterUrl) { context.cacheDir }
             }
         }
     }
+    val canRetry = validUrl != null && bitmap == null && !refreshing
+    val retryModifier = if (canRetry) Modifier.clickable(role = Role.Button) { retry++ } else Modifier
     Surface(
         shape = MaterialTheme.shapes.extraSmall,
         color = MaterialTheme.colorScheme.surfaceContainerHigh,
@@ -148,9 +165,15 @@ internal fun MetadataPoster(url: String?, metadata: MediaMetadata?, refreshing: 
         if (loaded != null) {
             Image(loaded.asImageBitmap(), contentDescription = null, contentScale = ContentScale.Crop)
         } else {
-            Box(contentAlignment = Alignment.Center) {
-                Icon(painterResource(R.drawable.ic_poster_placeholder), contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            Box(
+                modifier = Modifier.size(width = 48.dp, height = 72.dp).then(retryModifier),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    painterResource(R.drawable.ic_poster_placeholder),
+                    contentDescription = if (canRetry) stringResource(R.string.retry_poster) else null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
         }
     }

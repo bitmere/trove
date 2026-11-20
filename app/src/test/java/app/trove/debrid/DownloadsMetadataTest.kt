@@ -34,8 +34,8 @@ class DownloadsMetadataTest {
         val provider = FakeProvider(downloads = mutableListOf(row))
         val gate = CompletableDeferred<MediaMetadata?>()
         val repo = object : TroveRepository by FakeRepository(provider = provider) {
-            override suspend fun resolveMetadata(query: MediaQuery): MediaMetadata? {
-                assertEquals(MediaQuery("Baththa", 2026, null), query)
+            override suspend fun resolveMetadataForRelease(name: String, bypassMiss: Boolean): MediaMetadata? {
+                assertEquals("Baththa.2026.1080p.mkv", name)
                 return gate.await()
             }
         }
@@ -56,7 +56,7 @@ class DownloadsMetadataTest {
     @Test fun `metadata failure leaves downloads and playback available without load error`() = runTest {
         val row = sampleDownload()
         val repo = object : TroveRepository by FakeRepository(provider = FakeProvider(downloads = mutableListOf(row))) {
-            override suspend fun resolveMetadata(query: MediaQuery): MediaMetadata? = error("Synthetic failure")
+            override suspend fun resolveMetadataForRelease(name: String, bypassMiss: Boolean): MediaMetadata? = error("Synthetic failure")
         }
         val vm = viewModel(repo)
         advanceUntilIdle()
@@ -68,8 +68,9 @@ class DownloadsMetadataTest {
         val provider = FakeProvider(downloads = mutableListOf(sampleDownload()))
         var calls = 0
         val repo = object : TroveRepository by FakeRepository(provider = provider) {
-            override suspend fun resolveMetadata(query: MediaQuery): MediaMetadata {
+            override suspend fun resolveMetadataForRelease(name: String, bypassMiss: Boolean): MediaMetadata {
                 calls++
+                val query = parseMediaName(name)
                 return MediaMetadata(query.title, query.year, query.type)
             }
         }
@@ -91,16 +92,23 @@ class DownloadsMetadataTest {
         assertTrue(vm.state.value.metadata.isEmpty())
     }
 
-    @Test fun `metadata misses are retried on refresh`() = runTest {
-        var calls = 0
+    @Test fun `only explicit refresh bypasses the metadata miss cache`() = runTest {
+        val bypasses = mutableListOf<Boolean>()
         val repo = object : TroveRepository by FakeRepository(provider = FakeProvider(downloads = mutableListOf(sampleDownload()))) {
-            override suspend fun resolveMetadata(query: MediaQuery): MediaMetadata? { calls++; return null }
+            override suspend fun resolveMetadataForRelease(name: String, bypassMiss: Boolean): MediaMetadata? {
+                bypasses += bypassMiss
+                return null
+            }
         }
         val vm = viewModel(repo)
         advanceUntilIdle()
         vm.refresh()
         advanceUntilIdle()
-        assertEquals(2, calls)
+        vm.refreshFromUser()
+        advanceUntilIdle()
+        vm.onAdded(DownloadKind.TORRENT)
+        advanceUntilIdle()
+        assertEquals(listOf(false, false, true, false), bypasses)
     }
 
     @Test fun `opening a download without metadata loads picker candidates`() = runTest {
@@ -124,7 +132,7 @@ class DownloadsMetadataTest {
         val row = sampleDownload().copy(name = "Baththa.2026.1080p.mkv")
         var candidateCalls = 0
         val repo = object : TroveRepository by FakeRepository(provider = FakeProvider(downloads = mutableListOf(row))) {
-            override suspend fun resolveMetadata(query: MediaQuery) = MediaMetadata("Baththa", 2026, "movie")
+            override suspend fun resolveMetadataForRelease(name: String, bypassMiss: Boolean) = MediaMetadata("Baththa", 2026, "movie")
             override suspend fun resolveMetadataCandidates(query: MediaQuery): List<MediaCandidate> {
                 candidateCalls++
                 return listOf(MediaCandidate("tt0000001", "Baththa", 2026, "movie"))
