@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.30 — 2026-11-20
+
+- Poster speed (PR 42): TMDB row thumbnails prefer w185 with w342/w500 cache reuse; transient poster failures retry after ~1s then ~2s instead of two 60s waits; poster loads survive a library refresh; visible metadata publishes per-result instead of waiting for a batch; the next 3 rows prefetch once the visible ones are done.
+- Enrichment provenance (PR 42): the source is now tracked end-to-end and shown as a line in the details sheet — Cinemeta, TMDB, Cinemeta with a TMDB poster, no match, or unavailable.
+- Details sheet (PR 42): the sheet shows the poster in an 80×120 slot next to the title, reusing the row's image.
+- Conditional TMDB-first (PR 42): with a TMDB key configured, TMDB is tried first with Cinemeta backfilling the IMDb id, rating, episodes and poster; without a key the order stays Cinemeta-first with zero TMDB requests; a 429 honours Retry-After and falls back to Cinemeta.
+- Baseline: 617 JVM tests, lint 0 errors.
+
 ## 0.1.29 — 2026-11-20
 
 - Details sheet (PR 39): the sheet no longer bounces up and down while metadata loads — its insets are now stable instead of depending on the sheet's current offset, and its inputs are scoped to the selected download; a dead import was removed.
