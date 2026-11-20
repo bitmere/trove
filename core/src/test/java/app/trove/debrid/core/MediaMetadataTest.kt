@@ -16,7 +16,9 @@ import kotlin.coroutines.coroutineContext
 class MediaMetadataTest {
     @get:Rule val folder = TemporaryFolder()
     private val movieQuery = MediaQuery("Example Film", 2026, "movie")
-    private val cachedMovie = MediaMetadata(movieQuery.title, movieQuery.year, movieQuery.type)
+    private val cachedMovie = MediaMetadata(
+        movieQuery.title, movieQuery.year, movieQuery.type, posterUrl = "https://images.example.invalid/cached.jpg",
+    )
     private val unexpectedNetwork = object : HttpTransport {
         override suspend fun execute(request: HttpRequest): HttpResponse =
             throw AssertionError("Network must not run")
@@ -50,6 +52,57 @@ class MediaMetadataTest {
         assertEquals(MediaQuery("Blade Runner 2049", null, null), parseMediaName("Blade Runner 2049"))
         assertEquals(MediaQuery("Blade Runner 2049", null, null), parseMediaName("Blade Runner 2049.1080p.mkv"))
         assertEquals(MediaQuery("Blade Runner 2049", 2017, null), parseMediaName("Blade Runner 2049.2017.1080p.mkv"))
+    }
+
+    @Test fun `strips edition and parenthetical dub tags before searching`() {
+        for (edition in listOf("Extended", "Unrated", "Directors.Cut", "Director's.Cut", "Remastered", "IMAX", "3D")) {
+            assertEquals(MediaQuery("Avatar", 2009, null), parseMediaName("Avatar.$edition.2009.1080p.mkv"))
+        }
+        assertEquals(MediaQuery("Avatar The Way of Water", 2022, null),
+            parseMediaName("Avatar.The.Way.of.Water.Extended.2022.1080p.mkv"))
+        assertEquals(MediaQuery("Blade Runner 2049", 2017, null),
+            parseMediaName("Blade.Runner.2049.(Hindi.Dubbed.2024).2017.1080p.mkv"))
+        assertEquals(MediaQuery("1917", null, null), parseMediaName("[GROUP] 1917 (Hindi Dubbed).1080p.mkv"))
+        assertEquals(MediaQuery("Avatar", 2009, null), parseMediaName("Avatar.Hindi.Dubbed.2009.1080p.mkv"))
+        assertEquals(MediaQuery("Avatar", 2009, null), parseMediaName("Avatar.Dual.Audio.2009.1080p.mkv"))
+    }
+
+    @Test fun `orders distinct variants by year edition article and raw title`() {
+        assertEquals(
+            listOf(
+                MediaQuery("The Extended Voyage", 2026, null),
+                MediaQuery("The Extended Voyage", null, null),
+                MediaQuery("The Voyage", 2026, null),
+                MediaQuery("Voyage", 2026, null),
+                MediaQuery("Voyage, The", 2026, null),
+                MediaQuery("The Extended Voyage Hindi Dubbed", 2026, null),
+            ),
+            mediaQueryVariants("The.Extended.Voyage.(Hindi.Dubbed).2026.1080p.mkv"),
+        )
+        assertEquals(
+            listOf("Voyage, The", "Voyage", "The Voyage"),
+            mediaQueryVariants("Voyage, The.2026.mkv").filter { it.year == 2026 }.map { it.title },
+        )
+    }
+
+    @Test fun `variants keep ambiguity strict and stop on the first hit`() = runBlocking {
+        val http = CinemetaTransport().apply {
+            catalog = """
+                {"metas":[
+                  {"id":"tt0000002","name":"The Example Film","year":"2026","type":"movie"},
+                  {"id":"tt0000003","name":"The Example Film","year":"2026","type":"movie"},
+                  {"id":"tt0000001","name":"Example Film","year":"2026","type":"movie"}
+                ]}
+            """.trimIndent()
+        }
+        val variants = mediaQueryVariants("The.Example.Film.(Hindi.Dubbed).2026.mkv")
+            .map { it.copy(type = "movie") }
+        assertEquals("tt0000001", CinemetaResolver(http).resolve(variants)?.imdbId)
+        assertEquals(
+            listOf("search=The%20Example%20Film.json", "search=The%20Example%20Film.json",
+                "search=Example%20Film.json", "tt0000001.json"),
+            http.requests.map { it.url.substringAfterLast('/') },
+        )
     }
 
     @Test fun `normalizes episode tokens and finds quality after source tags`() {
@@ -289,6 +342,20 @@ class MediaMetadataTest {
         }
     }
 
+    @Test fun `explicit refresh bypasses a miss but keeps the failure cooldown`() = runBlocking {
+        val http = CinemetaTransport().apply { catalog = """{"metas":[]}""" }
+        val resolver = CinemetaResolver(http) { 1000L }
+        assertNull(resolver.resolve(movieQuery))
+        assertNull(resolver.resolve(movieQuery))
+        assertEquals(1, http.requests.size)
+        http.status = 503
+        assertNull(resolver.resolve(movieQuery, bypassMiss = true))
+        assertEquals(2, http.requests.size)
+        http.status = 200
+        assertNull(resolver.resolve(movieQuery, bypassMiss = true))
+        assertEquals(2, http.requests.size)
+    }
+
     @Test fun `fresh disk entries skip network`() = runBlocking {
         val disk = MetadataDiskCache(folder.root)
         disk.put(movieQuery, cachedMovie)
@@ -439,6 +506,8 @@ class MediaMetadataTest {
                     request.url.endsWith("/3/configuration") -> HttpResponse(200,
                         """{"images":{"secure_base_url":"https://images.example.invalid/t/p/",
                             "poster_sizes":["w342","w500","original"]}}""")
+                    "/3/find/tt0000001?external_source=imdb_id" in request.url -> HttpResponse(200,
+                        """{"movie_results":[{"id":123,"poster_path":"/find.jpg"}]}""")
                     "/3/search/movie" in request.url -> HttpResponse(200,
                         """{"results":[{"id":123,"title":"Example Film","release_date":"2026-03-01",
                             "overview":"Fallback hit.","poster_path":"/s.jpg"}]}""")
@@ -466,7 +535,7 @@ class MediaMetadataTest {
         val result = resolver.resolve(movieQuery)
         assertEquals("Example Film", result?.title)
         assertEquals("Fallback hit.", result?.overview)
-        assertEquals("https://images.example.invalid/t/p/w500/d.jpg", result?.posterUrl)
+        assertEquals("https://images.example.invalid/t/p/w342/d.jpg", result?.posterUrl)
         assertTrue(tmdbCalls.isNotEmpty())
         assertTrue(tmdbCalls.all { it.headers["Authorization"] == "Bearer test-key" })
         val entry = disk.get(movieQuery)
@@ -475,7 +544,7 @@ class MediaMetadataTest {
         assertTrue(entry?.isFresh(System.currentTimeMillis()) == true)
     }
 
-    @Test fun `cinemeta hit never calls TMDB`() = runBlocking {
+    @Test fun `cinemeta hit with a poster never calls TMDB`() = runBlocking {
         val tmdbCalls = mutableListOf<HttpRequest>()
         val resolver = CinemetaResolver(
             CinemetaTransport(),
@@ -484,6 +553,58 @@ class MediaMetadataTest {
         val result = resolver.resolve(movieQuery)
         assertEquals("Example Film", result?.title)
         assertTrue(tmdbCalls.isEmpty())
+    }
+
+    @Test fun `posterless Cinemeta hit fills only the poster by IMDb id`() = runBlocking {
+        val http = CinemetaTransport().apply {
+            meta = """{"meta":{"id":"tt0000001","name":"Example Film","type":"movie","year":"2026",
+                "description":"Cinemeta synopsis","cast":["Cinemeta Actor"],"imdbRating":"7.4"}}"""
+        }
+        val withoutKeyCalls = mutableListOf<HttpRequest>()
+        val original = CinemetaResolver(http, tmdbResolver = TmdbResolver(tmdbTransport(withoutKeyCalls)) { null })
+            .resolve(movieQuery)
+        assertEquals("Cinemeta synopsis", original?.overview)
+        assertNull(original?.posterUrl)
+        assertTrue(withoutKeyCalls.isEmpty())
+
+        val calls = mutableListOf<HttpRequest>()
+        val result = CinemetaResolver(http, tmdbResolver = TmdbResolver(tmdbTransport(calls)) { "test-key" })
+            .resolve(movieQuery)
+        assertEquals(original?.copy(posterUrl = "https://images.example.invalid/t/p/w342/find.jpg"), result)
+        assertEquals(
+            listOf("find/tt0000001?external_source=imdb_id", "configuration"),
+            calls.map { it.url.substringAfter("/3/") },
+        )
+    }
+
+    @Test fun `fresh posterless disk entry revalidates and a filled entry skips network`() = runBlocking {
+        val disk = MetadataDiskCache(folder.root)
+        val incomplete = cachedMovie.copy(imdbId = "tt0000001", posterUrl = null, overview = "Cached synopsis")
+        disk.put(movieQuery, incomplete)
+        val calls = mutableListOf<HttpRequest>()
+        val result = CinemetaResolver(
+            unexpectedNetwork, diskCache = disk, tmdbResolver = TmdbResolver(tmdbTransport(calls)) { "test-key" },
+        ).resolve(movieQuery)
+        assertEquals(incomplete.copy(posterUrl = "https://images.example.invalid/t/p/w342/find.jpg"), result)
+        assertTrue(calls.any { "/3/find/tt0000001" in it.url })
+        assertEquals("tmdb", disk.get(movieQuery)?.source)
+
+        assertEquals(result, CinemetaResolver(
+            unexpectedNetwork, diskCache = disk, tmdbResolver = TmdbResolver(unexpectedNetwork) { "test-key" },
+        ).resolve(movieQuery))
+    }
+
+    @Test fun `posterless disk entry without an IMDb id uses title search`() = runBlocking {
+        val disk = MetadataDiskCache(folder.root)
+        val incomplete = cachedMovie.copy(posterUrl = null)
+        disk.put(movieQuery, incomplete)
+        val calls = mutableListOf<HttpRequest>()
+        val result = CinemetaResolver(
+            unexpectedNetwork, diskCache = disk, tmdbResolver = TmdbResolver(tmdbTransport(calls)) { "test-key" },
+        ).resolve(movieQuery)
+        assertEquals(incomplete.copy(posterUrl = "https://images.example.invalid/t/p/w342/s.jpg"), result)
+        assertTrue(calls.any { "/3/search/movie?query=Example%20Film" in it.url })
+        assertTrue(calls.none { "/3/find/" in it.url })
     }
 
     @Test fun `no TMDB key means the fallback makes no network call`() = runBlocking {

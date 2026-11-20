@@ -27,11 +27,21 @@ import app.trove.debrid.core.*
 import app.trove.debrid.ui.theme.TroveSpace
 import java.util.Locale
 
+internal data class DownloadDetailsState(
+    val metadata: MediaMetadata?,
+    val candidates: List<MediaCandidate>,
+    val hasOverride: Boolean,
+    val resolving: Boolean,
+    val playPending: Boolean,
+    val resolvingFileId: String?,
+    val error: String?,
+)
+
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 internal fun DownloadDetailsSheet(
     download: DebridDownload,
-    state: DownloadsUiState,
+    state: DownloadDetailsState,
     sheetState: SheetState,
     dismissing: Boolean,
     onClose: () -> Unit,
@@ -45,9 +55,8 @@ internal fun DownloadDetailsSheet(
     val visibleFiles = remember(download.files, showClutterFiles) {
         if (showClutterFiles) download.files else download.files.filterNot { isClutterFile(it.name) }
     }
-    val metadata = state.metadata[download.kind to download.id]
-    val candidates = state.candidates[download.kind to download.id].orEmpty()
-    val storedOverride = state.metadataOverrides[download.kind to download.id]
+    val metadata = state.metadata
+    val candidates = state.candidates
     val title = remember(download.name, metadata) {
         downloadIdentity(download, metadata).title
     }
@@ -59,15 +68,25 @@ internal fun DownloadDetailsSheet(
     var showAllEpisodes by remember(download.kind, download.id) { mutableStateOf(false) }
     val seasonEpisodes = remember(episodes, currentSeason) { episodes.filter { it.season == currentSeason } }
     val visibleEpisodes = if (showAllEpisodes) episodes else seasonEpisodes
-    val busy = state.resolvingDownload != null || state.playUrl != null || dismissing
-    val canClose = !busy || (state.resolvingDownload != null && download.files.isEmpty() && !dismissing)
+    val busy = state.resolving || state.playPending || dismissing
+    val canClose = !busy || (state.resolving && download.files.isEmpty() && !dismissing)
     val ready = download.status == DownloadStatus.READY && visibleFiles.isNotEmpty()
     ModalBottomSheet(
         onDismissRequest = { if (canClose) onClose() }, sheetState = sheetState,
         sheetGesturesEnabled = canClose,
+        // Keep measured content independent of the sheet offset. A device trace
+        // is still needed to confirm whether inset feedback caused the bounce.
+        contentWindowInsets = { WindowInsets(0, 0, 0, 0) },
+        dragHandle = {
+            // Read the dialog's safe area without subtracting the top inset
+            // Material marks consumed as the sheet moves.
+            val top = WindowInsets.safeDrawing.asPaddingValues().calculateTopPadding()
+            Box(Modifier.padding(top = top)) { BottomSheetDefaults.DragHandle() }
+        },
     ) {
+        val listInsets = WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Bottom)
         LazyColumn(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier.fillMaxWidth().padding(listInsets.asPaddingValues()),
             contentPadding = PaddingValues(start = TroveSpace.large, end = TroveSpace.large, bottom = TroveSpace.section),
             verticalArrangement = Arrangement.spacedBy(TroveSpace.medium),
         ) {
@@ -116,7 +135,7 @@ internal fun DownloadDetailsSheet(
                     }
                 }
             }
-            if (metadata != null && storedOverride != null) item {
+            if (metadata != null && state.hasOverride) item {
                 TextButton(onClick = onClearOverride) { Text(stringResource(R.string.clear_metadata_override)) }
             }
             if (metadata == null && candidates.isNotEmpty()) item {

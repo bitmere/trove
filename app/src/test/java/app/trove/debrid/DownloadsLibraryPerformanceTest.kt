@@ -4,7 +4,7 @@ import app.trove.debrid.core.DebridDownload
 import app.trove.debrid.core.DownloadKind
 import app.trove.debrid.core.DownloadSort
 import app.trove.debrid.core.MediaMetadata
-import app.trove.debrid.core.MediaQuery
+import app.trove.debrid.core.parseMediaName
 import app.trove.debrid.data.TroveRepository
 import app.trove.debrid.ui.downloads.DownloadsViewModel
 import kotlinx.coroutines.CompletableDeferred
@@ -29,11 +29,11 @@ class DownloadsLibraryPerformanceTest {
         val provider = FakeProvider(downloads = metadataRows())
         var calls = 0
         val repo = object : TroveRepository by FakeRepository(provider = provider) {
-            override suspend fun resolveMetadata(query: MediaQuery): MediaMetadata {
+            override suspend fun resolveMetadataForRelease(name: String, bypassMiss: Boolean): MediaMetadata {
                 calls++
                 // Let the collector observe each publication without StateFlow conflation.
                 yield()
-                return MediaMetadata(query.title, query.year, query.type)
+                return parseMediaName(name).let { MediaMetadata(it.title, it.year, it.type) }
             }
         }
         val vm = DownloadsViewModel(repo, StandardTestDispatcher(testScheduler))
@@ -53,9 +53,9 @@ class DownloadsLibraryPerformanceTest {
         val gate = CompletableDeferred<Unit>()
         var calls = 0
         val repo = object : TroveRepository by FakeRepository(provider = provider) {
-            override suspend fun resolveMetadata(query: MediaQuery): MediaMetadata {
+            override suspend fun resolveMetadataForRelease(name: String, bypassMiss: Boolean): MediaMetadata {
                 if (++calls > 10) gate.await()
-                return MediaMetadata(query.title, query.year, query.type)
+                return parseMediaName(name).let { MediaMetadata(it.title, it.year, it.type) }
             }
         }
         val vm = DownloadsViewModel(repo, StandardTestDispatcher(testScheduler))
@@ -75,14 +75,37 @@ class DownloadsLibraryPerformanceTest {
         val rows = metadataRows()
         val provider = FakeProvider(downloads = rows)
         val repo = object : TroveRepository by FakeRepository(provider = provider) {
-            override suspend fun resolveMetadata(query: MediaQuery) =
-                MediaMetadata(query.title, query.year, query.type)
+            override suspend fun resolveMetadataForRelease(name: String, bypassMiss: Boolean) =
+                parseMediaName(name).let { MediaMetadata(it.title, it.year, it.type) }
         }
         val vm = DownloadsViewModel(repo, StandardTestDispatcher(testScheduler))
         advanceUntilIdle()
 
         assertEquals(25, vm.state.value.metadata.size)
         assertEquals(rows.map { it.kind to it.id }, vm.state.value.metadata.keys.toList())
+    }
+
+    @Test fun `viewport rows resolve first with at most four active lookups`() = runTest {
+        val rows = metadataRows()
+        val gate = CompletableDeferred<Unit>()
+        val started = mutableListOf<String>()
+        val repo = object : TroveRepository by FakeRepository(provider = FakeProvider(downloads = rows)) {
+            override suspend fun resolveMetadataForRelease(name: String, bypassMiss: Boolean): MediaMetadata {
+                started += name
+                gate.await()
+                return MediaMetadata(name, null, null)
+            }
+        }
+        val vm = DownloadsViewModel(repo, StandardTestDispatcher(testScheduler))
+        val viewport = rows.takeLast(4)
+        vm.updateVisibleRows(DownloadKind.TORRENT, viewport.mapTo(HashSet()) { "${it.kind}:${it.id}" })
+        runCurrent()
+
+        assertEquals(viewport.map { it.name }, started)
+        gate.complete(Unit)
+        advanceUntilIdle()
+        assertEquals(rows.size, started.size)
+        assertEquals(rows.size, vm.state.value.metadata.size)
     }
 
     @Test fun `typing debounces results and settles after the delay`() = runTest {

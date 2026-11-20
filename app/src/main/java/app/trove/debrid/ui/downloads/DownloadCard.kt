@@ -96,7 +96,7 @@ internal fun DownloadCover(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(TroveSpace.medium),
     ) {
-        MetadataPoster(identity.posterUrl, metadata, refreshing)
+        MetadataPoster(identity.posterUrl, refreshing)
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(TroveSpace.micro)) {
             Text(identity.title, style = MaterialTheme.typography.titleMedium, fontFamily = SpaceGrotesk,
                 maxLines = 2, overflow = TextOverflow.Ellipsis)

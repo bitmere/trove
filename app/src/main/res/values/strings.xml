@@ -308,4 +308,5 @@
     <string name="theme_ember">Ember</string>
     <string name="theme_rose">Rose</string>
     <string name="theme_save_failed">Could not load or save your theme.</string>
+    <string name="retry_poster">Retry poster</string>
 </resources>

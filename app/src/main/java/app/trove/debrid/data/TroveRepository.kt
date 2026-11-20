@@ -86,6 +86,10 @@ interface TroveRepository {
     suspend fun restoreBackupSignIn(signIn: BackupSignIn): Unit = error("Backup sign-in unavailable")
     suspend fun claimClipboardOffer(text: String?): Boolean = false
     suspend fun resolveMetadata(query: app.trove.debrid.core.MediaQuery): app.trove.debrid.core.MediaMetadata? = null
+    suspend fun resolveMetadataForRelease(
+        name: String,
+        bypassMiss: Boolean = false,
+    ): app.trove.debrid.core.MediaMetadata? = resolveMetadata(app.trove.debrid.core.parseMediaName(name))
     /** Title matches for the picker when the automatic match fails.
      *  Listing candidates never resolves one. */
     suspend fun resolveMetadataCandidates(

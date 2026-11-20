@@ -20,6 +20,10 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -128,6 +132,9 @@ class DownloadsViewModel(
 
     private var refreshJob: Job? = null
     private var refreshVersion = 0
+    private var hydrationJob: Job? = null
+    private val hydrationQueue = LinkedHashMap<DownloadRef, Pair<DebridDownload, Boolean>>()
+    private var visibleRowKeys = emptySet<String>()
     private var libraryProvider: DebridProvider? = null
     // A restored prefix can be shorter than its saved server offset.
     // Revalidate page 0 before appending so no uncached rows are skipped.
@@ -179,7 +186,15 @@ class DownloadsViewModel(
     fun refresh(showIndicator: Boolean = true, fresh: Boolean) =
         refreshLibrary(showIndicator, fresh, restoreSnapshot = false)
 
-    private fun refreshLibrary(showIndicator: Boolean, fresh: Boolean, restoreSnapshot: Boolean) {
+    fun refreshFromUser(fresh: Boolean = true) =
+        refreshLibrary(showIndicator = true, fresh = fresh, restoreSnapshot = false, bypassMetadataMiss = true)
+
+    private fun refreshLibrary(
+        showIndicator: Boolean,
+        fresh: Boolean,
+        restoreSnapshot: Boolean,
+        bypassMetadataMiss: Boolean = false,
+    ) {
         refreshJob?.cancel()
         cachedTabs.clear()
         cancelPageJobs()
@@ -238,7 +253,7 @@ class DownloadsViewModel(
                 _state.update { it.copy(signedOut = false, accountLabel = accountLabel) }
                 if (!restored) resetPagination(keepRows = true, currentTab = _state.value.tab)
                 launchPage(provider, _state.value.tab, offset = 0, bypassCache = fresh,
-                    version = version, replace = true)
+                    version = version, replace = true, bypassMetadataMiss = bypassMetadataMiss)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -318,8 +333,19 @@ class DownloadsViewModel(
     }
 
     fun setTab(tab: DownloadKind) {
-        _state.update { it.copy(tab = tab) }
+        if (tab != _state.value.tab) {
+            cancelHydration()
+            visibleRowKeys = emptySet()
+            _state.update { it.copy(tab = tab) }
+            if (tab !in cachedTabs) {
+                enqueueHydration(_state.value.pagedByTab[tab]?.loaded.orEmpty(), refreshVersion)
+            }
+        }
         ensureTabLoaded(tab)
+    }
+
+    internal fun updateVisibleRows(tab: DownloadKind, keys: Set<String>) {
+        if (tab == _state.value.tab) visibleRowKeys = keys
     }
 
     fun setQuery(query: String) {
@@ -436,6 +462,7 @@ class DownloadsViewModel(
         bypassCache: Boolean,
         version: Int,
         replace: Boolean,
+        bypassMetadataMiss: Boolean = false,
     ) {
         pageJobs[tab]?.cancel()
         _state.update { state ->
@@ -444,11 +471,11 @@ class DownloadsViewModel(
                 (tab to current.copy(pageLoading = true, pageError = null, visited = true)))
         }
         pageJobs[tab] = viewModelScope.launch {
-            fetchPage(provider, tab, offset, bypassCache, version, replace)
+            fetchPage(provider, tab, offset, bypassCache, version, replace, bypassMetadataMiss)
         }
     }
 
-    /** Fetches one page, publishes it, and hydrates metadata for its
+    /** Fetches one page, publishes it, and queues metadata hydration for its
      *  new rows. Returns STALE when a newer refresh / sort change /
      *  provider switch has superseded this page: nothing is
      *  published. A failed page never clears loaded rows. */
@@ -459,6 +486,7 @@ class DownloadsViewModel(
         bypassCache: Boolean,
         version: Int,
         replace: Boolean,
+        bypassMetadataMiss: Boolean = false,
     ): PageOutcome {
         _state.update { state ->
             val current = state.pagedByTab[tab] ?: PagedTabState()
@@ -536,13 +564,10 @@ class DownloadsViewModel(
         scheduleSnapshotSave(provider)
         schedulePreparation(debounced = false)
         if (offset == 0 && _state.value.query.isNotBlank()) ensureFullSync(tab)
-        // Rows that still lack metadata after the publish need
-        // resolution: new keys, renamed rows (their retained metadata
-        // was dropped by the name check above), and previous misses
-        // (never stored). Retained successes are already in the map,
-        // so they are skipped here and again inside hydrateRows.
-        val newRows = merged.filter { (it.kind to it.id) !in _state.value.metadata }
-        hydrateRows(newRows, version)
+        if (tab == _state.value.tab) {
+            val previousIds = if (replace) emptySet() else oldTab.loaded.mapTo(HashSet()) { it.id }
+            enqueueHydration(page.rows.filterNot { it.id in previousIds }, version, bypassMetadataMiss)
+        }
         return PageOutcome.LOADED
     }
 
@@ -572,6 +597,7 @@ class DownloadsViewModel(
     private fun cancelPageJobs() {
         pageJobs.values.forEach { it.cancel() }
         pageJobs.clear()
+        cancelHydration()
     }
 
     // ------------------------------------------------------------------
@@ -615,51 +641,101 @@ class DownloadsViewModel(
     }
 
     // ------------------------------------------------------------------
-    // Metadata hydration (per page, batched as before)
+    // Metadata hydration for the selected tab
     // ------------------------------------------------------------------
 
-    /** Resolves metadata for [rows] only, in arrival order, flushing
-     *  every 10 rows / 200 ms. The [version] guard drops stale
-     *  batches after a refresh, sort change, or provider switch. */
-    private suspend fun hydrateRows(rows: List<DebridDownload>, version: Int) {
+    private fun cancelHydration() {
+        hydrationJob?.cancel()
+        hydrationJob = null
+        hydrationQueue.clear()
+    }
+
+    private fun enqueueHydration(rows: List<DebridDownload>, version: Int, bypassMiss: Boolean = false) {
+        val metadata = _state.value.metadata
+        for (download in rows) {
+            if ((download.kind to download.id) in metadata) continue
+            val ref = DownloadRef(download.kind, download.id)
+            val queued = hydrationQueue[ref]
+            if (queued == null || queued.first != download || (bypassMiss && !queued.second)) {
+                hydrationQueue[ref] = download to bypassMiss
+            }
+        }
+        if (hydrationQueue.isEmpty() || hydrationJob?.isActive == true) return
+        hydrationJob = viewModelScope.launch { hydrateRows(version) }
+    }
+
+    private suspend fun hydrateRows(version: Int) {
+        // Layout may not have reported the viewport yet on the first page.
+        // Seed its first batch in display order when there is no viewport.
+        val initialKeys = if (visibleRowKeys.isEmpty() && hydrationQueue.size > 4) {
+            val state = _state.value
+            val rows = hydrationQueue.values.map { it.first }
+            withContext(backgroundDispatcher) {
+                prepareVisible(rows, state.query, state.sort, state.preferWords)[state.tab]
+                    .orEmpty().take(4).mapTo(HashSet()) { "${it.kind}:${it.id}" }
+            }
+        } else emptySet()
+
         val pending = LinkedHashMap<Pair<DownloadKind, String>, MediaMetadata>()
         val pendingOverrides = LinkedHashMap<Pair<DownloadKind, String>, MetadataOverride>()
         var lastFlush = System.currentTimeMillis()
 
         fun flushMetadata() {
-            if (version != refreshVersion || (pending.isEmpty() && pendingOverrides.isEmpty())) return
-            _state.update {
-                it.copy(metadata = it.metadata + pending,
-                    metadataOverrides = it.metadataOverrides + pendingOverrides)
+            if (pending.isEmpty()) return
+            _state.update { state ->
+                val newMetadata = pending.filterKeys { it !in state.metadata }
+                state.copy(
+                    metadata = state.metadata + newMetadata,
+                    metadataOverrides = state.metadataOverrides + pendingOverrides.filterKeys { it in newMetadata },
+                )
             }
             pending.clear()
             pendingOverrides.clear()
             lastFlush = System.currentTimeMillis()
         }
 
-        // Resolve sequentially to preserve arrival order and bound Cinemeta traffic.
-        for (download in rows) {
+        var initialBatch = true
+        while (version == refreshVersion && hydrationQueue.isNotEmpty()) {
+            val visible = if (initialBatch) visibleRowKeys.ifEmpty { initialKeys } else visibleRowKeys
+            initialBatch = false
+            val batchSize = minOf(4, 10 - pending.size)
+            val prioritized = hydrationQueue.values.asSequence()
+                .filter { (row, _) -> "${row.kind}:${row.id}" in visible }
+                .take(batchSize).toList()
+            val batch = prioritized.ifEmpty { hydrationQueue.values.take(batchSize) }
+            val results = coroutineScope {
+                batch.map { (download, bypassMiss) ->
+                    async {
+                        val key = download.kind to download.id
+                        if (key in _state.value.metadata) return@async null
+                        val storedOverride = try { repository.loadMetadataOverride(DownloadRef(download.kind, download.id)) }
+                            catch (e: CancellationException) { throw e }
+                            catch (_: Exception) { null }
+                        val metadata = try {
+                            storedOverride?.let { repository.resolveMetadataById(it.imdbId, it.type) }
+                                ?: repository.resolveMetadataForRelease(download.name, bypassMiss)
+                        } catch (e: CancellationException) { throw e }
+                          catch (_: Exception) { null }
+                        if (metadata == null) null else Triple(key, metadata, storedOverride)
+                    }
+                }.awaitAll().filterNotNull()
+            }
+            currentCoroutineContext().ensureActive()
             if (version != refreshVersion) return
-            val key = download.kind to download.id
-            // Retained successes already match this row's name and identity.
-            if (key in _state.value.metadata) continue
-            val query = app.trove.debrid.core.parseMediaName(download.name)
-            // A stored pick wins over the automatic match, so the
-            // card and the details sheet show the picked title.
-            val storedOverride = try { repository.loadMetadataOverride(DownloadRef(download.kind, download.id)) }
-                catch (e: CancellationException) { throw e }
-                catch (_: Exception) { null }
-            val metadata = try {
-                storedOverride?.let { repository.resolveMetadataById(it.imdbId, it.type) }
-                    ?: repository.resolveMetadata(query)
-            } catch (e: CancellationException) { throw e }
-              catch (_: Exception) { null }
-            if (version != refreshVersion) return
-            if (metadata != null) {
+
+            // A new page can replace a row while its previous name is resolving.
+            val currentRows = batch.filter { request ->
+                val row = request.first
+                hydrationQueue.remove(DownloadRef(row.kind, row.id), request)
+            }.mapTo(HashSet()) { (row, _) -> row.kind to row.id }
+            for ((key, metadata, storedOverride) in results) {
+                if (key !in currentRows) continue
                 pending[key] = metadata
                 if (storedOverride != null) pendingOverrides[key] = storedOverride
             }
-            if (pending.size >= 10 || System.currentTimeMillis() - lastFlush >= 200) {
+            val viewportFilled = visibleRowKeys.isNotEmpty() && prioritized.isNotEmpty() &&
+                hydrationQueue.values.none { (row, _) -> "${row.kind}:${row.id}" in visibleRowKeys }
+            if (viewportFilled || pending.size >= 10 || System.currentTimeMillis() - lastFlush >= 200) {
                 flushMetadata()
             }
         }
@@ -753,6 +829,7 @@ class DownloadsViewModel(
             try { repository.saveMetadataOverride(DownloadRef(download.kind, download.id), pick) }
                 catch (e: CancellationException) { throw e }
                 catch (_: Exception) { return@launch }
+            hydrationQueue.remove(DownloadRef(download.kind, download.id))
             val metadata = try { repository.resolveMetadataById(candidate.imdbId, candidate.type) }
                 catch (e: CancellationException) { throw e }
                 catch (_: Exception) { null }
@@ -774,8 +851,9 @@ class DownloadsViewModel(
             try { repository.clearMetadataOverride(DownloadRef(download.kind, download.id)) }
                 catch (e: CancellationException) { throw e }
                 catch (_: Exception) { return@launch }
+            hydrationQueue.remove(DownloadRef(download.kind, download.id))
             _state.update { it.copy(metadataOverrides = it.metadataOverrides - key, metadata = it.metadata - key) }
-            val metadata = try { repository.resolveMetadata(app.trove.debrid.core.parseMediaName(download.name)) }
+            val metadata = try { repository.resolveMetadataForRelease(download.name) }
                 catch (e: CancellationException) { throw e }
                 catch (_: Exception) { null }
             if (metadata != null) {

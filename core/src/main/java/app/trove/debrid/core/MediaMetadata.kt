@@ -8,6 +8,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.sync.withLock
 import java.net.URI
 import java.net.URLEncoder
@@ -47,7 +49,7 @@ private val episode = Regex("(?i)\\b(?:s(\\d{1,2})(?:e(\\d{1,3}))?|(\\d{1,2})x(\
 private val absoluteEpisode = Regex("(?:\\s+|-+)(\\d{2,4})$")
 private val imdbIdPattern = Regex("tt\\d+")
 private val videoId = Regex("tt\\d+:(-?\\d+):(-?\\d+)")
-private val releaseTag = Regex("(?i)\\b(?:2160p|1080[pi]|720p|480p|4k|web[ -]?(?:rip|dl)|bluray|blu[ -]ray|b[dr]rip|dvdrip|hdtv|remux|hevc|avc|[xh][ .-]?26[45]|hdr10?\\+?|dv|aac|dts|ddp|ac3|multi|dual|proper|repack)\\b")
+private val releaseTag = Regex("(?i)\\b(?:2160p|1080[pi]|720p|480p|4k|web[ -]?(?:rip|dl)|bluray|blu[ -]ray|b[dr]rip|dvdrip|hdtv|remux|hevc|avc|[xh][ .-]?26[45]|hdr10?\\+?|dv|aac|dts|ddp|ac3|multi|dual(?![ -]+audio)|proper|repack)\\b")
 
 fun parseReleaseDetails(name: String): ReleaseDetails {
     if (name.contains("://") || name.startsWith("magnet:", true)) return ReleaseDetails(null, null)
@@ -77,11 +79,48 @@ fun matchingEpisode(episodes: List<MediaEpisode>, episodeToken: String?): MediaE
     return episodes.firstOrNull { it.season == season && it.episode == number }
 }
 
-fun parseMediaName(name: String): MediaQuery {
+private val parenthetical = Regex("\\([^()]*\\)")
+private val editionTag = Regex("(?i)\\b(?:extended|unrated|director['’]?s[ -]+cut|remastered|imax|3d)\\b")
+private val dubTag = Regex(
+    "(?i)\\b(?:(?:(?:hindi|english|tamil|telugu|malayalam|kannada)[ -]+)?dub(?:bed)?|dual[ -]+audio)\\b",
+)
+
+fun parseMediaName(name: String): MediaQuery = parseMediaRelease(name, clean = true)
+
+fun mediaQueryVariants(name: String): List<MediaQuery> {
+    val query = parseMediaName(name)
+    if (query.title.isBlank()) return listOf(query)
+    val editionStripped = cleanTitle(query.title.replace(editionTag, " "))
+    return buildList {
+        add(query)
+        add(query.copy(year = null))
+        if (editionStripped.isNotBlank()) add(query.copy(title = editionStripped))
+        val title = editionStripped.ifBlank { query.title }
+        when {
+            title.startsWith("The ", ignoreCase = true) -> {
+                val rest = title.drop(4)
+                add(query.copy(title = rest))
+                add(query.copy(title = "$rest, The"))
+            }
+            title.endsWith(", The", ignoreCase = true) -> {
+                val rest = title.dropLast(5).trimEnd()
+                add(query.copy(title = rest))
+                add(query.copy(title = "The $rest"))
+            }
+        }
+        add(parseMediaRelease(name, clean = false))
+    }.distinctBy { it.copy(title = normalizedTitle(it.title)) }
+}
+
+private fun cleanTitle(title: String): String = title.replace(Regex("[(){}\\[\\]]"), " ")
+    .replace(Regex("\\s+"), " ").trim(' ', '-')
+
+private fun parseMediaRelease(name: String, clean: Boolean): MediaQuery {
     // URLs and magnets must never become third-party search requests.
     if (name.contains("://") || name.startsWith("magnet:", true)) return MediaQuery("", null, null)
-    val base = name.replace('\\', '/').substringAfterLast('/').replace(extension, "")
+    val raw = name.replace('\\', '/').substringAfterLast('/').replace(extension, "")
         .replace(Regex("\\[(?!(?:19|20)\\d{2}])[^]]*]"), " ").replace('.', ' ').replace('_', ' ')
+    val base = (if (clean) raw.replace(parenthetical, " ") else raw).trim()
     val ep = episode.find(base)
     val tag = releaseTag.find(base)
     val boundary = listOfNotNull(ep?.range?.first, tag?.range?.first).minOrNull() ?: base.length
@@ -89,8 +128,18 @@ fun parseMediaName(name: String): MediaQuery {
     val year = yearToken.findAll(base.take(boundary))
         .lastOrNull { it.range.first > 0 && it.value.toInt() <= latestYear }
     val end = minOf(boundary, year?.range?.first ?: base.length)
-    val title = base.take(end).replace(Regex("[(){}\\[\\]]"), " ")
-        .replace(Regex("\\s+"), " ").trim(' ', '-')
+    var title = cleanTitle(base.take(end))
+    if (clean) {
+        // Strip trailing release qualifiers while preserving words inside a title.
+        while (true) {
+            val tag = sequenceOf(editionTag, dubTag).firstNotNullOfOrNull { pattern ->
+                pattern.findAll(title).lastOrNull()?.takeIf { it.range.last == title.lastIndex }
+            } ?: break
+            val stripped = cleanTitle(title.take(tag.range.first))
+            if (stripped.isBlank()) break
+            title = stripped
+        }
+    }
     val absolute = if (ep == null) absoluteEpisode.find(title) else null
     val seriesTitle = absolute?.takeUnless { yearToken.matches(it.groupValues[1]) }
         ?.takeIf { it.groupValues[1].length >= 3 && it.groupValues[1].toInt() > 100 }
@@ -111,15 +160,13 @@ fun publicPosterUrl(value: String?): String? = value?.takeIf {
         uri.rawQuery == null && uri.fragment == null && !it.contains("requestdl", true)
 }
 
-/** Bounded session and optional disk cache. The mutex serializes catalog traffic. */
+/** Bounded session and optional disk cache with independent lookup lanes. */
 class CinemetaResolver(
     private val transport: HttpTransport,
     private val now: () -> Long = System::currentTimeMillis,
     private val diskCache: MetadataDiskCache? = null,
     private val revalidationScope: CoroutineScope? = null,
-    /** Opt-in TMDB fallback, consulted only after Cinemeta yields
-     *  nothing. Null (the default) means Cinemeta is the only source;
-     *  a resolver with no key configured skips itself silently. */
+    /** Optional fallback for missing Cinemeta matches and posters. */
     private val tmdbResolver: TmdbResolver? = null,
 ) {
     constructor(transport: HttpTransport, clock: () -> Long) : this(transport, now = clock)
@@ -131,73 +178,114 @@ class CinemetaResolver(
         const val MAX_CANDIDATES = 5
     }
 
-    private data class CacheEntry(val value: MediaMetadata?, val expires: Long)
-    private val mutex = Mutex()
+    private data class CacheEntry(val value: MediaMetadata?, val expires: Long, val miss: Boolean = false)
+    private val cacheMutex = Mutex()
+    private val lookupLanes = Array(32) { Mutex() }
+    private val network = Semaphore(4)
+
+    private fun lookupLane(key: MediaQuery): Mutex = lookupLanes[(key.hashCode() and Int.MAX_VALUE) % lookupLanes.size]
     private val refreshing = ConcurrentHashMap<MediaQuery, Unit>()
     private val cache = object : LinkedHashMap<MediaQuery, CacheEntry>(128, .75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<MediaQuery, CacheEntry>?): Boolean = size > 256
     }
 
-    suspend fun resolve(query: MediaQuery): MediaMetadata? = mutex.withLock {
-        if (query.title.isBlank() || query.title.length > 160) return@withLock null
-        val key = query.copy(title = normalizedTitle(query.title))
-        cache[key]?.takeIf { it.expires > now() }?.let { return@withLock it.value }
+    suspend fun resolve(query: MediaQuery, bypassMiss: Boolean = false): MediaMetadata? =
+        resolve(listOf(query), bypassMiss)
 
-        val diskEntry = diskCache?.get(query)
-        if (diskEntry?.isFresh(now()) == true) {
-            cache[key] = CacheEntry(diskEntry.metadata, now() + SUCCESS_TTL_MS)
-            return@withLock diskEntry.metadata
-        }
-        val stale = diskEntry?.metadata
-        if (stale != null && revalidationScope != null) {
-            if (refreshing.putIfAbsent(key, Unit) == null) {
-                revalidationScope.launch {
-                    mutex.withLock { lookupAndStore(query, key, stale, background = true) }
-                }.invokeOnCompletion { refreshing.remove(key) }
+    suspend fun resolve(queries: List<MediaQuery>, bypassMiss: Boolean = false): MediaMetadata? {
+        val query = queries.firstOrNull() ?: return null
+        if (query.title.isBlank() || query.title.length > 160) return null
+        val key = query.copy(title = normalizedTitle(query.title))
+        return lookupLane(key).withLock {
+            val cached = cacheMutex.withLock {
+                cache[key]?.takeIf { it.expires > now() && !(bypassMiss && it.miss) }
             }
-            return@withLock stale
+            if (cached != null) return@withLock cached.value
+
+            val diskEntry = diskCache?.get(query)
+            if (diskEntry?.isFresh(now()) == true) {
+                val metadata = diskEntry.metadata
+                if (metadata.posterUrl != null) {
+                    cacheMutex.withLock { cache[key] = CacheEntry(metadata, now() + SUCCESS_TTL_MS) }
+                    return@withLock metadata
+                }
+                return@withLock network.withPermit { lookupAndStore(queries, key, metadata, diskEntry.source) }
+            }
+            val stale = diskEntry?.metadata
+            if (stale != null && revalidationScope != null) {
+                if (refreshing.putIfAbsent(key, Unit) == null) {
+                    revalidationScope.launch {
+                        lookupLane(key).withLock {
+                            network.withPermit { lookupAndStore(queries, key, stale, background = true) }
+                        }
+                    }.invokeOnCompletion { refreshing.remove(key) }
+                }
+                return@withLock stale
+            }
+            network.withPermit { lookupAndStore(queries, key, stale) }
         }
-        lookupAndStore(query, key, stale)
     }
 
     private suspend fun lookupAndStore(
-        query: MediaQuery,
+        queries: List<MediaQuery>,
         key: MediaQuery,
         stale: MediaMetadata?,
+        incompleteSource: String? = null,
         background: Boolean = false,
     ): MediaMetadata? {
+        val query = queries.first()
         var ttl = MISS_TTL_MS
-        val result = try {
-            lookup(query)
+        val result = if (incompleteSource != null) stale else try {
+            queries.firstNotNullOfOrNull { variant ->
+                if (variant.title.isBlank() || variant.title.length > 160) null else lookup(variant)
+            }
         } catch (e: CancellationException) {
             throw e
         } catch (_: Exception) {
             ttl = FAILURE_TTL_MS
             null
         }
-        // Fallback only: Cinemeta first, TMDB only when it yielded
-        // nothing. A keyless resolver returns null without a call.
-        val tmdbResult = if (result == null) {
+        // For incomplete disk entries, keep the cached identity and text.
+        val poster = result?.takeIf { it.posterUrl == null }?.let { metadata ->
+            tmdbResolver?.resolvePoster(
+                MediaQuery(metadata.title, metadata.year, metadata.type),
+                metadata.imdbId,
+            )
+        }
+        val refreshedPoster = if (poster == null && incompleteSource == "cinemeta") {
             try {
-                tmdbResolver?.resolve(query)
+                val id = result?.imdbId
+                val type = result?.type
+                if (id != null && type != null) lookupById(id, type)?.posterUrl
+                else queries.firstNotNullOfOrNull { lookup(it) }?.posterUrl
             } catch (e: CancellationException) {
                 throw e
             } catch (_: Exception) {
                 null
             }
-        } else {
-            null
-        }
-        val resolved = result ?: tmdbResult
+        } else null
+        val tmdbResult = if (result == null) tmdbResolver?.let { tmdb ->
+            queries.firstNotNullOfOrNull { variant -> tmdb.resolve(variant) }
+        } else null
+        val resolved = result?.let { metadata ->
+            (poster ?: refreshedPoster)?.let { metadata.copy(posterUrl = it) } ?: metadata
+        } ?: tmdbResult
         coroutineContext.ensureActive()
 
         if (resolved != null) {
-            // The disk entry records its source, so the 6-month cap
-            // on TMDB-sourced fields stays auditable per entry.
-            runCatching { diskCache?.put(query, resolved, if (tmdbResult != null) "tmdb" else "cinemeta") }
-            cache[key] = CacheEntry(resolved, now() + SUCCESS_TTL_MS)
+            if (incompleteSource == null || resolved.posterUrl != null) {
+                val source = if (poster != null || tmdbResult != null) "tmdb" else incompleteSource ?: "cinemeta"
+                diskCache?.put(query, resolved, source)
+            }
+            val successTtl = if (resolved.posterUrl == null) MISS_TTL_MS else SUCCESS_TTL_MS
+            // A posterless success expires on the miss schedule and is
+            // re-checked on an explicit refresh, like a miss.
+            cacheMutex.withLock { cache[key] = CacheEntry(resolved, now() + successTtl, miss = resolved.posterUrl == null) }
         } else if (!background) {
-            cache[key] = CacheEntry(stale, now() + if (stale == null) ttl else FAILURE_TTL_MS)
+            cacheMutex.withLock {
+                cache[key] = CacheEntry(stale, now() + if (stale == null) ttl else FAILURE_TTL_MS,
+                    miss = stale == null && ttl == MISS_TTL_MS)
+            }
         }
         return resolved ?: stale
     }
@@ -212,8 +300,8 @@ class CinemetaResolver(
      *  fails (ambiguous or no-match). Reuses the catalog fetch the
      *  resolver already does — no new network call per candidate — and
      *  never resolves anything itself. */
-    suspend fun candidates(query: MediaQuery): List<MediaCandidate> = mutex.withLock {
-        if (query.title.isBlank() || query.title.length > 160) return@withLock emptyList()
+    suspend fun candidates(query: MediaQuery): List<MediaCandidate> = network.withPermit {
+        if (query.title.isBlank() || query.title.length > 160) return@withPermit emptyList()
         fetchTitleMatches(query).take(MAX_CANDIDATES).mapNotNull { obj ->
             val id = obj.optString("id")?.takeIf { it.matches(imdbIdPattern) } ?: return@mapNotNull null
             val title = obj.optString("name")?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
@@ -226,10 +314,18 @@ class CinemetaResolver(
      *  the shared disk cache: the pick is per download, and a disk
      *  entry keyed by title would leak it to every other download
      *  with the same parsed title. */
-    suspend fun resolveById(imdbId: String, type: String): MediaMetadata? = mutex.withLock {
-        if (!imdbId.matches(imdbIdPattern) || type !in listOf("movie", "series")) return@withLock null
-        val detail = get("meta/$type/$imdbId.json").getAsJsonObject("meta") ?: return@withLock null
-        parseDetail(detail, imdbId, type)
+    suspend fun resolveById(imdbId: String, type: String): MediaMetadata? =
+        network.withPermit {
+            val metadata = lookupById(imdbId, type) ?: return@withPermit null
+            if (metadata.posterUrl != null) return@withPermit metadata
+            val poster = tmdbResolver?.resolvePoster(MediaQuery(metadata.title, metadata.year, type), imdbId)
+            if (poster == null) metadata else metadata.copy(posterUrl = poster)
+        }
+
+    private suspend fun lookupById(imdbId: String, type: String): MediaMetadata? {
+        if (!imdbId.matches(imdbIdPattern) || type !in listOf("movie", "series")) return null
+        val detail = get("meta/$type/$imdbId.json").getAsJsonObject("meta") ?: return null
+        return parseDetail(detail, imdbId, type)
     }
 
     private suspend fun lookup(query: MediaQuery): MediaMetadata? {

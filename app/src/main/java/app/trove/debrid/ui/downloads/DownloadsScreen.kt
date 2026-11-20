@@ -3,7 +3,6 @@ package app.trove.debrid.ui.downloads
 import app.trove.debrid.R
 import androidx.compose.ui.res.stringResource
 
-import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.FlowRow
@@ -114,6 +113,10 @@ fun DownloadsScreen(
         snapshotFlow { pagerState.currentPage }.collect { page ->
             viewModel.setTab(DownloadKind.entries[page])
         }
+    }
+    LaunchedEffect(selectedTab, listState, viewModel) {
+        snapshotFlow { listState.layoutInfo.visibleItemsInfo.mapNotNull { it.key as? String }.toSet() }
+            .collect { viewModel.updateVisibleRows(selectedTab, it) }
     }
     val searchFocus = remember { FocusRequester() }
     val keyboard = LocalSoftwareKeyboardController.current
@@ -392,7 +395,7 @@ fun DownloadsScreen(
                     else -> {
                         PullToRefreshBox(
                             isRefreshing = state.refreshing,
-                            onRefresh = { viewModel.refresh(fresh = true) },
+                            onRefresh = { viewModel.refreshFromUser() },
                             modifier = Modifier.fillMaxSize(),
                         ) {
                             if (pageDownloads.isEmpty()) {
@@ -403,7 +406,7 @@ fun DownloadsScreen(
                                     LibraryLoading()
                                 } else {
                                     LibraryEmptyState(tab, state.query, state.loadError, onAdd,
-                                        { viewModel.setQuery("") }, viewModel::refresh)
+                                        { viewModel.setQuery("") }, { viewModel.refreshFromUser(fresh = false) })
                                 }
                             } else {
                                 LazyColumn(
@@ -472,11 +475,22 @@ fun DownloadsScreen(
     }
 
     state.filePicker?.let { download ->
+        val key = download.kind to download.id
+        val metadata = state.metadata[key]
+        val candidates = state.candidates[key].orEmpty()
+        val hasOverride = key in state.metadataOverrides
+        val resolving = state.resolvingDownload != null
+        val playPending = state.playUrl != null
+        val resolvingFileId = state.resolvingFileId.takeIf { state.resolvingDownload == key }
+        val error = state.error
+        val details = remember(metadata, candidates, hasOverride, resolving, playPending, resolvingFileId, error) {
+            DownloadDetailsState(metadata, candidates, hasOverride, resolving, playPending, resolvingFileId, error)
+        }
         DownloadDetailsSheet(
-            download = download, state = state, sheetState = detailsSheetState,
+            download = download, state = details, sheetState = detailsSheetState,
             dismissing = dismissingForPlayback, showClutterFiles = state.showClutterFiles,
             onClose = {
-                if (state.resolvingDownload != null && download.files.isEmpty()) {
+                if (resolving && download.files.isEmpty()) {
                     viewModel.dismissFilePicker()
                 } else {
                     scope.launch { detailsSheetState.hide(); viewModel.dismissFilePicker() }
