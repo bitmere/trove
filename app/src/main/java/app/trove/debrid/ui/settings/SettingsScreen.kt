@@ -7,9 +7,11 @@ import app.trove.debrid.R
 import androidx.activity.compose.BackHandler
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
@@ -185,20 +187,13 @@ private fun ProviderSection(
     val enabled = canEdit && !saving
     val credential = descriptor.field(state)
     val showCredential = descriptor.showCredential(state)
-    Surface(shape = MaterialTheme.shapes.extraLarge, color = MaterialTheme.colorScheme.primaryContainer) {
-        Column(
-            Modifier.fillMaxWidth().padding(TroveSpace.large),
-            verticalArrangement = Arrangement.spacedBy(TroveSpace.small),
-        ) {
-            Text(stringResource(descriptor.title), style = MaterialTheme.typography.headlineMedium)
-            Text(
-                stringResource(if (hasKey) R.string.connected_account else R.string.connect_library),
-                style = MaterialTheme.typography.titleMedium,
-            )
-        }
-    }
-    descriptor.connectionHeading?.let {
-        Text(stringResource(it), style = MaterialTheme.typography.titleLarge)
+    Column(verticalArrangement = Arrangement.spacedBy(TroveSpace.small)) {
+        Text(stringResource(descriptor.title), style = MaterialTheme.typography.headlineSmall)
+        Text(
+            stringResource(if (hasKey) R.string.connected_account else R.string.connect_library),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
     Text(
         if (hasKey) descriptor.savedLabel(state) ?: stringResource(descriptor.credentialSaved)
@@ -402,11 +397,22 @@ private fun LibraryContent(state: SettingsUiState, canEdit: Boolean, viewModel: 
     if (state.tmdbKeyError) {
         Feedback(stringResource(R.string.tmdb_key_failed), error = true)
     }
-    Text(
-        stringResource(R.string.tmdb_attribution),
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(TroveSpace.medium),
+    ) {
+        Image(
+            painterResource(R.drawable.ic_tmdb_logo),
+            contentDescription = stringResource(R.string.tmdb_logo),
+            modifier = Modifier.width(96.dp),
+        )
+        Text(
+            stringResource(R.string.tmdb_attribution),
+            modifier = Modifier.weight(1f),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
 }
 
 @Composable

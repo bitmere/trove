@@ -7,6 +7,8 @@ import app.trove.debrid.core.MediaMetadata
 import app.trove.debrid.ui.downloads.baseFileName
 import app.trove.debrid.ui.downloads.downloadCoverSubtitle
 import app.trove.debrid.ui.downloads.formatSize
+import app.trove.debrid.ui.downloads.formatCount
+import app.trove.debrid.ui.downloads.shouldShowGoToTop
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
@@ -53,6 +55,20 @@ class DownloadPresentationTest {
         for (count in listOf(0, 75, 1000, 10000)) {
             assertEquals(count.toString(), app.trove.debrid.ui.downloads.formatCount(count))
         }
+    }
+
+    @Test
+    fun `tab counts append a plus only while more pages remain`() {
+        assertEquals("128+", formatCount(128, hasMore = true))
+        assertEquals("128", formatCount(128, hasMore = false))
+    }
+
+    @Test
+    fun `go to top starts after any scroll and requires a visible download`() {
+        assertFalse(shouldShowGoToTop(true, 0, 0))
+        assertTrue(shouldShowGoToTop(true, 0, 1))
+        assertTrue(shouldShowGoToTop(true, 1, 0))
+        assertFalse(shouldShowGoToTop(false, 10, 1))
     }
 
     @Test

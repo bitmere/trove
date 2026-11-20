@@ -5,7 +5,11 @@ import app.trove.debrid.core.DownloadStatus
 import app.trove.debrid.core.MediaMetadata
 import java.util.Locale
 
-fun formatCount(count: Int): String = count.toString()
+fun formatCount(count: Int, hasMore: Boolean = false): String =
+    if (hasMore) "$count+" else count.toString()
+
+internal fun shouldShowGoToTop(hasDownloads: Boolean, firstIndex: Int, firstOffset: Int): Boolean =
+    hasDownloads && (firstIndex > 0 || firstOffset > 0)
 
 fun downloadCoverSubtitle(
     identity: MediaMetadata,

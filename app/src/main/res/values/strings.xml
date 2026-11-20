@@ -1,12 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="file_read_failed">Couldn\'t read that file. Choose it again.</string>
-    <string name="library_subtitle">Your cloud library</string>
     <string name="app_name">Trove</string>
     <string name="account_settings">Account and Settings</string>
     <string name="search_downloads">Search downloads</string>
     <string name="clear_search">Clear search</string>
-    <string name="reset_search">Reset search</string>
+    <string name="reset">Reset</string>
     <string name="go_to_top">Go to top</string>
     <string name="settings">Settings</string>
     <string name="delete_title">Delete download?</string>
@@ -42,6 +41,7 @@
     <string name="no_matches">No matches</string>
     <string name="empty_library">Room for your next find</string>
     <string name="try_again">Try again</string>
+    <string name="loading_library">Loading library…</string>
     <string name="loading_more">Loading more…</string>
     <string name="add_download">Add download</string>
     <string name="shortcut_add">Add</string>
@@ -57,7 +57,6 @@
     <string name="torbox">TorBox</string>
     <string name="connected_account">Connected account</string>
     <string name="connect_library">Connect your library</string>
-    <string name="connection">Connection</string>
     <string name="key_saved">Key saved on this device</string>
     <string name="connect_body">Connect to see and play your downloads.</string>
     <string name="replace_key">Replace API key</string>
@@ -162,13 +161,13 @@
     <string name="unsupported_hoster">This hoster isn\'t supported by TorBox</string>
     <string name="nothing_to_add">Nothing to add — paste a magnet link, a URL, or pick a file</string>
     <string name="delete_body">“%1$s” will be removed from TorBox.</string>
-    <string name="file_count_size">%1$s · %2$d files</string>
     <string name="details_metadata">%1$s · %2$s · %3$s</string>
     <string name="directed_by">Directed by %1$s</string>
     <string name="cast_list">Cast: %1$s</string>
     <string name="match_picker_title">Which one is this?</string>
     <string name="match_picker_hint">Pick the right title. It applies to this download only.</string>
     <string name="clear_metadata_override">Clear match</string>
+    <string name="episode_matched">Matched episode</string>
     <string name="episodes_count">Episodes (%1$d)</string>
     <string name="show_all_episodes">Show all episodes (%1$d)</string>
     <string name="show_season_only">Show only season %1$d</string>
@@ -261,6 +260,7 @@
     <string name="tmdb_save_key">Save TMDB key</string>
     <string name="tmdb_key_saved">TMDB key saved.</string>
     <string name="tmdb_key_failed">Couldn’t check that TMDB key. Check it and try again.</string>
+    <string name="tmdb_logo">TMDB logo</string>
     <string name="tmdb_attribution">This product uses TMDB and the TMDB APIs but is not endorsed, certified, or otherwise approved by TMDB.</string>
     <string name="clipboard_offers_setting">Offer to add copied torrent links</string>
     <string name="clipboard_offers_setting_failed">Couldn’t load or save the clipboard offer setting.</string>

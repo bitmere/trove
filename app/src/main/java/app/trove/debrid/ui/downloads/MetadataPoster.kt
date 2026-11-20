@@ -6,8 +6,6 @@ import android.util.LruCache
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -22,13 +20,16 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
+import app.trove.debrid.R
+import app.trove.debrid.core.MediaMetadata
 import app.trove.debrid.core.PosterDiskCache
 import app.trove.debrid.core.PosterSource
 import java.io.File
 import androidx.compose.ui.unit.dp
 import app.trove.debrid.core.HttpRequest
 import app.trove.debrid.core.OkHttpTransport
-import app.trove.debrid.core.publicPosterUrl
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -117,7 +118,7 @@ private object PosterLoader {
                 if (result.isSuccess) {
                     val bitmap = result.getOrNull()
                     if (bitmap != null) bitmaps.put(url, bitmap)
-                    else misses[url] = System.currentTimeMillis() + 60_000
+                    else misses[url] = System.currentTimeMillis() + POSTER_MISS_TTL_MS
                 }
                 inFlight.remove(url)
             }
@@ -128,16 +129,29 @@ private object PosterLoader {
 }
 
 @Composable
-internal fun MetadataPoster(url: String?) {
+internal fun MetadataPoster(url: String?, metadata: MediaMetadata?, refreshing: Boolean) {
     val context = LocalContext.current.applicationContext
     var bitmap by remember(url) { mutableStateOf<Bitmap?>(null) }
-    LaunchedEffect(url) {
-        publicPosterUrl(url)?.let { bitmap = PosterLoader.load(it) { context.cacheDir } }
+    LaunchedEffect(url, metadata, refreshing) {
+        if (bitmap == null && !refreshing) {
+            bitmap = loadPosterWithRetry(url, pause = { delay(it) }) { validUrl ->
+                PosterLoader.load(validUrl) { context.cacheDir }
+            }
+        }
     }
-    Surface(shape = MaterialTheme.shapes.small, color = MaterialTheme.colorScheme.surfaceContainerHigh,
-        modifier = Modifier.size(width = 64.dp, height = 96.dp)) {
+    Surface(
+        shape = MaterialTheme.shapes.extraSmall,
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        modifier = Modifier.size(width = 48.dp, height = 72.dp),
+    ) {
         val loaded = bitmap
-        if (loaded != null) Image(loaded.asImageBitmap(), contentDescription = null, contentScale = ContentScale.Crop)
-        else Box(contentAlignment = Alignment.Center) { Icon(Icons.Filled.PlayArrow, contentDescription = null) }
+        if (loaded != null) {
+            Image(loaded.asImageBitmap(), contentDescription = null, contentScale = ContentScale.Crop)
+        } else {
+            Box(contentAlignment = Alignment.Center) {
+                Icon(painterResource(R.drawable.ic_poster_placeholder), contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
     }
 }
