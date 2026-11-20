@@ -33,6 +33,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -127,6 +128,7 @@ class DownloadsViewModel(
     private val repository: TroveRepository,
     private val backgroundDispatcher: CoroutineDispatcher = Dispatchers.Default,
     private val now: () -> Long = System::currentTimeMillis,
+    private val elapsedNanos: () -> Long = System::nanoTime,
 ) : ViewModel() {
 
     companion object {
@@ -139,6 +141,7 @@ class DownloadsViewModel(
 
     private var refreshJob: Job? = null
     private var refreshVersion = 0
+    private var missBypassVersion: Int? = null
     private var hydrationJob: Job? = null
     private var revalidationObservers: Job? = null
     private var metadataOrder = 0
@@ -227,6 +230,7 @@ class DownloadsViewModel(
         fullSyncJob?.cancel()
         fullSyncTab = null
         val version = ++refreshVersion
+        missBypassVersion = version.takeIf { bypassMetadataMiss }
         // Set feedback synchronously, then do all account/Keystore reads in
         // the repository's suspending IO path, after construction can return.
         val initial = _state.value.downloads.isEmpty() && _state.value.loading
@@ -247,6 +251,8 @@ class DownloadsViewModel(
                 val restored = provider != null && snapshot != null && restoreLibrary(provider, snapshot)
                 val accountLabel = connection.account?.label?.substringAfter('(')?.trimEnd(')')
                 if (libraryProvider !== provider) {
+                    if (libraryProvider != null) missBypassVersion = null
+                    cancelHydration()
                     cancelRevalidationObservers()
                     libraryProvider = null
                     fileLookupJob?.cancel()
@@ -282,7 +288,7 @@ class DownloadsViewModel(
                 _state.update { it.copy(signedOut = false, accountLabel = accountLabel) }
                 if (!restored) resetPagination(keepRows = true, currentTab = _state.value.tab)
                 launchPage(provider, _state.value.tab, offset = 0, bypassCache = fresh,
-                    version = version, replace = true, bypassMetadataMiss = bypassMetadataMiss)
+                    version = version, replace = true)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -321,6 +327,7 @@ class DownloadsViewModel(
         cachedTabs.addAll(snapshot.tabs.keys)
         _state.update { it.copy(downloads = rows, pagedByTab = tabs, loading = false, refreshing = true) }
         schedulePreparation(debounced = false)
+        reconcileHydration(_state.value.tab, refreshVersion)
         return true
     }
 
@@ -366,9 +373,7 @@ class DownloadsViewModel(
             cancelHydration()
             visibleRowKeys = emptySet()
             _state.update { it.copy(tab = tab) }
-            if (tab !in cachedTabs) {
-                enqueueHydration(_state.value.pagedByTab[tab]?.loaded.orEmpty(), refreshVersion)
-            }
+            reconcileHydration(tab, refreshVersion)
         }
         ensureTabLoaded(tab)
     }
@@ -491,7 +496,6 @@ class DownloadsViewModel(
         bypassCache: Boolean,
         version: Int,
         replace: Boolean,
-        bypassMetadataMiss: Boolean = false,
     ) {
         pageJobs[tab]?.cancel()
         _state.update { state ->
@@ -500,12 +504,12 @@ class DownloadsViewModel(
                 (tab to current.copy(pageLoading = true, pageError = null, visited = true)))
         }
         pageJobs[tab] = viewModelScope.launch {
-            fetchPage(provider, tab, offset, bypassCache, version, replace, bypassMetadataMiss)
+            fetchPage(provider, tab, offset, bypassCache, version, replace)
         }
     }
 
-    /** Fetches one page, publishes it, and queues metadata hydration for its
-     *  new rows. Returns STALE when a newer refresh / sort change /
+    /** Fetches one page, publishes it, and reconciles metadata for loaded
+     *  rows. Returns STALE when a newer refresh / sort change /
      *  provider switch has superseded this page: nothing is
      *  published. A failed page never clears loaded rows. */
     private suspend fun fetchPage(
@@ -515,7 +519,6 @@ class DownloadsViewModel(
         bypassCache: Boolean,
         version: Int,
         replace: Boolean,
-        bypassMetadataMiss: Boolean = false,
     ): PageOutcome {
         _state.update { state ->
             val current = state.pagedByTab[tab] ?: PagedTabState()
@@ -527,7 +530,8 @@ class DownloadsViewModel(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            if (version != refreshVersion) return PageOutcome.STALE
+            currentCoroutineContext().ensureActive()
+            if (version != refreshVersion || libraryProvider !== provider) return PageOutcome.STALE
             _state.update { state ->
                 val current = state.pagedByTab[tab] ?: PagedTabState()
                 state.copy(
@@ -546,8 +550,10 @@ class DownloadsViewModel(
                     authenticationRequired = e is DebridError.AuthInvalid,
                 )
             }
+            reconcileHydration(tab, version, bypassMiss = version == missBypassVersion)
             return PageOutcome.FAILED
         }
+        currentCoroutineContext().ensureActive()
         if (version != refreshVersion || libraryProvider !== provider) return PageOutcome.STALE
         val oldTab = _state.value.pagedByTab[tab] ?: PagedTabState()
         val merged = if (replace) {
@@ -596,9 +602,9 @@ class DownloadsViewModel(
         scheduleSnapshotSave(provider)
         schedulePreparation(debounced = false)
         if (offset == 0 && _state.value.query.isNotBlank()) ensureFullSync(tab)
-        if (tab == _state.value.tab) {
-            val previousIds = if (replace) emptySet() else oldTab.loaded.mapTo(HashSet()) { it.id }
-            enqueueHydration(page.rows.filterNot { it.id in previousIds }, version, bypassMetadataMiss)
+        val bypassMiss = version == missBypassVersion
+        if (tab == _state.value.tab || bypassMiss) {
+            reconcileHydration(tab, version, bypassMiss)
         }
         return PageOutcome.LOADED
     }
@@ -687,13 +693,25 @@ class DownloadsViewModel(
         revalidationObservers = null
     }
 
-    private fun enqueueHydration(rows: List<DebridDownload>, version: Int, bypassMiss: Boolean = false) {
+    private fun reconcileHydration(tab: DownloadKind, version: Int, bypassMiss: Boolean = false) {
+        enqueueHydration(
+            _state.value.pagedByTab[tab]?.loaded.orEmpty(), version, bypassMiss, skipPendingPosters = true,
+        )
+    }
+
+    private fun enqueueHydration(
+        rows: List<DebridDownload>,
+        version: Int,
+        bypassMiss: Boolean = false,
+        skipPendingPosters: Boolean = false,
+    ) {
         val current = _state.value
         val refreshTime = if (bypassMiss) now() else 0
-        val pendingOutcomes = mutableSetOf<Pair<DownloadKind, String>>()
         for (download in rows) {
             val key = download.kind to download.id
-            if (current.metadata[key]?.posterUrl != null &&
+            val poster = current.metadata[key]?.posterUrl
+            if (poster == null && skipPendingPosters && key in current.pendingPosters) continue
+            if (poster != null &&
                 !(bypassMiss && (current.posterCooldowns[key] ?: 0) in 1..refreshTime)
             ) continue
             val ref = DownloadRef(download.kind, download.id)
@@ -701,10 +719,8 @@ class DownloadsViewModel(
             val queued = hydrationQueue[ref]
             if (queued == null || queued.first != download || (bypassMiss && !queued.second)) {
                 hydrationQueue[ref] = download to bypassMiss
-                if (key in current.enrichment) pendingOutcomes += key
             }
         }
-        if (pendingOutcomes.isNotEmpty()) _state.update { it.copy(enrichment = it.enrichment - pendingOutcomes) }
         if (hydrationQueue.isEmpty() || hydrationJob?.isActive == true) return
         hydrationJob = viewModelScope.launch { hydrateRows(version) }
     }
@@ -723,9 +739,10 @@ class DownloadsViewModel(
 
         val pending = LinkedHashMap<DebridDownload, Pair<MetadataLookup, MetadataOverride?>>()
         val order = metadataOrder
-        var lastFlush = System.nanoTime()
+        val worker = currentCoroutineContext()
+        var lastFlush = elapsedNanos()
         fun flushOffscreen() {
-            if (pending.isEmpty()) return
+            if (pending.isEmpty() || !worker.isActive || version != refreshVersion || order != metadataOrder) return
             val names = _state.value.downloads.associate { (it.kind to it.id) to it.name }
             val ready = pending.filter { (row, _) ->
                 val ref = DownloadRef(row.kind, row.id)
@@ -738,7 +755,7 @@ class DownloadsViewModel(
             }
             ready.forEach { (row, lookup) -> observeRevalidation(row, lookup.first, order) }
             pending.clear()
-            lastFlush = System.nanoTime()
+            lastFlush = elapsedNanos()
         }
 
         var initialBatch = true
@@ -787,7 +804,7 @@ class DownloadsViewModel(
                             repository.lookupMetadataForRelease(download.name, bypassMiss) { poster ->
                                 // The resolver runs on IO. All row guards and updates run on Main.
                                 withContext(Dispatchers.Main.immediate) {
-                                    if (current() && isPriority()) _state.update {
+                                    if (worker.isActive && current() && isPriority()) _state.update {
                                         it.copy(pendingPosters = it.pendingPosters + (key to poster))
                                     }
                                 }
@@ -803,13 +820,13 @@ class DownloadsViewModel(
                             observeRevalidation(download, result, order)
                         } else {
                             pending[download] = result to appliedOverride
-                            if (pending.size >= 10 || System.nanoTime() - lastFlush >= 200_000_000L) flushOffscreen()
+                            if (pending.size >= 10 || elapsedNanos() - lastFlush >= 200_000_000L) flushOffscreen()
                         }
                     }
                 }
             }
         }
-        if (version == refreshVersion) flushOffscreen()
+        flushOffscreen()
     }
 
     private suspend fun lookupMetadata(block: suspend () -> MetadataLookup): MetadataLookup = try {

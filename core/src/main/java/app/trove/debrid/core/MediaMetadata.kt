@@ -328,15 +328,10 @@ class CinemetaResolver(
                 primary.posterUrl?.let { onPoster(it) }
                 lookupSafely { lookupById(primaryId, primaryType) }
             } else null
-            if (backfill == null) {
-                val artwork = if (primaryId == null && primary.posterUrl == null) {
-                    lookupSafely { lookup(artworkQuery(query, primary), exactYear = true) }?.posterUrl
-                } else null
-                if (artwork == null) primary else primary.copy(
-                    posterUrl = artwork, provenance = EnrichmentProvenance.TMDB_CINEMETA_POSTER,
-                )
+            val enriched = if (backfill == null) {
+                primary
             } else {
-                val enriched = primary.copy(
+                val combined = primary.copy(
                     year = primary.year ?: backfill.year,
                     posterUrl = primary.posterUrl ?: backfill.posterUrl,
                     alternatePosterUrl = backfill.posterUrl?.takeIf {
@@ -350,10 +345,16 @@ class CinemetaResolver(
                     imdbRating = backfill.imdbRating,
                     episodes = backfill.episodes,
                 )
-                if (enriched.copy(alternatePosterUrl = null) == primary) enriched else enriched.copy(
+                if (combined.copy(alternatePosterUrl = null) == primary) combined else combined.copy(
                     provenance = EnrichmentProvenance.TMDB_CINEMETA_BACKFILL,
                 )
             }
+            val artwork = if (enriched.posterUrl == null) {
+                lookupSafely { lookup(artworkQuery(query, primary), exactYear = true) }?.posterUrl
+            } else null
+            if (artwork == null) enriched else enriched.copy(
+                posterUrl = artwork, provenance = EnrichmentProvenance.TMDB_CINEMETA_POSTER,
+            )
         } else {
             val cinemeta = incomplete ?: lookupSafely {
                 queries.firstNotNullOfOrNull { if (validQuery(it)) lookup(it) else null }

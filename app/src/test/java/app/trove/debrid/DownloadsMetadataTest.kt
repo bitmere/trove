@@ -1,6 +1,7 @@
 package app.trove.debrid
 
 import app.trove.debrid.core.*
+import app.trove.debrid.data.DownloadPage
 import app.trove.debrid.data.MetadataOverride
 import app.trove.debrid.data.TroveRepository
 import app.trove.debrid.ui.downloads.DownloadsViewModel
@@ -68,6 +69,42 @@ class DownloadsMetadataTest {
         assertNull(vm.state.value.error)
         assertEquals(EnrichmentProvenance.UNAVAILABLE, vm.state.value.enrichment[row.kind to row.id])
     }
+
+    @Test fun `a failed sort reload recovers results cancelled before the offscreen flush`() = runTest {
+        val first = sampleDownload(id = "first", name = "First Film.2026.mkv")
+        val second = sampleDownload(id = "second", name = "Second Film.2026.mkv")
+        val gate = CompletableDeferred<Unit>()
+        val attempts = mutableListOf<String>()
+        val artwork = "https://example.invalid/recovered.jpg"
+        val repo = object : FakeRepository(provider = FakeProvider(downloads = mutableListOf(first, second))) {
+            private var pageCalls = 0
+            override suspend fun listDownloadPage(
+                provider: DebridProvider, kind: DownloadKind, offset: Int, limit: Int, bypassCache: Boolean,
+            ): Result<DownloadPage> =
+                if (++pageCalls == 1) Result.success(DownloadPage(listOf(first, second), endReached = true))
+                else Result.failure(IllegalStateException("Offline"))
+
+            override suspend fun resolveMetadataForRelease(name: String, bypassMiss: Boolean): MediaMetadata {
+                val alreadyAttempted = name in attempts
+                attempts += name
+                if (name == second.name && !alreadyAttempted) gate.await()
+                return MediaMetadata(name, 2026, "movie", artwork)
+            }
+        }
+        val vm = DownloadsViewModel(repo, StandardTestDispatcher(testScheduler), elapsedNanos = { 0L })
+        vm.updateVisibleRows(first.kind, setOf("${first.kind}:offscreen"))
+        runCurrent()
+
+        assertEquals(listOf(first.name, second.name), attempts)
+        assertFalse(gate.isCompleted)
+        assertNull(vm.state.value.posterUrl(first.kind to first.id))
+        vm.setSort(DownloadSort.NAME_ASC)
+        advanceUntilIdle()
+        assertNotNull(vm.state.value.loadError)
+        assertEquals(listOf(first.name, second.name, first.name, second.name), attempts)
+        assertEquals(artwork, vm.state.value.posterUrl(first.kind to first.id))
+        assertEquals(artwork, vm.state.value.posterUrl(second.kind to second.id))
+    }
     @Test fun `unchanged refresh retains metadata without resolving again but renamed rows resolve`() = runTest {
         val provider = FakeProvider(downloads = mutableListOf(sampleDownload()))
         var calls = 0
@@ -113,6 +150,57 @@ class DownloadsMetadataTest {
         vm.onAdded(DownloadKind.TORRENT)
         advanceUntilIdle()
         assertEquals(listOf(false, false, true, false), bypasses)
+    }
+
+    @Test fun `pull to refresh bypass reaches an append and another tab until the next version`() = runTest {
+        val first = sampleDownload(id = "first", name = "First Film.2026.mkv")
+        val next = sampleDownload(id = "next", name = "Next Film.2026.mkv")
+        val web = sampleDownload(id = "web", name = "Web Film.2026.mkv", kind = DownloadKind.WEB)
+        val attempts = mutableListOf<Pair<String, Boolean>>()
+        val artwork = "https://example.invalid/refreshed.jpg"
+        val repo = object : FakeRepository() {
+            override suspend fun listDownloadPage(
+                provider: DebridProvider, kind: DownloadKind, offset: Int, limit: Int, bypassCache: Boolean,
+            ): Result<DownloadPage> = Result.success(when {
+                kind == web.kind -> DownloadPage(listOf(web), endReached = true)
+                offset == 0 -> DownloadPage(listOf(first), endReached = false)
+                else -> DownloadPage(listOf(next), endReached = true)
+            })
+
+            override suspend fun resolveMetadataForRelease(name: String, bypassMiss: Boolean): MediaMetadata? {
+                attempts += name to bypassMiss
+                return if (bypassMiss && name != first.name) MediaMetadata(name, 2026, "movie", artwork) else null
+            }
+        }
+        val vm = viewModel(repo)
+        runCurrent()
+        vm.loadNextPage()
+        runCurrent()
+        vm.setTab(web.kind)
+        runCurrent()
+        vm.setTab(first.kind)
+        runCurrent()
+        assertTrue(attempts.all { !it.second })
+        assertTrue(attempts.any { it.first == next.name })
+        assertTrue(attempts.any { it.first == web.name })
+
+        vm.refreshFromUser()
+        runCurrent()
+        vm.loadNextPage()
+        runCurrent()
+        vm.setTab(web.kind)
+        advanceUntilIdle()
+        assertTrue((next.name to true) in attempts)
+        assertTrue((web.name to true) in attempts)
+        assertEquals(artwork, vm.state.value.posterUrl(next.kind to next.id))
+        assertEquals(artwork, vm.state.value.posterUrl(web.kind to web.id))
+
+        vm.setTab(first.kind)
+        advanceUntilIdle()
+        attempts.clear()
+        vm.setSort(DownloadSort.NEWEST)
+        advanceUntilIdle()
+        assertEquals(listOf(first.name to false), attempts)
     }
 
     @Test fun `explicit refresh retries held posterless metadata for visible and offscreen rows`() = runTest {
@@ -230,11 +318,58 @@ class DownloadsMetadataTest {
         assertEquals(candidates, vm.state.value.candidates[DownloadKind.TORRENT to row.id])
     }
 
-    @Test fun `no candidates load when the automatic match already resolved`() = runTest {
+    @Test fun `the sheet hydrates an unsettled row and the poster stays after dismissal`() = runTest {
+        val row = sampleDownload()
+        val key = row.kind to row.id
+        val originalLookup = CompletableDeferred<MediaMetadata>()
+        val revalidation = CompletableDeferred<Result<DownloadPage>>()
+        val recovered = MediaMetadata(row.name, 2024, "movie", "https://example.invalid/from-sheet.jpg")
+        val repo = object : FakeRepository() {
+            var pageCalls = 0
+            var lookups = 0
+            override suspend fun listDownloadPage(
+                provider: DebridProvider, kind: DownloadKind, offset: Int, limit: Int, bypassCache: Boolean,
+            ): Result<DownloadPage> =
+                if (++pageCalls == 1) Result.success(DownloadPage(listOf(row), endReached = true))
+                else revalidation.await()
+
+            override suspend fun resolveMetadataForRelease(name: String, bypassMiss: Boolean): MediaMetadata =
+                if (++lookups == 1) originalLookup.await() else recovered
+        }
+        val vm = viewModel(repo)
+        runCurrent()
+        vm.refresh()
+        runCurrent()
+        assertEquals(listOf(row), vm.visibleDownloads(vm.state.value))
+        assertFalse(key in vm.state.value.metadata)
+        assertFalse(key in vm.state.value.enrichment)
+
+        vm.openDownload(row)
+        runCurrent()
+        assertEquals(row, vm.state.value.filePicker)
+        assertEquals(recovered.posterUrl, vm.state.value.posterUrl(key))
+        vm.dismissFilePicker()
+        assertNull(vm.state.value.filePicker)
+        val visibleRow = vm.visibleDownloads(vm.state.value).single()
+        assertEquals(recovered.posterUrl, vm.state.value.posterUrl(visibleRow.kind to visibleRow.id))
+        assertEquals(2, repo.lookups)
+
+        revalidation.complete(Result.success(DownloadPage(listOf(row), endReached = true)))
+        advanceUntilIdle()
+        assertEquals(2, repo.lookups)
+    }
+
+    @Test fun `opening the sheet does not retry posterless metadata and dismissal keeps row state`() = runTest {
         val row = sampleDownload().copy(name = "Baththa.2026.1080p.mkv")
+        val key = row.kind to row.id
+        val posterless = MediaMetadata("Baththa", 2026, "movie")
+        var lookups = 0
         var candidateCalls = 0
         val repo = object : FakeRepository(provider = FakeProvider(downloads = mutableListOf(row))) {
-            override suspend fun resolveMetadataForRelease(name: String, bypassMiss: Boolean) = MediaMetadata("Baththa", 2026, "movie")
+            override suspend fun resolveMetadataForRelease(name: String, bypassMiss: Boolean): MediaMetadata {
+                lookups++
+                return posterless
+            }
             override suspend fun resolveMetadataCandidates(query: MediaQuery): List<MediaCandidate> {
                 candidateCalls++
                 return listOf(MediaCandidate("tt0000001", "Baththa", 2026, "movie"))
@@ -242,8 +377,16 @@ class DownloadsMetadataTest {
         }
         val vm = viewModel(repo)
         advanceUntilIdle()
+        assertEquals(posterless, vm.state.value.metadata[key])
         vm.openDownload(row)
         advanceUntilIdle()
+        assertEquals(row, vm.state.value.filePicker)
+        vm.dismissFilePicker()
+        assertNull(vm.state.value.filePicker)
+        val visibleRow = vm.visibleDownloads(vm.state.value).single()
+        assertNull(vm.state.value.posterUrl(visibleRow.kind to visibleRow.id))
+        assertEquals(posterless, vm.state.value.metadata[key])
+        assertEquals(1, lookups)
         assertEquals(0, candidateCalls)
         assertTrue(vm.state.value.candidates.isEmpty())
     }

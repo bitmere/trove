@@ -47,6 +47,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.job
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
@@ -64,6 +65,8 @@ internal object PosterLoader {
         override fun sizeOf(key: String, value: Bitmap) = value.allocationByteCount
     }
     private val misses = PosterMissCache(SystemClock::elapsedRealtime)
+    private val _loadGeneration = MutableStateFlow(0L)
+    val loadGeneration = _loadGeneration.asStateFlow()
 
     private val sourceLock = Any()
     private var source: PosterSource<Bitmap>? = null
@@ -96,10 +99,12 @@ internal object PosterLoader {
 
     suspend fun loadVisible(url: String, force: Boolean, cacheDirectory: () -> File): Bitmap? {
         mutex.withLock {
-            bitmaps.get(posterCacheKey(url))?.let { return it }
+            val key = posterCacheKey(url)
+            bitmaps.get(key)?.let { return it }
+            if (force) misses.clear(key)
+            else if (misses.get(key)?.transient == false) return null
             visibleLoads.value++
             prefetchJob?.cancel()
-            if (force) misses.clear(posterCacheKey(url))
         }
         try {
             return loadPosterWithRetry(url, SystemClock::elapsedRealtime, { delay(it) }) {
@@ -175,6 +180,7 @@ internal object PosterLoader {
                         else {
                             bitmaps.put(key, bitmap)
                             misses.clear(key)
+                            _loadGeneration.value++
                             Result.success(PosterLoad.Ready(bitmap))
                         }
                     },
@@ -229,12 +235,19 @@ internal fun rememberPoster(
     val reportFailure by rememberUpdatedState(onFailure)
     LaunchedEffect(validUrl, retry) {
         if (validUrl != null && slot.decodedUrl != validUrl) {
-            val bitmap = PosterLoader.loadVisible(validUrl, force = retry > 0) { context.cacheDir }
+            val bitmap = awaitPoster(
+                PosterLoader.loadGeneration,
+                force = retry > 0,
+                load = { force -> PosterLoader.loadVisible(validUrl, force) { context.cacheDir } },
+                onFailure = { failed = true },
+            )
             ensureActive()
             slot = slot.afterLoad(validUrl, bitmap)
-            failed = bitmap == null
-            if (failed) reportFailure(validUrl)
+            failed = false
         }
+    }
+    LaunchedEffect(validUrl, retry, failed) {
+        if (validUrl != null && failed) reportFailure(validUrl)
     }
     val onRetry: (() -> Unit)? = if (failed) {
         {

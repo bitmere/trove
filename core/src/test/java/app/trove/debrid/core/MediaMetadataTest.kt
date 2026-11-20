@@ -349,16 +349,25 @@ class MediaMetadataTest {
 
     @Test fun `explicit refresh bypasses a miss but keeps the failure cooldown`() = runBlocking {
         val http = CinemetaTransport().apply { catalog = """{"metas":[]}""" }
-        val resolver = CinemetaResolver(http) { 1000L }
+        var time = 1000L
+        val resolver = CinemetaResolver(http) { time }
         assertNull(resolver.resolve(movieQuery))
+        time += 3_599_999
         assertNull(resolver.resolve(movieQuery))
         assertEquals(1, http.requests.size)
         http.status = 503
         assertNull(resolver.resolve(movieQuery, bypassMiss = true))
         assertEquals(2, http.requests.size)
         http.status = 200
+        time += 59_999
         assertNull(resolver.resolve(movieQuery, bypassMiss = true))
         assertEquals(2, http.requests.size)
+        time++
+        assertNull(resolver.resolve(movieQuery))
+        assertEquals(3, http.requests.size)
+        time += 3_600_000
+        assertNull(resolver.resolve(movieQuery))
+        assertEquals(4, http.requests.size)
     }
 
     @Test fun `fresh disk entries skip network`() = runBlocking {
@@ -653,6 +662,52 @@ class MediaMetadataTest {
         assertEquals("https://images.example.invalid/poster.jpg", result.posterUrl)
         assertEquals("tt0000001", result.imdbId)
         assertTrue(cinemeta.requests.single().url.endsWith("/meta/movie/tt0000001.json"))
+    }
+
+    @Test fun `posterless TMDB and IMDb backfill use strict title artwork without replacing identity`() = runBlocking {
+        val backfillPath = "/meta/movie/tt0000002.json"
+        val artwork = "https://images.example.invalid/poster.jpg"
+        for (backfillStatus in listOf(200, 503)) {
+            val catalog = CinemetaTransport()
+            val calls = mutableListOf<String>()
+            val cinemeta = object : HttpTransport {
+                override suspend fun execute(request: HttpRequest): HttpResponse {
+                    calls += request.url
+                    return if (request.url.endsWith(backfillPath)) {
+                        HttpResponse(backfillStatus,
+                            """{"meta":{"id":"tt0000002","type":"movie","name":"Example Film",
+                                "year":2026,"imdbRating":"8.3"}}""")
+                    } else catalog.execute(request)
+                }
+            }
+            val primary = TmdbResolver(primaryTransport(hasPoster = false, imdbId = "tt0000002")) { "key" }
+            val result = CinemetaResolver(cinemeta, tmdbResolver = primary).resolve(movieQuery)!!
+            assertEquals(artwork, result.posterUrl)
+            assertEquals(EnrichmentProvenance.TMDB_CINEMETA_POSTER, result.provenance)
+            assertEquals("tt0000002", result.imdbId)
+            assertEquals("Example Film", result.title)
+            assertEquals(2026, result.year)
+            assertEquals("Fallback hit.", result.overview)
+            assertEquals(8.3.takeIf { backfillStatus == 200 }, result.imdbRating)
+            assertTrue(calls.first().endsWith(backfillPath))
+            assertTrue(calls[1].contains("/catalog/movie/"))
+            assertTrue(calls.last().endsWith("/meta/movie/tt0000001.json"))
+
+            calls.clear()
+            val tmdbCalls = mutableListOf<HttpRequest>()
+            val noKey = TmdbResolver(tmdbTransport(tmdbCalls)) { null }
+            val cinemetaFirst = CinemetaResolver(cinemeta, tmdbResolver = noKey).resolve(movieQuery)!!
+            assertEquals(artwork, cinemetaFirst.posterUrl)
+            assertEquals(EnrichmentProvenance.CINEMETA, cinemetaFirst.provenance)
+            assertEquals("tt0000001", cinemetaFirst.imdbId)
+            assertTrue(tmdbCalls.isEmpty())
+            assertEquals(2, calls.size)
+
+            catalog.catalog = catalog.catalog.replace("2026", "2025")
+            val wrongYear = CinemetaResolver(cinemeta, tmdbResolver = primary).resolve(movieQuery)!!
+            assertNull(wrongYear.posterUrl)
+            assertEquals("tt0000002", wrongYear.imdbId)
+        }
     }
 
     @Test fun `failed TMDB image promotes Cinemeta artwork in memory and on disk`() = runBlocking {

@@ -5,10 +5,13 @@ import app.trove.debrid.core.DebridService
 import app.trove.debrid.core.DownloadKind
 import app.trove.debrid.core.DownloadSort
 import app.trove.debrid.core.LibrarySnapshot
+import app.trove.debrid.core.MediaMetadata
+import app.trove.debrid.core.MetadataLookup
 import app.trove.debrid.data.DownloadPage
 import app.trove.debrid.data.TroveRepository
 import app.trove.debrid.ui.downloads.DownloadsViewModel
 import app.trove.debrid.ui.downloads.ScrollAnchor
+import app.trove.debrid.ui.downloads.posterUrl
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -27,7 +30,7 @@ import org.junit.Test
 class DownloadsLibraryRestoreTest {
     private val dispatcher = StandardTestDispatcher()
     private val torrent = DownloadKind.TORRENT
-    private val cached = List(2) { sampleDownload(id = "cached-$it", fileCount = 0) }
+    private val cached = List(2) { sampleDownload(id = "cached-$it", name = "Cached $it", fileCount = 0) }
     private val live = sampleDownload(id = "live")
     private val snapshot = LibrarySnapshot(DebridService.TORBOX, 123, mapOf(
         torrent to LibrarySnapshot.Tab(cached, endReached = true, nextOffset = 2),
@@ -64,6 +67,24 @@ class DownloadsLibraryRestoreTest {
         checkUncachedStartup(null)
     }
 
+    @Test fun restoredRowsEnrichEvenWhenPageZeroFails() = runTest(dispatcher) {
+        val repo = Repository(snapshot)
+        val vm = DownloadsViewModel(repo, dispatcher)
+        runCurrent()
+
+        assertEquals(cached.map { it.name }.toSet(), repo.lookups.toSet())
+        assertFalse(repo.page.isCompleted)
+
+        repo.page.complete(Result.failure(IllegalStateException("Offline")))
+        runCurrent()
+
+        assertNotNull(vm.state.value.loadError)
+        val rows = vm.visibleDownloads(vm.state.value)
+        assertEquals(cached, rows)
+        assertTrue(rows.all { vm.state.value.posterUrl(it.kind to it.id) == repo.artwork })
+        assertEquals(cached.size, repo.lookups.size)
+    }
+
     @Test fun differentProviderSnapshotUsesInitialLoadingFrame() = runTest(dispatcher) {
         checkUncachedStartup(snapshot.copy(service = DebridService.OFFCLOUD))
     }
@@ -91,12 +112,13 @@ class DownloadsLibraryRestoreTest {
 
     @Test fun visitingACachedTabRevalidatesPageZeroBeforeUsingItsOffset() = runTest(dispatcher) {
         val web = DownloadKind.WEB
-        val cachedWebRow = sampleDownload(id = "cached-web", kind = web, fileCount = 0)
-        val freshWebRow = sampleDownload(id = "fresh-web", kind = web)
+        val cachedWebRow = sampleDownload(id = "cached-web", name = "Cached Web", kind = web, fileCount = 0)
+        val freshWebRow = sampleDownload(id = "fresh-web", name = "Fresh Web", kind = web)
         val repo = Repository(snapshot.copy(tabs = snapshot.tabs + (
             web to LibrarySnapshot.Tab(listOf(cachedWebRow), endReached = true, nextOffset = 240)
         )))
-        repo.webPage = DownloadPage(listOf(freshWebRow), endReached = true)
+        val webPage = CompletableDeferred<DownloadPage>()
+        repo.webPage = webPage
         val vm = DownloadsViewModel(repo, dispatcher)
         runCurrent()
         assertEquals(listOf(cachedWebRow), vm.visibleDownloads(vm.state.value, web))
@@ -105,6 +127,12 @@ class DownloadsLibraryRestoreTest {
         runCurrent()
 
         assertEquals(listOf(0, 0), repo.offsets)
+        assertEquals(listOf(cachedWebRow), vm.visibleDownloads(vm.state.value, web))
+        assertEquals(repo.artwork, vm.state.value.posterUrl(web to cachedWebRow.id))
+        assertTrue(cachedWebRow.name in repo.lookups)
+
+        webPage.complete(DownloadPage(listOf(freshWebRow), endReached = true))
+        runCurrent()
         assertEquals(listOf(freshWebRow), vm.visibleDownloads(vm.state.value, web))
         repo.page.complete(Result.success(DownloadPage(listOf(live), endReached = true)))
         runCurrent()
@@ -157,10 +185,19 @@ class DownloadsLibraryRestoreTest {
 
     private class Repository(private val snapshot: LibrarySnapshot?) : TroveRepository by FakeRepository() {
         val page = CompletableDeferred<Result<DownloadPage>>()
-        var webPage = DownloadPage(emptyList(), endReached = true)
+        var webPage: CompletableDeferred<DownloadPage>? = null
         var nextPage = DownloadPage(emptyList(), endReached = true)
         val offsets = mutableListOf<Int>()
         val writes = mutableListOf<LibrarySnapshot>()
+        val lookups = mutableListOf<String>()
+        val artwork = "https://example.invalid/restored.jpg"
+
+        override suspend fun lookupMetadataForRelease(
+            name: String, bypassMiss: Boolean, onPoster: suspend (String) -> Unit,
+        ): MetadataLookup {
+            lookups += name
+            return MetadataLookup.from(MediaMetadata(name, null, null, artwork))
+        }
 
         override suspend fun loadLibrarySnapshot() = snapshot
 
@@ -177,7 +214,7 @@ class DownloadsLibraryRestoreTest {
         ): Result<DownloadPage> {
             offsets += offset
             return when {
-                kind == DownloadKind.WEB -> Result.success(webPage)
+                kind == DownloadKind.WEB -> Result.success(webPage?.await() ?: DownloadPage(emptyList(), endReached = true))
                 offset == 0 -> page.await()
                 else -> Result.success(nextPage)
             }
