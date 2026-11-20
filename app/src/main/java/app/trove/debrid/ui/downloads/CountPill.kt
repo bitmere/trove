@@ -12,7 +12,7 @@ import app.trove.debrid.ui.theme.TroveSpace
 
 /** Content width is retained even when the tab's remaining space is narrow. */
 @Composable
-internal fun CountPill(count: Int, selected: Boolean) {
+internal fun CountPill(count: Int, selected: Boolean, hasMore: Boolean = false) {
     Surface(
         // Keep every digit under narrow constraints without a nested intrinsic query.
         modifier = Modifier.wrapContentWidth(unbounded = true),
@@ -23,7 +23,7 @@ internal fun CountPill(count: Int, selected: Boolean) {
             else MaterialTheme.colorScheme.onSurfaceVariant,
     ) {
         Text(
-            text = formatCount(count),
+            text = formatCount(count, hasMore),
             modifier = Modifier.padding(horizontal = TroveSpace.small, vertical = 2.dp),
             style = MaterialTheme.typography.labelSmall,
             maxLines = 1,

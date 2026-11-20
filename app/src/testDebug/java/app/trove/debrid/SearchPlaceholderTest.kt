@@ -53,7 +53,8 @@ class SearchPlaceholderTest {
         // the search field shrinks — the exact state in the user report.
         rule.runOnIdle { vm.setSort(DownloadSort.OLDEST) }
         rule.waitForIdle()
-        rule.onNodeWithText(rule.activity.getString(R.string.reset_search)).assertIsDisplayed()
+        // Reset reads "Reset" (item 10); it still appears for a dirty sort.
+        rule.onNodeWithText(rule.activity.getString(R.string.reset)).assertIsDisplayed()
 
         val placeholder = rule.onNodeWithText(
             rule.activity.getString(R.string.search_downloads),

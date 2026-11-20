@@ -10,8 +10,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.Box
-import androidx.compose.ui.Alignment
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -190,10 +188,10 @@ fun AddSheet(
                 modifier = Modifier.fillMaxWidth().padding(top = TroveSpace.small),
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(18.dp),
             ) {
-                Box(Modifier.padding(end = TroveSpace.small).size(TroveSpace.page), contentAlignment = Alignment.Center) {
-                    if (state.adding) CircularProgressIndicator(
+                if (state.adding) {
+                    CircularProgressIndicator(
                         color = LocalContentColor.current,
-                        modifier = Modifier.size(TroveSpace.page),
+                        modifier = Modifier.padding(end = TroveSpace.small).size(TroveSpace.page),
                         strokeWidth = 2.dp,
                     )
                 }

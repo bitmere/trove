@@ -58,6 +58,10 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.rememberGraphicsLayer
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -76,7 +80,7 @@ import app.trove.debrid.ui.rememberBackdropBlurEffect
 import app.trove.debrid.ui.rememberBackdropBlurEnabled
 import kotlinx.coroutines.launch
 
-/** Download library with tonal cards and a focused playback sheet. */
+/** Download library with compact rows and a focused playback sheet. */
 @OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun DownloadsScreen(
@@ -104,10 +108,6 @@ fun DownloadsScreen(
     }
     val selectedTab = DownloadKind.entries[pagerState.currentPage]
     val listState = listStates.getValue(selectedTab)
-    // Go to top appears only once the visible tab is scrolled down.
-    val showGoToTop by remember(listState) {
-        derivedStateOf { listState.firstVisibleItemIndex >= 10 }
-    }
     // The pager owns selection for both gestures and animated tab clicks.
     // Do not drive it back from state.tab: that would interrupt a swipe.
     LaunchedEffect(pagerState, viewModel) {
@@ -147,6 +147,13 @@ fun DownloadsScreen(
         DownloadKind.entries.associateWith { viewModel.visibleDownloads(state, it) }
     }
     val visible = visibleByTab.getValue(selectedTab)
+    val hasVisibleDownloads = visible.isNotEmpty()
+    val showGoToTop by remember(listState, hasVisibleDownloads) {
+        derivedStateOf {
+            shouldShowGoToTop(hasVisibleDownloads, listState.firstVisibleItemIndex,
+                listState.firstVisibleItemScrollOffset)
+        }
+    }
 
     // Step 2b — scroll-anchor + process-death restoration. Only small
     // non-secret UI state is saved: the query, the anchor row (kind +
@@ -277,12 +284,8 @@ fun DownloadsScreen(
         ) {
             TopAppBar(
                 title = {
-                    Column {
-                        Text(stringResource(R.string.app_name), fontFamily = SpaceGrotesk,
-                            style = MaterialTheme.typography.headlineLarge)
-                        Text(stringResource(R.string.library_subtitle), style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
+                    Text(stringResource(R.string.app_name), fontFamily = SpaceGrotesk,
+                        style = MaterialTheme.typography.titleMedium)
                 },
                 actions = {
                     state.accountLabel?.let {
@@ -334,7 +337,8 @@ fun DownloadsScreen(
                         viewModel.resetSearch()
                         scope.launch { listState.animateScrollToItem(0) }
                     }) {
-                        Text(stringResource(R.string.reset_search))
+                        // Reset clears both the query and the sort.
+                        Text(stringResource(R.string.reset))
                     }
                 }
                 DownloadSortMenu(state.sort, viewModel::setSort)
@@ -381,10 +385,7 @@ fun DownloadsScreen(
                     }
                 }
                 when {
-                    state.loading -> Box(
-                        modifier = Modifier.fillMaxSize(),
-                        contentAlignment = Alignment.Center,
-                    ) { CircularProgressIndicator(color = MaterialTheme.colorScheme.primary) }
+                    state.loading -> LibraryLoading()
 
                     state.signedOut -> SignedOutState(onOpenSettings)
 
@@ -399,10 +400,7 @@ fun DownloadsScreen(
                                 // yet: show a spinner, not the empty
                                 // state, until its first page lands.
                                 if (tabState.pageLoading || !tabState.visited) {
-                                    Box(
-                                        modifier = Modifier.fillMaxSize(),
-                                        contentAlignment = Alignment.Center,
-                                    ) { CircularProgressIndicator(color = MaterialTheme.colorScheme.primary) }
+                                    LibraryLoading()
                                 } else {
                                     LibraryEmptyState(tab, state.query, state.loadError, onAdd,
                                         { viewModel.setQuery("") }, viewModel::refresh)
@@ -411,7 +409,6 @@ fun DownloadsScreen(
                                 LazyColumn(
                                     state = listStates.getValue(tab),
                                     contentPadding = PaddingValues(start = TroveSpace.medium, end = TroveSpace.medium, top = TroveSpace.small, bottom = TroveSize.downloadsBottomPadding),
-                                    verticalArrangement = Arrangement.spacedBy(TroveSpace.compact),
                                     modifier = Modifier.fillMaxSize().onGloballyPositioned {
                                         listPositions[tab] = it.localToRoot(Offset.Zero)
                                     },
@@ -420,6 +417,7 @@ fun DownloadsScreen(
                                         DownloadRow(
                                             download = download,
                                             metadata = state.metadata[download.kind to download.id],
+                                            refreshing = state.refreshing,
                                             resolving = state.resolvingDownload == (download.kind to download.id),
                                             playEnabled = state.resolvingDownload == null && state.playUrl == null,
                                             onPlay = { if (viewModel.isCurrentDownload(download)) viewModel.play(download) },
@@ -540,17 +538,24 @@ private fun Subtabs(
                 text = {
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         Text(label, style = MaterialTheme.typography.labelLarge, maxLines = 1, softWrap = false)
-                        CountPill(counts[kind] ?: 0, selected = kind == selected)
-                        // Loaded-so-far count: "+" marks a tab with more
-                        // pages still to load (Step 2).
-                        if (hasMorePages[kind] == true) {
-                            Text("+", style = MaterialTheme.typography.labelLarge,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 1, softWrap = false)
-                        }
+                        CountPill(counts[kind] ?: 0, selected = kind == selected,
+                            hasMore = hasMorePages[kind] == true)
                     }
                 })
         }
+    }
+}
+
+@Composable
+private fun LibraryLoading() {
+    val loading = stringResource(R.string.loading_library)
+    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        CircularProgressIndicator(
+            modifier = Modifier.semantics {
+                liveRegion = LiveRegionMode.Polite
+                stateDescription = loading
+            },
+        )
     }
 }
 

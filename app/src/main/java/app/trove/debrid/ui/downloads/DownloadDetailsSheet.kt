@@ -3,7 +3,9 @@ package app.trove.debrid.ui.downloads
 import app.trove.debrid.R
 import androidx.compose.ui.res.stringResource
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
@@ -47,7 +49,7 @@ internal fun DownloadDetailsSheet(
     val candidates = state.candidates[download.kind to download.id].orEmpty()
     val storedOverride = state.metadataOverrides[download.kind to download.id]
     val title = remember(download.name, metadata) {
-        if (metadata == null) download.name else downloadIdentity(download, metadata).title
+        downloadIdentity(download, metadata).title
     }
     val episodes = metadata?.episodes.orEmpty()
     val matchedEpisode = remember(episodes, download.name) {
@@ -74,6 +76,11 @@ internal fun DownloadDetailsSheet(
                     Text(title, style = MaterialTheme.typography.headlineSmall)
                     Text(stringResource(R.string.details_metadata, kindWord(download.kind), formatSize(download.sizeBytes), statusWord(download.status)),
                         style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (title != download.name) MetadataLine(download.name)
+                    addedDate(download.createdAtEpochMs)?.let {
+                        MetadataLine(stringResource(R.string.added_date, it))
+                    }
+                    MetadataLine(stringResource(R.string.files_count, download.files.size))
                     DownloadTransfer(download)
                     state.error?.let { app.trove.debrid.ui.Feedback(it, error = true) }
                     if (busy && download.files.isEmpty()) {
@@ -102,9 +109,9 @@ internal fun DownloadDetailsSheet(
                     Column(verticalArrangement = Arrangement.spacedBy(TroveSpace.compact)) {
                         overview?.let { Text(it, style = MaterialTheme.typography.bodyMedium) }
                         if (facts.isNotEmpty()) MetadataLine(facts)
-                        director?.let { MetadataLine(stringResource(R.string.directed_by, it), compact = true) }
+                        director?.let { MetadataLine(stringResource(R.string.directed_by, it), maxLines = 1) }
                         if (metadata.cast.isNotEmpty()) {
-                            MetadataLine(stringResource(R.string.cast_list, metadata.cast.joinToString(", ")), compact = true)
+                            MetadataLine(stringResource(R.string.cast_list, metadata.cast.joinToString(", ")), maxLines = 2)
                         }
                     }
                 }
@@ -160,18 +167,28 @@ internal fun DownloadDetailsSheet(
                     }
                 }
                 items(visibleEpisodes, key = { it.season to it.episode }) { episode ->
-                    val color = if (episode == matchedEpisode) MaterialTheme.colorScheme.secondaryContainer
-                        else MaterialTheme.colorScheme.surfaceContainerHigh
-                    Surface(shape = MaterialTheme.shapes.medium, color = color) {
+                    Column {
                         Column(
-                            Modifier.fillMaxWidth().padding(TroveSpace.medium),
+                            Modifier.fillMaxWidth(),
                             verticalArrangement = Arrangement.spacedBy(TroveSpace.micro),
                         ) {
                             val number = String.format(Locale.ROOT, "S%02dE%02d", episode.season, episode.episode)
                             val title = episode.title?.takeIf { it.isNotBlank() }
                             Text(if (title == null) number else "$number · $title", style = MaterialTheme.typography.bodyMedium)
+                            if (episode == matchedEpisode) {
+                                val accent = MaterialTheme.colorScheme.primary
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(TroveSpace.small),
+                                ) {
+                                    Box(Modifier.size(6.dp).background(accent, CircleShape))
+                                    Text(stringResource(R.string.episode_matched),
+                                        style = MaterialTheme.typography.labelMedium, color = accent)
+                                }
+                            }
                             episode.released?.takeIf { it.isNotBlank() }?.let { MetadataLine(it) }
                         }
+                        HorizontalDivider(Modifier.padding(top = TroveSpace.small))
                     }
                 }
             }
@@ -179,8 +196,8 @@ internal fun DownloadDetailsSheet(
                 Text(stringResource(R.string.files_count, visibleFiles.size), style = MaterialTheme.typography.titleMedium)
             }
             items(visibleFiles, key = { it.id }) { file ->
-                Surface(shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.surfaceContainerHigh) {
-                    Row(Modifier.fillMaxWidth().padding(TroveSpace.medium), verticalAlignment = Alignment.CenterVertically,
+                Column {
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(TroveSpace.compact)) {
                         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(TroveSpace.micro)) {
                             Text(baseFileName(file.name), style = MaterialTheme.typography.bodyLarge)
@@ -214,6 +231,7 @@ internal fun DownloadDetailsSheet(
                             }
                         }
                     }
+                    HorizontalDivider()
                 }
             }
         }
@@ -221,12 +239,12 @@ internal fun DownloadDetailsSheet(
 }
 
 @Composable
-private fun MetadataLine(text: String, compact: Boolean = false) {
+private fun MetadataLine(text: String, maxLines: Int = Int.MAX_VALUE) {
     Text(
         text,
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
-        maxLines = if (compact) 1 else Int.MAX_VALUE,
+        maxLines = maxLines,
         overflow = TextOverflow.Ellipsis,
     )
 }

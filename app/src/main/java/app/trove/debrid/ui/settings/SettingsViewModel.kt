@@ -915,7 +915,6 @@ internal class ProviderSectionDescriptor(
     val signedOut: Int? = null,
     val signOutFailed: Int? = null,
     val maskedCredential: (SettingsUiState) -> String = { SAVED_CREDENTIAL_MASK },
-    val connectionHeading: Int? = null,
     val buttonPadding: Dp = TroveSpace.medium,
     val progressStroke: Dp? = null,
 ) {
@@ -970,7 +969,6 @@ internal val providerSectionDescriptors = listOf(
         clearField = { it.copy(torbox = it.torbox.copy(keyField = "", showKey = false)) },
         clearAccount = { it.copy(torbox = it.torbox.copy(hasKey = false, accountLabel = null, maskedKey = "")) },
         maskedCredential = { it.torbox.maskedKey },
-        connectionHeading = R.string.connection,
         buttonPadding = 18.dp,
         progressStroke = 2.dp,
     ),
