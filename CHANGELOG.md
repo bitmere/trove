@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.31 — 2026-11-20
+
+- Poster regression fix (PR 45): updated installs serve surviving legacy posters immediately instead of skipping them when a TMDB key is set, and a posterless result no longer overwrites a good cached poster.
+- Artwork fallbacks (PR 45): when TMDB resolves a title but has no usable poster, Cinemeta artwork is tried; a failed TMDB image falls back to the known Cinemeta artwork; an explicit refresh retries posterless rows and rows whose TMDB cooldown expired.
+- Last good poster (PR 45): the row and details sheet keep the last successfully decoded poster across revalidation and order changes, replacing it only when the new image decodes.
+- TMDB key changes (PR 45): any key change — including swapping one key for another — now invalidates metadata resolved under the old key.
+- Baseline: 630 JVM tests, lint 0 errors.
+
 ## 0.1.30 — 2026-11-20
 
 - Poster speed (PR 42): TMDB row thumbnails prefer w185 with w342/w500 cache reuse; transient poster failures retry after ~1s then ~2s instead of two 60s waits; poster loads survive a library refresh; visible metadata publishes per-result instead of waiting for a batch; the next 3 rows prefetch once the visible ones are done.
