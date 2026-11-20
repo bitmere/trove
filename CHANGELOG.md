@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.29 — 2026-11-20
+
+- Details sheet (PR 39): the sheet no longer bounces up and down while metadata loads — its insets are now stable instead of depending on the sheet's current offset, and its inputs are scoped to the selected download; a dead import was removed.
+- Posters (PR 39): a poster-only TMDB fallback fills in posters when Cinemeta returns metadata without one, by IMDb id or title search, keeping the Cinemeta text; posterless entries revalidate instead of freezing for 180 days; the parser strips edition, parenthetical and dub tags and tries ordered query variants; TMDB original_title matching with a popularity tie-break; tap a poster placeholder to retry; an explicit refresh bypasses the 1 h miss; TMDB row posters prefer w342.
+- Hydration (PR 39): visible rows hydrate first with 4 concurrent lookups and per-title lookup lanes instead of one Mutex held across network I/O, so the list fills in faster on slow connections.
+- Baseline: 601 JVM tests, lint 0 errors.
+
 ## 0.1.28 — 2026-11-20
 
 - Download row redesign (PR 36): flat one-title rows with a 48dp poster, a neutral placeholder instead of the Play glyph, and Play as a compact Jade-tinted trailing icon button; the raw release name, added date, and file facts move to the details sheet.
