@@ -87,8 +87,26 @@ class PosterDiskCache(
     }
 
     @Synchronized
+    internal fun move(from: String, to: String) {
+        runCatching {
+            val source = file(from) ?: return
+            val target = file(to) ?: return
+            if (!target.isFile) source.renameTo(target)
+        }
+    }
+
+    @Synchronized
     fun remove(url: String) { runCatching { file(url)?.delete() } }
 }
+
+/**
+ * These renditions identify the same TMDB poster. Retain the requested URL
+ * for fetching and accept cached bytes at any of the three sizes.
+ */
+fun posterCacheKey(url: String): String = tmdbPosterRendition.replace(url, "$1w185$2")
+
+private val tmdbPosterRendition =
+    Regex("^(https://image\\.tmdb\\.org/t/p/)(?:w185|w342|w500)(/[^/?#]+)$")
 
 /** Decode is injected so corrupt-image fallback is tested on the JVM without Android. */
 class PosterSource<T : Any>(
@@ -98,17 +116,25 @@ class PosterSource<T : Any>(
 ) {
     suspend fun load(url: String): T? {
         if (publicPosterUrl(url) == null) return null
-        disk?.get(url)?.let { bytes ->
+        val key = posterCacheKey(url)
+        val candidates = if (tmdbPosterRendition.matches(url)) {
+            listOf(key, key.replace("/t/p/w185/", "/t/p/w342/"), key.replace("/t/p/w185/", "/t/p/w500/"))
+        } else listOf(key)
+        for (candidate in candidates) {
+            val bytes = disk?.get(candidate) ?: continue
             val value = try { decode(bytes) }
                 catch (e: CancellationException) { throw e }
                 catch (_: Exception) { null }
-            if (value != null) return value
-            disk?.remove(url)
+            if (value != null) {
+                if (candidate != key) disk?.move(candidate, key)
+                return value
+            }
+            disk?.remove(candidate)
         }
         val bytes = fetch(url)
         if (bytes.size > PosterDiskCache.MAX_ENTRY_BYTES) return null
         val value = decode(bytes) ?: return null
-        disk?.put(url, bytes)
+        disk?.put(key, bytes)
         return value
     }
 }

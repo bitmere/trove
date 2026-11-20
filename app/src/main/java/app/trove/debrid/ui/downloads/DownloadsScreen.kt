@@ -34,6 +34,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Clear
@@ -77,6 +78,8 @@ import app.trove.debrid.ui.SearchBackdrop
 import app.trove.debrid.ui.backdropSource
 import app.trove.debrid.ui.rememberBackdropBlurEffect
 import app.trove.debrid.ui.rememberBackdropBlurEnabled
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 
 /** Download library with compact rows and a focused playback sheet. */
@@ -117,6 +120,26 @@ fun DownloadsScreen(
     LaunchedEffect(selectedTab, listState, viewModel) {
         snapshotFlow { listState.layoutInfo.visibleItemsInfo.mapNotNull { it.key as? String }.toSet() }
             .collect { viewModel.updateVisibleRows(selectedTab, it) }
+    }
+    val application = LocalContext.current.applicationContext
+    LaunchedEffect(selectedTab, listState, viewModel, application) {
+        snapshotFlow {
+            val current = state
+            if (listState.isScrollInProgress || pagerState.isScrollInProgress || current.refreshing ||
+                current.loading || current.filePicker != null || selectedTab != current.tab
+            ) null else {
+                val rows = current.visibleByTab[selectedTab].orEmpty()
+                val indices = listState.layoutInfo.visibleItemsInfo.mapNotNull { item ->
+                    item.index.takeIf { rows.getOrNull(it)?.let { row -> "${row.kind}:${row.id}" } == item.key }
+                }
+                posterPrefetchPlan(current, rows, indices)
+            }
+        }.collectLatest { plan ->
+            if (plan != null) {
+                delay(350)
+                PosterLoader.prefetch(plan.visible, plan.next) { application.cacheDir }
+            }
+        }
     }
     val searchFocus = remember { FocusRequester() }
     val keyboard = LocalSoftwareKeyboardController.current
@@ -420,7 +443,7 @@ fun DownloadsScreen(
                                         DownloadRow(
                                             download = download,
                                             metadata = state.metadata[download.kind to download.id],
-                                            refreshing = state.refreshing,
+                                            posterUrl = state.posterUrl(download.kind to download.id),
                                             resolving = state.resolvingDownload == (download.kind to download.id),
                                             playEnabled = state.resolvingDownload == null && state.playUrl == null,
                                             onPlay = { if (viewModel.isCurrentDownload(download)) viewModel.play(download) },
@@ -483,8 +506,10 @@ fun DownloadsScreen(
         val playPending = state.playUrl != null
         val resolvingFileId = state.resolvingFileId.takeIf { state.resolvingDownload == key }
         val error = state.error
-        val details = remember(metadata, candidates, hasOverride, resolving, playPending, resolvingFileId, error) {
-            DownloadDetailsState(metadata, candidates, hasOverride, resolving, playPending, resolvingFileId, error)
+        val provenance = state.enrichment[key] ?: metadata?.provenance
+        val posterUrl = state.posterUrl(key)
+        val details = remember(metadata, candidates, hasOverride, resolving, playPending, resolvingFileId, error, provenance, posterUrl) {
+            DownloadDetailsState(metadata, candidates, hasOverride, resolving, playPending, resolvingFileId, error, provenance, posterUrl)
         }
         DownloadDetailsSheet(
             download = download, state = details, sheetState = detailsSheetState,

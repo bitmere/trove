@@ -9,42 +9,34 @@ import java.net.URLEncoder
 import kotlin.math.abs
 
 /**
- * TMDB as an opt-in fallback behind Cinemeta, never a primary source.
+ * Opt-in TMDB metadata and artwork. The per-user token is sent only in the
+ * `Authorization: Bearer` header. It never appears in a URL or in logs.
+ * With a missing or blank token, metadata lookups silently skip TMDB and
+ * make zero TMDB requests. [CinemetaResolver] tries TMDB first only with a
+ * configured token and falls back to Cinemeta if the primary lookup fails
+ * or finds no match.
  *
- * The caller supplies a per-user API Read Access Token (v4 auth) via
- * [apiKey]; there is no shared or shipped key. A missing or blank key
- * means TMDB is silently skipped — [resolve] and [resolveById] return
- * null without touching the network. The token travels only as an
- * `Authorization: Bearer` header, never in a URL, and is never logged:
- * [HttpRequest.toString] redacts request URLs and headers are not
- * printed at all.
+ * A lookup with a known IMDb ID uses `/3/find`. Without one, TMDB searches
+ * by title. The primary title search requires a single match and an exact
+ * year when the query supplies one. A full match fetches details and
+ * best-effort credits. The primary detail request appends `external_ids`
+ * to obtain the IMDb ID for Cinemeta backfill.
  *
- * Lookup order mirrors the resolver it backs: `/3/find/{imdbId}` first
- * when an IMDb id is known (one call bridges the stored id), title
- * search second (`/3/search/movie`, `/3/search/tv`) with exact normalized
- * localized or original titles and a strict year gate. A match is then expanded with a detail call
- * (genres, runtime, overview) and a best-effort credits call (cast,
- * director), because search and find responses carry neither.
+ * Poster URLs use the HTTPS base URL and sizes from `/3/configuration`,
+ * with no hardcoded CDN host. TMDB's `vote_average` is deliberately left
+ * out of [MediaMetadata.imdbRating]. TMDB TV results carry no episode list
+ * because fetching it requires a call per season. Cinemeta backfill supplies
+ * episodes and the IMDb rating when available.
  *
- * Poster URLs are built from `GET /3/configuration` (image base URL +
- * sizes), fetched once per resolver and cached in memory. The CDN host
- * is never hardcoded: when configuration cannot be read, the title
- * still resolves and the poster is left null.
- *
- * TMDB-sourced entries are cached by the caller with the same 180-day
- * disk TTL as Cinemeta entries, inside the 6-month cap in the TMDB API
- * Terms of Use (§1.C: "Cache, for longer than 6 months, any
- * information obtained through or from TMDB or the TMDB APIs.").
- * This resolver keeps no disk cache of its own.
- *
- * Deliberate gaps, not oversights: the TMDB `vote_average` is NOT
- * mapped onto [MediaMetadata.imdbRating] — the details sheet renders
- * that field as an IMDb rating, and a TMDB score is not one. TV results
- * carry no episode list (that needs one call per season), so episodes
- * stay empty and keep coming from Cinemeta.
+ * TMDB-sourced entries use the same 180-day disk-cache freshness TTL as
+ * Cinemeta entries, within the six-month cap in section 1.C of the TMDB
+ * API Terms of Use. An HTTP 429 honors `Retry-After` and sets a cooldown
+ * shared by all requests through this resolver. Primary lookups fall back
+ * to Cinemeta during the cooldown, avoiding repeated TMDB requests.
  */
 class TmdbResolver(
     private val transport: HttpTransport,
+    private val now: () -> Long = System::currentTimeMillis,
     private val apiKey: () -> String?,
 ) {
     private companion object {
@@ -68,6 +60,19 @@ class TmdbResolver(
     private val configMutex = Mutex()
     private var imageConfig: ImageConfig? = null
 
+    @Volatile private var blockedUntil = 0L
+    private val rateLimitLock = Any()
+
+    internal fun configuredKey(): String? = apiKey()?.takeIf { it.isNotBlank() }
+    internal fun cooldownUntil(): Long = blockedUntil
+
+    /** A rate limit anywhere in primary enrichment sends the lookup to Cinemeta. */
+    internal suspend fun resolvePrimary(query: MediaQuery, key: String): MediaMetadata? {
+        val hit = searchHit(query, key, strict = true) ?: return null
+        val metadata = detail(hit, null, imageConfig(key, primary = true), key, primary = true)
+        return metadata?.takeIf { it.year == null || query.year == null || it.year == query.year }
+    }
+
     /** Key check without resolving: a 2xx from /3/configuration with
      *  the given key means the key works. The key is a parameter, not
      *  the stored one, so a key can be checked before it is saved. */
@@ -87,7 +92,7 @@ class TmdbResolver(
      *  no key is configured (no network call), when nothing matches
      *  strictly, or when any TMDB call fails. */
     suspend fun resolve(query: MediaQuery, imdbId: String? = null): MediaMetadata? {
-        val key = apiKey()?.takeIf { it.isNotBlank() } ?: return null
+        val key = configuredKey() ?: return null
         if (query.title.isBlank() || query.title.length > 160) return null
         return try {
             val hit = if (imdbId?.matches(imdbIdPattern) == true) {
@@ -105,7 +110,7 @@ class TmdbResolver(
 
     /** Find a poster without fetching the detail and credits used for a full match. */
     suspend fun resolvePoster(query: MediaQuery, imdbId: String?): String? {
-        val key = apiKey()?.takeIf { it.isNotBlank() } ?: return null
+        val key = configuredKey() ?: return null
         return try {
             val hit = if (imdbId?.matches(imdbIdPattern) == true) {
                 findHit(imdbId, query.type, key)
@@ -126,7 +131,7 @@ class TmdbResolver(
      *  "movie" or "series"; anything else returns null without a
      *  network call. */
     suspend fun resolveById(imdbId: String, type: String): MediaMetadata? {
-        val key = apiKey()?.takeIf { it.isNotBlank() } ?: return null
+        val key = configuredKey() ?: return null
         if (!imdbId.matches(imdbIdPattern) || type !in listOf("movie", "series")) return null
         return try {
             val config = imageConfig(key)
@@ -152,7 +157,7 @@ class TmdbResolver(
         }
     }
 
-    private suspend fun searchHit(query: MediaQuery, key: String): TmdbHit? {
+    private suspend fun searchHit(query: MediaQuery, key: String, strict: Boolean = false): TmdbHit? {
         val encoded = URLEncoder.encode(query.title, "UTF-8").replace("+", "%20")
         val titleKey = normalizedTitle(query.title)
         val types = query.type?.let { listOf(it) } ?: listOf("movie", "series")
@@ -174,6 +179,7 @@ class TmdbResolver(
                 }
         }.distinctBy { it.hit.tmdbId to it.hit.type }
         if (query.year == null) return hits.singleOrNull()?.hit
+        if (strict) return hits.singleOrNull { it.year == query.year }?.hit
         val eligible = hits.filter { matchesYear(it.year, query.year, tolerance = 1) }
         val titleMatches = eligible.filter { it.localizedTitleMatches }.ifEmpty { eligible }
         val ranked = titleMatches.filter { it.year == query.year }
@@ -195,9 +201,11 @@ class TmdbResolver(
         imdbId: String?,
         config: ImageConfig?,
         key: String,
+        primary: Boolean = false,
     ): MediaMetadata? {
         val endpoint = if (hit.type == "series") "tv" else "movie"
-        val obj = get("/3/$endpoint/${hit.tmdbId}", key)
+        val append = if (primary) "?append_to_response=external_ids" else ""
+        val obj = get("/3/$endpoint/${hit.tmdbId}$append", key)
         if (obj.optInt("id") != hit.tmdbId) return null
         val title = obj.optString(if (hit.type == "series") "name" else "title")
             ?.takeIf { it.isNotBlank() } ?: return null
@@ -205,7 +213,8 @@ class TmdbResolver(
             get("/3/$endpoint/${hit.tmdbId}/credits", key)
         } catch (e: CancellationException) {
             throw e
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            if (primary && e is RateLimited) throw e
             null
         }
         val cast = credits?.results("cast")
@@ -223,8 +232,12 @@ class TmdbResolver(
             title = title,
             year = releaseYear(obj, hit.type),
             type = hit.type,
-            posterUrl = posterUrl(config, obj.optString("poster_path")),
-            imdbId = imdbId,
+            posterUrl = posterUrl(config, obj.optString("poster_path") ?: hit.posterPath),
+            imdbId = imdbId ?: if (primary) {
+                val external = obj.get("external_ids")?.takeIf { it.isJsonObject }?.asJsonObject
+                (external?.optString("imdb_id") ?: obj.optString("imdb_id"))
+                    ?.takeIf { it.matches(imdbIdPattern) }
+            } else null,
             overview = obj.optString("overview")?.takeIf { it.isNotBlank() },
             genres = obj.results("genres")
                 .mapNotNull { it.second.optString("name")?.takeIf(String::isNotBlank) }
@@ -232,12 +245,13 @@ class TmdbResolver(
             cast = cast,
             director = director,
             runtime = runtimeMinutes?.let { "$it min" },
+            provenance = EnrichmentProvenance.TMDB,
         )
     }
 
     /** Configuration is key-independent, so one fetch serves every
      *  key. A failure leaves the poster out, never the title. */
-    private suspend fun imageConfig(key: String): ImageConfig? {
+    private suspend fun imageConfig(key: String, primary: Boolean = false): ImageConfig? {
         imageConfig?.let { return it }
         return configMutex.withLock {
             imageConfig?.let { return it }
@@ -247,7 +261,8 @@ class TmdbResolver(
                 if (base == null) null else ImageConfig(base, images.stringResults("poster_sizes"))
             } catch (e: CancellationException) {
                 throw e
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                if (primary && e is RateLimited) throw e
                 null
             }
             if (parsed != null) imageConfig = parsed
@@ -258,7 +273,8 @@ class TmdbResolver(
     private fun posterUrl(config: ImageConfig?, path: String?): String? {
         val base = config?.baseUrl?.takeIf { it.startsWith("https://") } ?: return null
         val cleanPath = path?.takeIf { it.startsWith("/") } ?: return null
-        val size = config.posterSizes.firstOrNull { it == "w342" }
+        val size = config.posterSizes.firstOrNull { it == "w185" }
+            ?: config.posterSizes.firstOrNull { it == "w342" }
             ?: config.posterSizes.firstOrNull { it == "w500" }
             ?: config.posterSizes.firstOrNull { it != "original" }
             ?: config.posterSizes.firstOrNull()
@@ -266,10 +282,31 @@ class TmdbResolver(
         return publicPosterUrl("$base$size$cleanPath")
     }
 
+    private class RateLimited : Exception("TMDB rate limited")
+
     private suspend fun get(path: String, key: String): JsonObject {
+        if (now() < blockedUntil) throw RateLimited()
         val response = transport.execute(
             HttpRequest("GET", "$BASE_URL$path", mapOf("Authorization" to "Bearer $key")),
         )
+        if (response.status == 429) {
+            val currentTime = now()
+            val header = response.headers.entries.firstOrNull { it.key.equals("Retry-After", true) }?.value
+            val seconds = header?.trim()?.toLongOrNull()?.takeIf { it >= 0 }
+            val httpDate = if (seconds == null && header != null) runCatching {
+                java.time.ZonedDateTime.parse(header, java.time.format.DateTimeFormatter.RFC_1123_DATE_TIME)
+                    .toInstant().toEpochMilli()
+            }.getOrNull() else null
+            val deadline = when {
+                seconds != null -> currentTime + seconds.coerceAtMost((Long.MAX_VALUE - currentTime) / 1000) * 1000
+                httpDate != null -> httpDate
+                else -> currentTime + 60_000
+            }
+            synchronized(rateLimitLock) {
+                blockedUntil = maxOf(blockedUntil, deadline, currentTime + 1_000)
+            }
+            throw RateLimited()
+        }
         check(response.status in 200..299)
         return JsonParser.parseString(response.body).asJsonObject
     }

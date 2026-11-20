@@ -23,6 +23,9 @@ import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.DpSize
+import androidx.compose.ui.platform.LocalDensity
 import app.trove.debrid.core.*
 import app.trove.debrid.ui.theme.TroveSpace
 import java.util.Locale
@@ -35,6 +38,8 @@ internal data class DownloadDetailsState(
     val playPending: Boolean,
     val resolvingFileId: String?,
     val error: String?,
+    val provenance: EnrichmentProvenance? = metadata?.provenance,
+    val posterUrl: String? = metadata?.posterUrl,
 )
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
@@ -92,9 +97,22 @@ internal fun DownloadDetailsSheet(
         ) {
             item {
                 Column(verticalArrangement = Arrangement.spacedBy(TroveSpace.compact)) {
-                    Text(title, style = MaterialTheme.typography.headlineSmall)
-                    Text(stringResource(R.string.details_metadata, kindWord(download.kind), formatSize(download.sizeBytes), statusWord(download.status)),
-                        style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    val posterUrl = remember(state.posterUrl) { publicPosterUrl(state.posterUrl) }
+                    val subtitle = stringResource(
+                        R.string.details_metadata, kindWord(download.kind),
+                        formatSize(download.sizeBytes), statusWord(download.status),
+                    )
+                    if (posterUrl == null) {
+                        DetailsTitle(title, subtitle)
+                    } else {
+                        BoxWithConstraints(Modifier.fillMaxWidth()) {
+                            val size = detailsPosterSize(maxWidth, LocalDensity.current.fontScale)
+                            Row(horizontalArrangement = Arrangement.spacedBy(TroveSpace.medium)) {
+                                MetadataPoster(posterUrl, size)
+                                Column(Modifier.weight(1f)) { DetailsTitle(title, subtitle) }
+                            }
+                        }
+                    }
                     if (title != download.name) MetadataLine(download.name)
                     addedDate(download.createdAtEpochMs)?.let {
                         MetadataLine(stringResource(R.string.added_date, it))
@@ -124,7 +142,7 @@ internal fun DownloadDetailsSheet(
                 ).joinToString(" · ")
                 val overview = metadata.overview?.takeIf { it.isNotBlank() }
                 val director = metadata.director?.takeIf { it.isNotBlank() }
-                if (overview != null || facts.isNotEmpty() || director != null || metadata.cast.isNotEmpty()) item {
+                if (overview != null || facts.isNotEmpty() || director != null || metadata.cast.isNotEmpty() || state.provenance != null) item {
                     Column(verticalArrangement = Arrangement.spacedBy(TroveSpace.compact)) {
                         overview?.let { Text(it, style = MaterialTheme.typography.bodyMedium) }
                         if (facts.isNotEmpty()) MetadataLine(facts)
@@ -132,10 +150,13 @@ internal fun DownloadDetailsSheet(
                         if (metadata.cast.isNotEmpty()) {
                             MetadataLine(stringResource(R.string.cast_list, metadata.cast.joinToString(", ")), maxLines = 2)
                         }
+                        state.provenance?.let { MetadataLine(stringResource(it.label())) }
                     }
                 }
+            } else {
+                state.provenance?.let { source -> item { MetadataLine(stringResource(source.label())) } }
             }
-            if (metadata != null && state.hasOverride) item {
+            if (state.hasOverride) item {
                 TextButton(onClick = onClearOverride) { Text(stringResource(R.string.clear_metadata_override)) }
             }
             if (metadata == null && candidates.isNotEmpty()) item {
@@ -266,4 +287,27 @@ private fun MetadataLine(text: String, maxLines: Int = Int.MAX_VALUE) {
         maxLines = maxLines,
         overflow = TextOverflow.Ellipsis,
     )
+}
+
+
+internal fun detailsPosterSize(availableWidth: Dp, fontScale: Float): DpSize =
+    if (availableWidth < 300.dp || fontScale >= 1.3f) DpSize(64.dp, 96.dp) else DpSize(80.dp, 120.dp)
+
+@Composable
+private fun DetailsTitle(title: String, subtitle: String) {
+    Column(verticalArrangement = Arrangement.spacedBy(TroveSpace.compact)) {
+        Text(title, style = MaterialTheme.typography.headlineSmall)
+        Text(subtitle, style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+private fun EnrichmentProvenance.label(): Int = when (this) {
+    EnrichmentProvenance.CINEMETA -> R.string.enrichment_cinemeta
+    EnrichmentProvenance.TMDB -> R.string.enrichment_tmdb
+    EnrichmentProvenance.CINEMETA_TMDB_POSTER -> R.string.enrichment_tmdb_poster
+    EnrichmentProvenance.TMDB_CINEMETA_BACKFILL -> R.string.enrichment_cinemeta_backfill
+    EnrichmentProvenance.LEGACY_TMDB -> R.string.enrichment_tmdb_legacy
+    EnrichmentProvenance.NO_MATCH -> R.string.enrichment_no_match
+    EnrichmentProvenance.UNAVAILABLE -> R.string.enrichment_unavailable
 }

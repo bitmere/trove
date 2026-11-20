@@ -1,6 +1,7 @@
 package app.trove.debrid.core
 
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
@@ -18,6 +19,7 @@ class MediaMetadataTest {
     private val movieQuery = MediaQuery("Example Film", 2026, "movie")
     private val cachedMovie = MediaMetadata(
         movieQuery.title, movieQuery.year, movieQuery.type, posterUrl = "https://images.example.invalid/cached.jpg",
+        provenance = EnrichmentProvenance.CINEMETA,
     )
     private val unexpectedNetwork = object : HttpTransport {
         override suspend fun execute(request: HttpRequest): HttpResponse =
@@ -170,6 +172,7 @@ class MediaMetadataTest {
                 imdbId = "tt0000001", overview = "A synopsis.", genres = listOf("Drama", "Mystery"),
                 cast = listOf("Actor One", "Actor Two"), director = "Director One", imdbRating = 8.2,
                 runtime = "120m", episodes = listOf(MediaEpisode(1, 2, "Second", "2026-01-02")),
+                provenance = EnrichmentProvenance.CINEMETA,
             ),
             result,
         )
@@ -201,7 +204,7 @@ class MediaMetadataTest {
     @Test fun `missing optional fields keep defaults and retain IMDb id`() = runBlocking {
         assertEquals(
             MediaMetadata("Example Film", 2026, "movie", "https://images.example.invalid/poster.jpg",
-                imdbId = "tt0000001"),
+                imdbId = "tt0000001", provenance = EnrichmentProvenance.CINEMETA),
             CinemetaResolver(CinemetaTransport()).resolve(MediaQuery("Example Film", 2026, "movie")),
         )
     }
@@ -523,9 +526,9 @@ class MediaMetadataTest {
             }
         }
 
-    @Test fun `cinemeta miss falls back to TMDB and records the source`() = runBlocking {
+    @Test fun `a strong result without IMDb id uses TMDB alone without starting backfill`() = runBlocking {
         val disk = MetadataDiskCache(folder.root)
-        val cinemeta = CinemetaTransport().apply { catalog = """{"metas":[]}""" }
+        val cinemeta = CinemetaTransport()
         val tmdbCalls = mutableListOf<HttpRequest>()
         val resolver = CinemetaResolver(
             cinemeta,
@@ -536,19 +539,23 @@ class MediaMetadataTest {
         assertEquals("Example Film", result?.title)
         assertEquals("Fallback hit.", result?.overview)
         assertEquals("https://images.example.invalid/t/p/w342/d.jpg", result?.posterUrl)
+        assertTrue(cinemeta.requests.isEmpty())
+        assertNull(result?.imdbId)
+        assertNull(result?.imdbRating)
+        assertTrue(result?.episodes?.isEmpty() == true)
         assertTrue(tmdbCalls.isNotEmpty())
         assertTrue(tmdbCalls.all { it.headers["Authorization"] == "Bearer test-key" })
         val entry = disk.get(movieQuery)
-        assertEquals("tmdb", entry?.source)
+        assertEquals(EnrichmentProvenance.TMDB, entry?.metadata?.provenance)
         assertEquals(result, entry?.metadata)
         assertTrue(entry?.isFresh(System.currentTimeMillis()) == true)
     }
 
-    @Test fun `cinemeta hit with a poster never calls TMDB`() = runBlocking {
+    @Test fun `cinemeta hit with a poster and no key never calls TMDB`() = runBlocking {
         val tmdbCalls = mutableListOf<HttpRequest>()
         val resolver = CinemetaResolver(
             CinemetaTransport(),
-            tmdbResolver = TmdbResolver(tmdbTransport(tmdbCalls)) { "test-key" },
+            tmdbResolver = TmdbResolver(tmdbTransport(tmdbCalls)) { null },
         )
         val result = resolver.resolve(movieQuery)
         assertEquals("Example Film", result?.title)
@@ -569,8 +576,11 @@ class MediaMetadataTest {
 
         val calls = mutableListOf<HttpRequest>()
         val result = CinemetaResolver(http, tmdbResolver = TmdbResolver(tmdbTransport(calls)) { "test-key" })
-            .resolve(movieQuery)
-        assertEquals(original?.copy(posterUrl = "https://images.example.invalid/t/p/w342/find.jpg"), result)
+            .resolveById("tt0000001", "movie")
+        assertEquals(original?.copy(
+            posterUrl = "https://images.example.invalid/t/p/w342/find.jpg",
+            provenance = EnrichmentProvenance.CINEMETA_TMDB_POSTER,
+        ), result)
         assertEquals(
             listOf("find/tt0000001?external_source=imdb_id", "configuration"),
             calls.map { it.url.substringAfter("/3/") },
@@ -580,14 +590,15 @@ class MediaMetadataTest {
     @Test fun `fresh posterless disk entry revalidates and a filled entry skips network`() = runBlocking {
         val disk = MetadataDiskCache(folder.root)
         val incomplete = cachedMovie.copy(imdbId = "tt0000001", posterUrl = null, overview = "Cached synopsis")
-        disk.put(movieQuery, incomplete)
+        disk.put(movieQuery, incomplete, tmdbFirst = true)
         val calls = mutableListOf<HttpRequest>()
         val result = CinemetaResolver(
             unexpectedNetwork, diskCache = disk, tmdbResolver = TmdbResolver(tmdbTransport(calls)) { "test-key" },
         ).resolve(movieQuery)
-        assertEquals(incomplete.copy(posterUrl = "https://images.example.invalid/t/p/w342/find.jpg"), result)
+        assertEquals(incomplete.copy(posterUrl = "https://images.example.invalid/t/p/w342/find.jpg",
+            provenance = EnrichmentProvenance.CINEMETA_TMDB_POSTER), result)
         assertTrue(calls.any { "/3/find/tt0000001" in it.url })
-        assertEquals("tmdb", disk.get(movieQuery)?.source)
+        assertEquals(EnrichmentProvenance.CINEMETA_TMDB_POSTER, disk.get(movieQuery)?.metadata?.provenance)
 
         assertEquals(result, CinemetaResolver(
             unexpectedNetwork, diskCache = disk, tmdbResolver = TmdbResolver(unexpectedNetwork) { "test-key" },
@@ -597,12 +608,13 @@ class MediaMetadataTest {
     @Test fun `posterless disk entry without an IMDb id uses title search`() = runBlocking {
         val disk = MetadataDiskCache(folder.root)
         val incomplete = cachedMovie.copy(posterUrl = null)
-        disk.put(movieQuery, incomplete)
+        disk.put(movieQuery, incomplete, tmdbFirst = true)
         val calls = mutableListOf<HttpRequest>()
         val result = CinemetaResolver(
             unexpectedNetwork, diskCache = disk, tmdbResolver = TmdbResolver(tmdbTransport(calls)) { "test-key" },
         ).resolve(movieQuery)
-        assertEquals(incomplete.copy(posterUrl = "https://images.example.invalid/t/p/w342/s.jpg"), result)
+        assertEquals(incomplete.copy(posterUrl = "https://images.example.invalid/t/p/w342/s.jpg",
+            provenance = EnrichmentProvenance.CINEMETA_TMDB_POSTER), result)
         assertTrue(calls.any { "/3/search/movie?query=Example%20Film" in it.url })
         assertTrue(calls.none { "/3/find/" in it.url })
     }
@@ -632,4 +644,150 @@ class MediaMetadataTest {
         assertEquals(first, resolver.resolve(movieQuery))
         assertEquals(callsAfterFirst, tmdbCalls.size)
     }
+    @Test fun `TMDB runs first and publishes its poster before by ID Cinemeta backfill`() = runBlocking {
+        val order = mutableListOf<String>()
+        val backfill = CompletableDeferred<Unit>()
+        val tmdb = tmdbTransport(mutableListOf())
+        val cinemeta = CinemetaTransport().apply {
+            meta = """{"meta":{"id":"tt0000001","title":"Example Film","name":"Example Film","type":"movie",
+                "imdbRating":"8.4","description":"Cinemeta text"}}"""
+        }
+        val primary = object : HttpTransport {
+            override suspend fun execute(request: HttpRequest): HttpResponse {
+                order += request.url.substringAfter("/3/")
+                val response = tmdb.execute(request)
+                return if (request.url.endsWith("?append_to_response=external_ids")) {
+                    response.copy(body = response.body.dropLast(1) + ""","external_ids":{"imdb_id":"tt0000001"}}""")
+                } else response
+            }
+        }
+        val secondary = object : HttpTransport {
+            override suspend fun execute(request: HttpRequest): HttpResponse {
+                order += request.url.substringAfter("strem.io/")
+                backfill.await()
+                return cinemeta.execute(request)
+            }
+        }
+        val resolver = CinemetaResolver(secondary, tmdbResolver = TmdbResolver(primary) { "key" })
+        val poster = CompletableDeferred<String>()
+        val result = async { resolver.resolveOutcome(listOf(movieQuery)) { poster.complete(it) } }
+        assertEquals("https://images.example.invalid/t/p/w342/d.jpg", withTimeout(1000) { poster.await() })
+        assertFalse(result.isCompleted)
+        backfill.complete(Unit)
+        val enriched = result.await()
+        assertEquals("search/movie?query=Example%20Film", order.first())
+        assertEquals("meta/movie/tt0000001.json", order.last())
+        assertEquals("Fallback hit.", enriched.metadata?.overview)
+        assertEquals(8.4, enriched.metadata?.imdbRating)
+        assertEquals("tt0000001", enriched.metadata?.imdbId)
+        assertEquals(EnrichmentProvenance.TMDB_CINEMETA_BACKFILL, enriched.provenance)
+    }
+
+    @Test fun `confirmed series keeps Cinemeta episodes without using TMDB votes as IMDb rating`() = runBlocking {
+        val tmdb = object : HttpTransport {
+            override suspend fun execute(request: HttpRequest): HttpResponse = HttpResponse(200, when {
+                "/3/search/tv" in request.url ->
+                    """{"results":[{"id":44,"name":"Example Show","first_air_date":"2026-01-01"}]}"""
+                request.url.endsWith("external_ids") ->
+                    """{"id":44,"name":"Example Show","vote_average":9.4,"external_ids":{"imdb_id":"tt0000001"}}"""
+                request.url.endsWith("/credits") -> "{}"
+                request.url.endsWith("/configuration") -> """{"images":{}}"""
+                else -> error("Unexpected TMDB request")
+            })
+        }
+        val cinemeta = CinemetaTransport().apply {
+            meta = """{"meta":{"type":"series","id":"tt0000001","name":"Example Show",
+                "poster":"https://example.invalid/show.jpg","videos":[{"season":1,"episode":2,"name":"Second"}]}}"""
+        }
+        val result = CinemetaResolver(cinemeta, tmdbResolver = TmdbResolver(tmdb) { "key" })
+            .resolve(MediaQuery("Example Show", 2026, "series"))
+        assertEquals(listOf(MediaEpisode(1, 2, "Second", null)), result?.episodes)
+        assertEquals("https://example.invalid/show.jpg", result?.posterUrl)
+        assertNull(result?.imdbRating)
+        assertEquals(EnrichmentProvenance.TMDB_CINEMETA_BACKFILL, result?.provenance)
+    }
+
+    @Test fun `429 retries no TMDB requests before Retry After and falls back to Cinemeta`() = runBlocking {
+        var time = 10_000L
+        var attempts = 0
+        val tmdb = object : HttpTransport {
+            override suspend fun execute(request: HttpRequest): HttpResponse {
+                attempts++
+                return if (attempts == 1) HttpResponse(429, "", mapOf("retry-after" to "5"))
+                else HttpResponse(200, """{"results":[]}""")
+            }
+        }
+        val cinemeta = CinemetaTransport()
+        val resolver = CinemetaResolver(cinemeta, now = { time },
+            tmdbResolver = TmdbResolver(tmdb, now = { time }) { "key" })
+        assertEquals(EnrichmentProvenance.CINEMETA, resolver.resolveOutcome(listOf(movieQuery)).provenance)
+        time += 4_999
+        assertNotNull(resolver.resolve(movieQuery, bypassMiss = true))
+        assertEquals(1, attempts)
+        time++
+        assertNotNull(resolver.resolve(movieQuery))
+        assertEquals(2, attempts)
+    }
+
+    @Test fun `rate limit HTTP date blocks new queries across the resolver`() = runBlocking {
+        var time = 0L
+        var attempts = 0
+        val tmdb = object : HttpTransport {
+            override suspend fun execute(request: HttpRequest): HttpResponse {
+                attempts++
+                return if (attempts == 1) {
+                    HttpResponse(429, "", mapOf("Retry-After" to "Thu, 1 Jan 1970 00:00:10 GMT"))
+                } else HttpResponse(200, """{"results":[]}""")
+            }
+        }
+        val cinemeta = CinemetaTransport()
+        val resolver = CinemetaResolver(cinemeta, now = { time },
+            tmdbResolver = TmdbResolver(tmdb, now = { time }) { "key" })
+        assertNotNull(resolver.resolve(movieQuery))
+        time = 9_999
+        assertNull(resolver.resolve(movieQuery.copy(title = "Other Film")))
+        assertEquals(1, attempts)
+        time++
+        assertNull(resolver.resolve(movieQuery.copy(title = "Other Film")))
+        assertEquals(2, attempts)
+    }
+
+    @Test fun `key enable and clear invalidate opposite order in memory and on disk`() = runBlocking {
+        var token: String? = null
+        val disk = MetadataDiskCache(folder.root)
+        val cinemeta = CinemetaTransport()
+        val calls = mutableListOf<HttpRequest>()
+        val tmdb = TmdbResolver(tmdbTransport(calls)) { token }
+        val resolver = CinemetaResolver(cinemeta, diskCache = disk, tmdbResolver = tmdb)
+        assertEquals(EnrichmentProvenance.CINEMETA, resolver.resolve(movieQuery)?.provenance)
+        assertTrue(calls.isEmpty())
+        assertFalse(disk.get(movieQuery)!!.tmdbFirst)
+
+        token = "key"
+        cinemeta.catalog = """{"metas":[]}"""
+        assertEquals(EnrichmentProvenance.TMDB, resolver.resolve(movieQuery)?.provenance)
+        assertTrue(disk.get(movieQuery)!!.tmdbFirst)
+        val requestCount = calls.size
+        val reopened = CinemetaResolver(unexpectedNetwork, diskCache = disk, tmdbResolver = tmdb)
+        assertEquals(EnrichmentProvenance.TMDB, reopened.resolve(movieQuery)?.provenance)
+        assertEquals(requestCount, calls.size)
+
+        token = null
+        cinemeta.catalog = CinemetaTransport().catalog
+        val cleared = CinemetaResolver(cinemeta, diskCache = disk, tmdbResolver = tmdb)
+        assertEquals(EnrichmentProvenance.CINEMETA, cleared.resolve(movieQuery)?.provenance)
+        assertEquals(EnrichmentProvenance.CINEMETA, resolver.resolve(movieQuery)?.provenance)
+        assertEquals(requestCount, calls.size)
+        assertFalse(disk.get(movieQuery)!!.tmdbFirst)
+    }
+
+    @Test fun `no match and lookup failure are distinct including cached outcomes`() = runBlocking {
+        val miss = CinemetaResolver(CinemetaTransport().apply { catalog = """{"metas":[]}""" })
+        val failed = CinemetaResolver(CinemetaTransport().apply { status = 503 })
+        repeat(2) {
+            assertEquals(EnrichmentProvenance.NO_MATCH, miss.resolveOutcome(listOf(movieQuery)).provenance)
+            assertEquals(EnrichmentProvenance.UNAVAILABLE, failed.resolveOutcome(listOf(movieQuery)).provenance)
+        }
+    }
+
 }

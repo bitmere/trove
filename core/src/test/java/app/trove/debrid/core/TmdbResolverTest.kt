@@ -91,11 +91,11 @@ class TmdbResolverTest {
         assertEquals(
             MediaMetadata(
                 "Example Film", 2026, "movie",
-                "https://images.example.invalid/t/p/w342/detail.jpg",
+                "https://images.example.invalid/t/p/w185/detail.jpg",
                 imdbId = "tt0000001", overview = "A synopsis.",
                 genres = listOf("Drama", "Mystery"),
                 cast = listOf("Actor One", "Actor Two"), director = "Director One",
-                runtime = "148 min",
+                runtime = "148 min", provenance = EnrichmentProvenance.TMDB,
             ),
             result,
         )
@@ -115,10 +115,10 @@ class TmdbResolverTest {
         assertEquals(
             MediaMetadata(
                 "Example Show", 2026, "series",
-                "https://images.example.invalid/t/p/w342/show.jpg",
+                "https://images.example.invalid/t/p/w185/show.jpg",
                 imdbId = "tt0000001", overview = "A series synopsis.",
                 genres = listOf("Drama"), cast = listOf("Lead Actor"),
-                director = "Episode Director", runtime = "45 min",
+                director = "Episode Director", runtime = "45 min", provenance = EnrichmentProvenance.TMDB,
             ),
             result,
         )
@@ -149,7 +149,7 @@ class TmdbResolverTest {
         // Title search knows no IMDb id, so none is claimed.
         assertNull(result?.imdbId)
         assertEquals("148 min", result?.runtime)
-        assertEquals("https://images.example.invalid/t/p/w342/detail.jpg", result?.posterUrl)
+        assertEquals("https://images.example.invalid/t/p/w185/detail.jpg", result?.posterUrl)
         assertTrue(http.requests.any { it.url.contains("/3/search/movie?query=Example%20Film") })
         assertTrue(http.requests.none { "/3/find/" in it.url })
     }
@@ -199,9 +199,9 @@ class TmdbResolverTest {
         val http = FakeTmdb().apply { searchMovieJson = """{"results":[$originalTitle]}""" }
         val resolver = resolver(http)
         val query = MediaQuery("Example Film", 2026, "movie")
-        assertEquals("https://images.example.invalid/t/p/w342/original.jpg", resolver.resolvePoster(query, null))
+        assertEquals("https://images.example.invalid/t/p/w185/original.jpg", resolver.resolvePoster(query, null))
         http.searchMovieJson = """{"results":[$originalTitle,$localizedTitle]}"""
-        assertEquals("https://images.example.invalid/t/p/w342/localized.jpg", resolver.resolvePoster(query, null))
+        assertEquals("https://images.example.invalid/t/p/w185/localized.jpg", resolver.resolvePoster(query, null))
     }
 
     @Test fun `popularity breaks only compatible exact year ties`() = runBlocking {
@@ -216,13 +216,13 @@ class TmdbResolverTest {
         val http = FakeTmdb().apply { searchMovieJson = """{"results":[$lessPopular,$morePopular]}""" }
         val resolver = resolver(http)
         val query = MediaQuery("Example Film", 2026, "movie")
-        assertEquals("https://images.example.invalid/t/p/w342/more.jpg", resolver.resolvePoster(query, null))
+        assertEquals("https://images.example.invalid/t/p/w185/more.jpg", resolver.resolvePoster(query, null))
         assertNull(resolver.resolvePoster(query.copy(year = null), null))
         val differentLanguage = morePopular.replace("en", "fr")
         http.searchMovieJson = """{"results":[$lessPopular,$differentLanguage]}"""
         assertNull(resolver.resolvePoster(query, null))
         http.searchMovieJson = """{"results":[$lessPopular,${morePopular.replace("2026-03-01", "2025-03-01")}]}"""
-        assertEquals("https://images.example.invalid/t/p/w342/less.jpg", resolver.resolvePoster(query, null))
+        assertEquals("https://images.example.invalid/t/p/w185/less.jpg", resolver.resolvePoster(query, null))
     }
 
     @Test fun `no key means no TMDB request at all`() = runBlocking {
@@ -245,7 +245,7 @@ class TmdbResolverTest {
         }
         val result = resolver(http).resolveById("tt0000001", "movie")
         // The host and the preferred size both come from /3/configuration.
-        assertEquals("https://cdn.example.invalid/t/p/w342/detail.jpg", result?.posterUrl)
+        assertEquals("https://cdn.example.invalid/t/p/w185/detail.jpg", result?.posterUrl)
     }
 
     @Test fun `a failed configuration still resolves the title without a poster`() = runBlocking {

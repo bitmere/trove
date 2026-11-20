@@ -31,7 +31,7 @@ internal fun DownloadRow(
     onPlay: () -> Unit,
     onOpen: () -> Unit,
     onLongPress: () -> Unit,
-    refreshing: Boolean = false,
+    posterUrl: String? = metadata?.posterUrl,
 ) {
     Surface(color = MaterialTheme.colorScheme.surface) {
         Column {
@@ -48,7 +48,7 @@ internal fun DownloadRow(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(TroveSpace.small),
                 ) {
-                    DownloadCover(download, Modifier.weight(1f), metadata, refreshing)
+                    DownloadCover(download, Modifier.weight(1f), metadata, posterUrl)
                     if (download.status == DownloadStatus.READY) {
                         val play = stringResource(R.string.play)
                         val preparing = stringResource(R.string.preparing_player)
@@ -87,7 +87,7 @@ internal fun DownloadCover(
     download: DebridDownload,
     modifier: Modifier = Modifier,
     metadata: MediaMetadata? = null,
-    refreshing: Boolean = false,
+    posterUrl: String? = metadata?.posterUrl,
 ) {
     val colors = MaterialTheme.colorScheme
     val identity = remember(download.name, metadata) { metadata ?: downloadIdentity(download, null) }
@@ -96,7 +96,7 @@ internal fun DownloadCover(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(TroveSpace.medium),
     ) {
-        MetadataPoster(identity.posterUrl, refreshing)
+        MetadataPoster(posterUrl)
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(TroveSpace.micro)) {
             Text(identity.title, style = MaterialTheme.typography.titleMedium, fontFamily = SpaceGrotesk,
                 maxLines = 2, overflow = TextOverflow.Ellipsis)

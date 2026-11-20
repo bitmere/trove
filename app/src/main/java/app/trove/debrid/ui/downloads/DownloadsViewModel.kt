@@ -12,6 +12,8 @@ import app.trove.debrid.core.DownloadStatus
 import app.trove.debrid.core.LibrarySnapshot
 import app.trove.debrid.core.MediaCandidate
 import app.trove.debrid.core.MediaMetadata
+import app.trove.debrid.core.MetadataLookup
+import app.trove.debrid.core.EnrichmentProvenance
 import app.trove.debrid.data.DownloadPage
 import app.trove.debrid.data.MetadataOverride
 import app.trove.debrid.data.TroveRepository
@@ -20,15 +22,13 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -71,6 +71,8 @@ private fun freshPagedStates(): Map<DownloadKind, PagedTabState> =
 
 data class DownloadsUiState(
     val metadata: Map<Pair<DownloadKind, String>, MediaMetadata> = emptyMap(),
+    val enrichment: Map<Pair<DownloadKind, String>, EnrichmentProvenance> = emptyMap(),
+    val pendingPosters: Map<Pair<DownloadKind, String>, String> = emptyMap(),
     /** Picker candidates for the open download only, keyed by (kind, id). */
     val candidates: Map<Pair<DownloadKind, String>, List<MediaCandidate>> = emptyMap(),
     /** Stored picks for downloads whose metadata came from an override. */
@@ -133,6 +135,8 @@ class DownloadsViewModel(
     private var refreshJob: Job? = null
     private var refreshVersion = 0
     private var hydrationJob: Job? = null
+    private var metadataOrder = 0
+    private val overrideEdits = mutableSetOf<DownloadRef>()
     private val hydrationQueue = LinkedHashMap<DownloadRef, Pair<DebridDownload, Boolean>>()
     private var visibleRowKeys = emptySet<String>()
     private var libraryProvider: DebridProvider? = null
@@ -142,6 +146,7 @@ class DownloadsViewModel(
     private var snapshotJob: Job? = null
     private val snapshotWrites = Mutex()
     private var fileLookupJob: Job? = null
+    private var metadataCandidateJob: Job? = null
     private var playbackJob: Job? = null
     private var pageJobs = mutableMapOf<DownloadKind, Job>()
     private var fullSyncJob: Job? = null
@@ -154,6 +159,20 @@ class DownloadsViewModel(
     private var prepared: PreparedVisible? = null
 
     init {
+        viewModelScope.launch {
+            repository.metadataOrderChanges.collect { order ->
+                if (order != metadataOrder) {
+                    metadataOrder = order
+                    cancelHydration()
+                    _state.update {
+                        it.copy(metadata = emptyMap(), enrichment = emptyMap(), pendingPosters = emptyMap(),
+                            metadataOverrides = emptyMap())
+                    }
+                    val current = _state.value
+                    enqueueHydration(current.pagedByTab[current.tab]?.loaded.orEmpty(), refreshVersion)
+                }
+            }
+        }
         viewModelScope.launch {
             val savedSort = repository.loadDownloadSort()
             val preferWords = repository.loadPreferWords()
@@ -226,6 +245,7 @@ class DownloadsViewModel(
                     playbackJob?.cancel()
                     _state.update {
                         it.copy(downloads = emptyList(), metadata = emptyMap(), candidates = emptyMap(),
+                            enrichment = emptyMap(), pendingPosters = emptyMap(),
                             metadataOverrides = emptyMap(), accountLabel = null,
                             visibleByTab = emptyMap(), pagedByTab = freshPagedStates(),
                             pendingAnchor = null,
@@ -240,6 +260,7 @@ class DownloadsViewModel(
                         it.copy(
                             loading = false, refreshing = false, signedOut = true,
                             downloads = emptyList(), metadata = emptyMap(), candidates = emptyMap(),
+                            enrichment = emptyMap(), pendingPosters = emptyMap(),
                             metadataOverrides = emptyMap(), accountLabel = null, loadError = null,
                             authenticationRequired = false,
                             filePicker = null, playUrl = null, playFileName = null,
@@ -556,6 +577,8 @@ class DownloadsViewModel(
                 refreshing = if (offset == 0 && tab == state.tab) false else state.refreshing,
                 loadError = if (offset == 0) null else state.loadError,
                 metadata = state.metadata.filterKeys(keep),
+                enrichment = state.enrichment.filterKeys(keep),
+                pendingPosters = state.pendingPosters.filterKeys(keep),
                 candidates = state.candidates.filterKeys(keep),
                 metadataOverrides = state.metadataOverrides.filterKeys(keep),
             )
@@ -651,15 +674,20 @@ class DownloadsViewModel(
     }
 
     private fun enqueueHydration(rows: List<DebridDownload>, version: Int, bypassMiss: Boolean = false) {
-        val metadata = _state.value.metadata
+        val current = _state.value
+        val pendingOutcomes = mutableSetOf<Pair<DownloadKind, String>>()
         for (download in rows) {
-            if ((download.kind to download.id) in metadata) continue
+            val key = download.kind to download.id
+            if (key in current.metadata) continue
             val ref = DownloadRef(download.kind, download.id)
+            if (ref in overrideEdits) continue
             val queued = hydrationQueue[ref]
             if (queued == null || queued.first != download || (bypassMiss && !queued.second)) {
                 hydrationQueue[ref] = download to bypassMiss
+                if (key in current.enrichment) pendingOutcomes += key
             }
         }
+        if (pendingOutcomes.isNotEmpty()) _state.update { it.copy(enrichment = it.enrichment - pendingOutcomes) }
         if (hydrationQueue.isEmpty() || hydrationJob?.isActive == true) return
         hydrationJob = viewModelScope.launch { hydrateRows(version) }
     }
@@ -667,82 +695,123 @@ class DownloadsViewModel(
     private suspend fun hydrateRows(version: Int) {
         // Layout may not have reported the viewport yet on the first page.
         // Seed its first batch in display order when there is no viewport.
-        val initialKeys = if (visibleRowKeys.isEmpty() && hydrationQueue.size > 4) {
+        val initialKeys = if (visibleRowKeys.isEmpty()) {
             val state = _state.value
             val rows = hydrationQueue.values.map { it.first }
-            withContext(backgroundDispatcher) {
-                prepareVisible(rows, state.query, state.sort, state.preferWords)[state.tab]
-                    .orEmpty().take(4).mapTo(HashSet()) { "${it.kind}:${it.id}" }
+            val initialRows = if (rows.size <= 4) rows else withContext(backgroundDispatcher) {
+                prepareVisible(rows, state.query, state.sort, state.preferWords)[state.tab].orEmpty().take(4)
             }
+            initialRows.mapTo(HashSet()) { "${it.kind}:${it.id}" }
         } else emptySet()
 
-        val pending = LinkedHashMap<Pair<DownloadKind, String>, MediaMetadata>()
-        val pendingOverrides = LinkedHashMap<Pair<DownloadKind, String>, MetadataOverride>()
-        var lastFlush = System.currentTimeMillis()
-
-        fun flushMetadata() {
+        val pending = LinkedHashMap<DebridDownload, Pair<MetadataLookup, MetadataOverride?>>()
+        var lastFlush = System.nanoTime()
+        fun flushOffscreen() {
             if (pending.isEmpty()) return
             _state.update { state ->
-                val newMetadata = pending.filterKeys { it !in state.metadata }
-                state.copy(
-                    metadata = state.metadata + newMetadata,
-                    metadataOverrides = state.metadataOverrides + pendingOverrides.filterKeys { it in newMetadata },
-                )
+                val names = state.downloads.associate { (it.kind to it.id) to it.name }
+                pending.entries.fold(state) { updated, (row, lookup) ->
+                    val key = row.kind to row.id
+                    val ref = DownloadRef(row.kind, row.id)
+                    if (names[key] == row.name && key !in updated.metadata &&
+                        ref !in overrideEdits && ref !in hydrationQueue
+                    ) updated.withLookup(key, lookup.first, lookup.second) else updated
+                }
             }
             pending.clear()
-            pendingOverrides.clear()
-            lastFlush = System.currentTimeMillis()
+            lastFlush = System.nanoTime()
         }
 
         var initialBatch = true
         while (version == refreshVersion && hydrationQueue.isNotEmpty()) {
-            val visible = if (initialBatch) visibleRowKeys.ifEmpty { initialKeys } else visibleRowKeys
+            val estimatedViewport = if (initialBatch) initialKeys else emptySet()
+            val visible = visibleRowKeys.ifEmpty { estimatedViewport }
             initialBatch = false
-            val batchSize = minOf(4, 10 - pending.size)
-            val prioritized = hydrationQueue.values.asSequence()
+            val batch = hydrationQueue.values.asSequence()
                 .filter { (row, _) -> "${row.kind}:${row.id}" in visible }
-                .take(batchSize).toList()
-            val batch = prioritized.ifEmpty { hydrationQueue.values.take(batchSize) }
-            val results = coroutineScope {
-                batch.map { (download, bypassMiss) ->
-                    async {
-                        val key = download.kind to download.id
-                        if (key in _state.value.metadata) return@async null
-                        val storedOverride = try { repository.loadMetadataOverride(DownloadRef(download.kind, download.id)) }
-                            catch (e: CancellationException) { throw e }
-                            catch (_: Exception) { null }
-                        val metadata = try {
-                            storedOverride?.let { repository.resolveMetadataById(it.imdbId, it.type) }
-                                ?: repository.resolveMetadataForRelease(download.name, bypassMiss)
-                        } catch (e: CancellationException) { throw e }
-                          catch (_: Exception) { null }
-                        if (metadata == null) null else Triple(key, metadata, storedOverride)
-                    }
-                }.awaitAll().filterNotNull()
-            }
-            currentCoroutineContext().ensureActive()
-            if (version != refreshVersion) return
+                .take(4).toList().ifEmpty { hydrationQueue.values.take(4) }
+            val order = metadataOrder
+            coroutineScope {
+                for (request in batch) launch {
+                    val (download, bypassMiss) = request
+                    val key = download.kind to download.id
+                    val ref = DownloadRef(download.kind, download.id)
+                    val viewportKey = "${download.kind}:${download.id}"
+                    fun isPriority(): Boolean = viewportKey in visibleRowKeys.ifEmpty { estimatedViewport } ||
+                        _state.value.filePicker?.let { it.kind to it.id } == key
+                    fun current(): Boolean =
+                        version == refreshVersion && order == metadataOrder &&
+                            hydrationQueue[ref] === request && key !in _state.value.metadata &&
+                            _state.value.downloads.any {
+                                it.kind == download.kind && it.id == download.id && it.name == download.name
+                            }
 
-            // A new page can replace a row while its previous name is resolving.
-            val currentRows = batch.filter { request ->
-                val row = request.first
-                hydrationQueue.remove(DownloadRef(row.kind, row.id), request)
-            }.mapTo(HashSet()) { (row, _) -> row.kind to row.id }
-            for ((key, metadata, storedOverride) in results) {
-                if (key !in currentRows) continue
-                pending[key] = metadata
-                if (storedOverride != null) pendingOverrides[key] = storedOverride
-            }
-            val viewportFilled = visibleRowKeys.isNotEmpty() && prioritized.isNotEmpty() &&
-                hydrationQueue.values.none { (row, _) -> "${row.kind}:${row.id}" in visibleRowKeys }
-            if (viewportFilled || pending.size >= 10 || System.currentTimeMillis() - lastFlush >= 200) {
-                flushMetadata()
+                    if (!current()) {
+                        if (hydrationQueue[ref] === request) hydrationQueue.remove(ref)
+                        return@launch
+                    }
+                    val storedOverride = try { repository.loadMetadataOverride(ref) }
+                        catch (e: CancellationException) { throw e }
+                        catch (_: Exception) { null }
+                    if (!current()) {
+                        if (hydrationQueue[ref] === request) hydrationQueue.remove(ref)
+                        return@launch
+                    }
+                    var appliedOverride: MetadataOverride? = null
+                    val result = lookupMetadata {
+                        val override = storedOverride?.let { pick ->
+                            lookupMetadata { MetadataLookup.from(repository.resolveMetadataById(pick.imdbId, pick.type)) }.metadata
+                        }
+                        if (override != null) {
+                            appliedOverride = storedOverride
+                            MetadataLookup.from(override)
+                        } else {
+                            repository.lookupMetadataForRelease(download.name, bypassMiss) { poster ->
+                                // The resolver runs on IO. All row guards and updates run on Main.
+                                withContext(Dispatchers.Main.immediate) {
+                                    if (current() && isPriority()) _state.update {
+                                        it.copy(pendingPosters = it.pendingPosters + (key to poster))
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    ensureActive()
+                    val publish = current()
+                    if (hydrationQueue[ref] === request) hydrationQueue.remove(ref)
+                    if (publish) {
+                        if (isPriority()) {
+                            _state.update { it.withLookup(key, result, appliedOverride) }
+                        } else {
+                            pending[download] = result to appliedOverride
+                            if (pending.size >= 10 || System.nanoTime() - lastFlush >= 200_000_000L) flushOffscreen()
+                        }
+                    }
+                }
             }
         }
-        flushMetadata()
+        if (version == refreshVersion) flushOffscreen()
     }
 
-    /** Each pager page filters its own kind, including while it is offscreen. */
+    private suspend fun lookupMetadata(block: suspend () -> MetadataLookup): MetadataLookup = try {
+        block()
+    } catch (e: CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        MetadataLookup.Unavailable
+    }
+
+    private fun DownloadsUiState.withLookup(
+        key: Pair<DownloadKind, String>,
+        result: MetadataLookup,
+        storedOverride: MetadataOverride? = null,
+    ): DownloadsUiState = copy(
+        metadata = result.metadata?.let { metadata + (key to it) } ?: (metadata - key),
+        enrichment = enrichment + (key to result.provenance),
+        pendingPosters = pendingPosters - key,
+        metadataOverrides = storedOverride?.let { metadataOverrides + (key to it) } ?: metadataOverrides,
+    )
+
     fun visibleDownloads(state: DownloadsUiState, tab: DownloadKind = state.tab): List<DebridDownload> {
         val cached = prepared
         if (cached != null && cached.inputs.matchesLibrary(state) &&
@@ -792,8 +861,14 @@ class DownloadsViewModel(
      *  Runs only when the automatic match left no metadata. */
     private fun loadCandidatesFor(download: DebridDownload) {
         val key = download.kind to download.id
-        viewModelScope.launch {
-            if (key in _state.value.metadata) return@launch
+        val version = refreshVersion
+        val order = metadataOrder
+        metadataCandidateJob?.cancel()
+        metadataCandidateJob = viewModelScope.launch {
+            fun current() = version == refreshVersion && order == metadataOrder &&
+                _state.value.filePicker?.let { it.kind == download.kind && it.id == download.id && it.name == download.name } == true
+            if (!current() || key in _state.value.metadata) return@launch
+            if (key !in _state.value.enrichment) enqueueHydration(listOf(download), version)
             val storedOverride = try { repository.loadMetadataOverride(DownloadRef(download.kind, download.id)) }
                 catch (e: CancellationException) { throw e }
                 catch (_: Exception) { null }
@@ -801,11 +876,11 @@ class DownloadsViewModel(
                 val metadata = try { repository.resolveMetadataById(storedOverride.imdbId, storedOverride.type) }
                     catch (e: CancellationException) { throw e }
                     catch (_: Exception) { null }
-                if (metadata != null) {
-                    _state.update {
-                        it.copy(metadata = it.metadata + (key to metadata),
-                            metadataOverrides = it.metadataOverrides + (key to storedOverride))
-                    }
+                ensureActive()
+                if (metadata != null && current() && key !in _state.value.metadata &&
+                    DownloadRef(download.kind, download.id) !in overrideEdits && key !in _state.value.metadataOverrides
+                ) {
+                    _state.update { it.withLookup(key, MetadataLookup.from(metadata), storedOverride) }
                     return@launch
                 }
             }
@@ -813,7 +888,8 @@ class DownloadsViewModel(
                 repository.resolveMetadataCandidates(app.trove.debrid.core.parseMediaName(download.name))
             } catch (e: CancellationException) { throw e }
               catch (_: Exception) { emptyList() }
-            if (candidates.isNotEmpty()) {
+            ensureActive()
+            if (candidates.isNotEmpty() && current() && key !in _state.value.metadataOverrides) {
                 _state.update { it.copy(candidates = it.candidates + (key to candidates)) }
             }
         }
@@ -822,44 +898,55 @@ class DownloadsViewModel(
     /** Stores the user's pick for this download only, then shows the
      *  picked title. The pick is keyed by (kind, id). */
     fun pickCandidate(download: DebridDownload, candidate: MediaCandidate) {
-        val key = download.kind to download.id
-        if (_state.value.filePicker?.let { it.kind to it.id } != key) return
-        viewModelScope.launch {
-            val pick = MetadataOverride(candidate.imdbId, candidate.type, candidate.title)
-            try { repository.saveMetadataOverride(DownloadRef(download.kind, download.id), pick) }
-                catch (e: CancellationException) { throw e }
-                catch (_: Exception) { return@launch }
-            hydrationQueue.remove(DownloadRef(download.kind, download.id))
-            val metadata = try { repository.resolveMetadataById(candidate.imdbId, candidate.type) }
-                catch (e: CancellationException) { throw e }
-                catch (_: Exception) { null }
-            _state.update {
-                it.copy(
-                    metadataOverrides = it.metadataOverrides + (key to pick),
-                    metadata = if (metadata != null) it.metadata + (key to metadata) else it.metadata,
-                )
-            }
-        }
+        changeMetadataOverride(download, MetadataOverride(candidate.imdbId, candidate.type, candidate.title))
     }
 
-    /** Drops the stored pick and re-resolves normally, so the parsed
-     *  title — and the picker, when the match still fails — comes back. */
     fun clearMetadataOverride(download: DebridDownload) {
+        changeMetadataOverride(download, null)
+    }
+
+    private fun changeMetadataOverride(download: DebridDownload, pick: MetadataOverride?) {
         val key = download.kind to download.id
-        if (_state.value.filePicker?.let { it.kind to it.id } != key) return
+        val ref = DownloadRef(download.kind, download.id)
+        if (_state.value.filePicker?.let { it.kind to it.id } != key || ref in overrideEdits) return
+        val version = refreshVersion
+        val order = metadataOrder
+        metadataCandidateJob?.cancel()
+        overrideEdits.add(ref)
+        hydrationQueue.remove(ref)
         viewModelScope.launch {
-            try { repository.clearMetadataOverride(DownloadRef(download.kind, download.id)) }
-                catch (e: CancellationException) { throw e }
-                catch (_: Exception) { return@launch }
-            hydrationQueue.remove(DownloadRef(download.kind, download.id))
-            _state.update { it.copy(metadataOverrides = it.metadataOverrides - key, metadata = it.metadata - key) }
-            val metadata = try { repository.resolveMetadataForRelease(download.name) }
-                catch (e: CancellationException) { throw e }
-                catch (_: Exception) { null }
-            if (metadata != null) {
-                _state.update { it.copy(metadata = it.metadata + (key to metadata)) }
-            } else {
-                loadCandidatesFor(download)
+            try {
+                if (pick != null) repository.saveMetadataOverride(ref, pick)
+                else repository.clearMetadataOverride(ref)
+                fun current() = version == refreshVersion && order == metadataOrder &&
+                    _state.value.downloads.any {
+                        it.kind == download.kind && it.id == download.id && it.name == download.name
+                    }
+                if (!current()) return@launch
+                _state.update {
+                    it.copy(
+                        metadataOverrides = if (pick == null) it.metadataOverrides - key else it.metadataOverrides + (key to pick),
+                        metadata = it.metadata - key, enrichment = it.enrichment - key,
+                        pendingPosters = it.pendingPosters - key,
+                    )
+                }
+                val result = lookupMetadata {
+                    if (pick != null) MetadataLookup.from(repository.resolveMetadataById(pick.imdbId, pick.type))
+                    else repository.lookupMetadataForRelease(download.name)
+                }
+                ensureActive()
+                if (current()) _state.update { it.withLookup(key, result, pick) }
+                if (pick == null && result.metadata == null && current()) loadCandidatesFor(download)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                // Keep the previous match if the stored preference could not be changed.
+            } finally {
+                overrideEdits.remove(ref)
+                if (version != refreshVersion || order != metadataOrder) {
+                    val current = _state.value
+                    enqueueHydration(current.pagedByTab[current.tab]?.loaded.orEmpty(), refreshVersion)
+                }
             }
         }
     }
