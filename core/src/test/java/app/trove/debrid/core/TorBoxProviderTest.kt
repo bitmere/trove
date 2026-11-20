@@ -353,6 +353,279 @@ class TorBoxProviderTest {
         assertEquals("magnet:?xt=urn:btih:aabbcc", magnet.bytes.decodeToString())
     }
 
+    // MD5("https://example.com/file.zip"), pinned with an independent
+    // hashlib vector — TorBox's webdl `hash` is the MD5 of the link.
+    private val webLink = "https://example.com/file.zip"
+    private val webLinkMd5 = "0dfbb8e892f2c02333149d2846b5488e"
+
+    private fun webRowJson(id: Long, hash: String) =
+        """{"id":$id,"hash":"$hash","name":"file.zip","download_state":"queued","progress":0,"download_finished":false,"created_at":"2026-11-15T10:00:00Z","files":[]}"""
+
+    @Test
+    fun `webdl add posts to the sync endpoint and resolves a numeric id`() {
+        val (p, transport) = provider { req ->
+            when {
+                req.url.contains("createwebdownload") ->
+                    HttpResponse(200, envelope("""{"webdownload_id":42}"""))
+                req.url.contains("/webdl/mylist") ->
+                    HttpResponse(200, envelope("""[${webRowJson(42, webLinkMd5)}]"""))
+                else -> HttpResponse(404, "{}")
+            }
+        }
+        val added = kotlinx.coroutines.runBlocking { p.add(AddInput.HosterLink(webLink)) }.getOrThrow()
+        assertEquals("42", added.id)
+        assertEquals(DownloadKind.WEB, added.kind)
+        assertEquals("file.zip", added.name)
+        val create = transport.requests.first { it.url.contains("createwebdownload") }
+        assertEquals("${TorBoxProvider.BASE}/webdl/createwebdownload", create.url)
+        assertEquals("POST", create.method)
+        assertEquals(mapOf("link" to webLink), create.formFields)
+        assertTrue(transport.requests.none { it.url.contains("async") })
+    }
+
+    @Test
+    fun `webdl add resolves a string id and a queued id`() {
+        for (data in listOf("""{"webdownload_id":"42"}""", """{"queued_id":7}""")) {
+            val expectedId = if (data.contains("queued")) "7" else "42"
+            val (p, transport) = provider { req ->
+                when {
+                    req.url.contains("createwebdownload") -> HttpResponse(200, envelope(data))
+                    req.url.contains("/webdl/mylist") ->
+                        HttpResponse(200, envelope("""[${webRowJson(expectedId.toLong(), webLinkMd5)}]"""))
+                    else -> HttpResponse(404, "{}")
+                }
+            }
+            val added = kotlinx.coroutines.runBlocking { p.add(AddInput.HosterLink(webLink)) }.getOrThrow()
+            assertEquals(expectedId, added.id)
+            assertTrue(transport.requests.single { it.url.contains("createwebdownload") }
+                .url.endsWith("/webdl/createwebdownload"))
+        }
+    }
+
+    @Test
+    fun `webdl add recovers a hash-only create from mylist with one create call`() {
+        val (p, transport) = provider { req ->
+            when {
+                req.url.contains("createwebdownload") ->
+                    HttpResponse(200, envelope("""{"hash":"$webLinkMd5"}"""))
+                req.url.contains("/webdl/mylist") ->
+                    HttpResponse(200, envelope("""[${webRowJson(42, webLinkMd5)}]"""))
+                else -> HttpResponse(404, "{}")
+            }
+        }
+        val added = kotlinx.coroutines.runBlocking { p.add(AddInput.HosterLink(webLink)) }.getOrThrow()
+        assertEquals("42", added.id)
+        assertEquals(DownloadKind.WEB, added.kind)
+        assertEquals(DownloadStatus.QUEUED, added.status)
+        assertEquals(1, transport.requests.count { it.url.contains("createwebdownload") })
+        val lookup = transport.requests.single { it.url.contains("/webdl/mylist") }
+        assertEquals("true", lookup.queryParameters()["bypass_cache"])
+    }
+
+    @Test
+    fun `webdl add recovers null data from mylist`() {
+        val (p, transport) = provider { req ->
+            when {
+                req.url.contains("createwebdownload") -> HttpResponse(200, envelope("null"))
+                req.url.contains("/webdl/mylist") ->
+                    HttpResponse(200, envelope("""[${webRowJson(42, webLinkMd5)}]"""))
+                else -> HttpResponse(404, "{}")
+            }
+        }
+        val added = kotlinx.coroutines.runBlocking { p.add(AddInput.HosterLink(webLink)) }.getOrThrow()
+        assertEquals("42", added.id)
+    }
+
+    @Test
+    fun `webdl add throws the no-id error when mylist has no match`() {
+        val (p, transport) = provider { req ->
+            when {
+                req.url.contains("createwebdownload") -> HttpResponse(200, envelope("{}"))
+                req.url.contains("/webdl/mylist") -> HttpResponse(200, envelope("[]"))
+                else -> HttpResponse(404, "{}")
+            }
+        }
+        val error = kotlinx.coroutines.runBlocking { p.add(AddInput.HosterLink(webLink)) }
+            .exceptionOrNull() as DebridError.Provider
+        assertEquals("create", error.code)
+        assertEquals("TorBox returned no web download id", error.detail)
+        assertEquals(1, transport.requests.count { it.url.contains("createwebdownload") })
+        assertEquals(1, transport.requests.count { it.url.contains("/webdl/mylist") })
+    }
+
+    @Test
+    fun `webdl add surfaces TorBox detail on a no-id create`() {
+        val (p, _) = provider { req ->
+            when {
+                req.url.contains("createwebdownload") -> HttpResponse(
+                    200,
+                    """{"success":true,"error":null,"detail":"Link accepted but still processing","data":{}}""",
+                )
+                req.url.contains("/webdl/mylist") -> HttpResponse(200, envelope("[]"))
+                else -> HttpResponse(404, "{}")
+            }
+        }
+        val error = kotlinx.coroutines.runBlocking { p.add(AddInput.HosterLink(webLink)) }
+            .exceptionOrNull() as DebridError.Provider
+        assertEquals("create", error.code)
+        assertEquals("Link accepted but still processing", error.detail)
+    }
+
+    @Test
+    fun `usenet add posts to the sync endpoint and resolves a numeric id`() {
+        val bytes = "nzb-bytes".toByteArray()
+        val (p, transport) = provider { req ->
+            when {
+                req.url.contains("createusenetdownload") ->
+                    HttpResponse(200, envelope("""{"usenetdownload_id":55}"""))
+                req.url.contains("/usenet/mylist") ->
+                    HttpResponse(200, envelope("""[{"id":55,"hash":"aabbcc","name":"show.nzb","download_state":"queued","progress":0,"download_finished":false,"created_at":"2026-11-15T10:00:00Z","files":[]}]"""))
+                else -> HttpResponse(404, "{}")
+            }
+        }
+        val added = kotlinx.coroutines.runBlocking { p.add(AddInput.Nzb(bytes, "show.nzb")) }.getOrThrow()
+        assertEquals("55", added.id)
+        assertEquals(DownloadKind.USENET, added.kind)
+        val create = transport.requests.first { it.url.contains("createusenetdownload") }
+        assertEquals("${TorBoxProvider.BASE}/usenet/createusenetdownload", create.url)
+        assertEquals("POST", create.method)
+        val file = create.multipart.single()
+        assertEquals("file", file.name)
+        assertEquals("show.nzb", file.fileName)
+        assertEquals("application/x-nzb", file.contentType)
+        assertTrue(bytes.contentEquals(file.bytes))
+        assertTrue(transport.requests.none { it.url.contains("async") })
+    }
+
+    @Test
+    fun `usenet add resolves a queued id`() {
+        val (p, _) = provider { req ->
+            when {
+                req.url.contains("createusenetdownload") -> HttpResponse(200, envelope("""{"queued_id":9}"""))
+                req.url.contains("/usenet/mylist") ->
+                    HttpResponse(200, envelope("""[{"id":9,"hash":"aabbcc","name":"show.nzb","download_state":"queued"}]"""))
+                else -> HttpResponse(404, "{}")
+            }
+        }
+        val added = kotlinx.coroutines.runBlocking {
+            p.add(AddInput.Nzb("nzb".toByteArray(), "show.nzb"))
+        }.getOrThrow()
+        assertEquals("9", added.id)
+    }
+
+    @Test
+    fun `usenet add recovers a hash-only create from mylist`() {
+        val hash = "abcdef1234567890abcdef1234567890"
+        val (p, transport) = provider { req ->
+            when {
+                req.url.contains("createusenetdownload") ->
+                    HttpResponse(200, envelope("""{"hash":"$hash"}"""))
+                req.url.contains("/usenet/mylist") ->
+                    HttpResponse(200, envelope("""[{"id":61,"hash":"$hash","name":"show.nzb","download_state":"queued"}]"""))
+                else -> HttpResponse(404, "{}")
+            }
+        }
+        val added = kotlinx.coroutines.runBlocking {
+            p.add(AddInput.Nzb("nzb".toByteArray(), "show.nzb"))
+        }.getOrThrow()
+        assertEquals("61", added.id)
+        assertEquals(DownloadKind.USENET, added.kind)
+        assertEquals(1, transport.requests.count { it.url.contains("createusenetdownload") })
+        val lookup = transport.requests.single { it.url.contains("/usenet/mylist") }
+        assertEquals("true", lookup.queryParameters()["bypass_cache"])
+    }
+
+    @Test
+    fun `usenet add without a hash throws the no-id error without a mylist lookup`() {
+        val (p, transport) = provider { req ->
+            when {
+                req.url.contains("createusenetdownload") -> HttpResponse(200, envelope("{}"))
+                else -> HttpResponse(404, "{}")
+            }
+        }
+        val error = kotlinx.coroutines.runBlocking {
+            p.add(AddInput.Nzb("nzb".toByteArray(), "show.nzb"))
+        }.exceptionOrNull() as DebridError.Provider
+        assertEquals("create", error.code)
+        assertEquals("TorBox returned no Usenet id", error.detail)
+        assertTrue(transport.requests.none { it.url.contains("/usenet/mylist") })
+    }
+
+    @Test
+    fun `duplicate webdl surfaces the real detail with no mylist lookup`() {
+        val (p, transport) = provider { req ->
+            when {
+                req.url.contains("createwebdownload") -> HttpResponse(
+                    200,
+                    """{"success":false,"error":"DUPLICATE_ITEM","detail":"This item already exists.","data":null}""",
+                )
+                else -> HttpResponse(404, "{}")
+            }
+        }
+        val error = kotlinx.coroutines.runBlocking { p.add(AddInput.HosterLink(webLink)) }
+            .exceptionOrNull() as DebridError.Provider
+        assertEquals("DUPLICATE_ITEM", error.code)
+        assertEquals("This item already exists.", error.detail)
+        assertEquals(1, transport.requests.size)
+    }
+
+    @Test
+    fun `422 detail array renders the first validation message`() {
+        val (p, _) = provider { req ->
+            when {
+                req.url.contains("createwebdownload") -> HttpResponse(
+                    422,
+                    """{"success":false,"error":"VALIDATION","detail":[{"loc":["body","link"],"msg":"Field required","type":"missing"}]}""",
+                )
+                else -> HttpResponse(404, "{}")
+            }
+        }
+        val error = kotlinx.coroutines.runBlocking { p.add(AddInput.HosterLink(webLink)) }
+            .exceptionOrNull() as DebridError.Provider
+        assertEquals("VALIDATION", error.code)
+        assertEquals("body.link: Field required", error.detail)
+    }
+
+    @Test
+    fun `diagnostic sink logs one redacted line on a no-id create`() {
+        val lines = mutableListOf<String>()
+        val transport = RecordingTransport { req ->
+            when {
+                req.url.contains("createwebdownload") -> HttpResponse(200, envelope("{}"))
+                req.url.contains("/webdl/mylist") -> HttpResponse(200, envelope("[]"))
+                else -> HttpResponse(404, "{}")
+            }
+        }
+        val p = TorBoxProvider("test-key-123", transport, diagnosticLog = { lines += it })
+        val error = kotlinx.coroutines.runBlocking { p.add(AddInput.HosterLink(webLink)) }
+            .exceptionOrNull() as DebridError.Provider
+        assertEquals("TorBox returned no web download id", error.detail)
+        assertEquals(1, lines.size)
+        val line = lines.single()
+        assertTrue(line.contains("/webdl/createwebdownload"))
+        assertTrue(line.contains("idFields=[]"))
+        assertFalse(line.contains(webLink))
+        assertFalse(line.contains("test-key-123"))
+    }
+
+    @Test
+    fun `diagnostic sink stays silent on a successful create`() {
+        val lines = mutableListOf<String>()
+        val transport = RecordingTransport { req ->
+            when {
+                req.url.contains("createwebdownload") ->
+                    HttpResponse(200, envelope("""{"webdownload_id":42}"""))
+                req.url.contains("/webdl/mylist") ->
+                    HttpResponse(200, envelope("""[${webRowJson(42, webLinkMd5)}]"""))
+                else -> HttpResponse(404, "{}")
+            }
+        }
+        val p = TorBoxProvider("test-key-123", transport, diagnosticLog = { lines += it })
+        val added = kotlinx.coroutines.runBlocking { p.add(AddInput.HosterLink(webLink)) }.getOrThrow()
+        assertEquals("42", added.id)
+        assertTrue(lines.isEmpty())
+    }
+
 
 
 

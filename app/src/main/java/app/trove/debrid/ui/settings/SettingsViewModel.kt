@@ -945,7 +945,10 @@ internal class ProviderSectionDescriptor(
 internal val providerSectionDescriptors = listOf(
     ProviderSectionDescriptor(
         service = DebridService.TORBOX,
-        factory = { credential, transport -> TorBoxProvider(credential, transport) },
+        factory = { credential, transport -> TorBoxProvider(
+            credential, transport,
+            diagnosticLog = { android.util.Log.d("TorBox", it) },
+        ) },
         accountLabel = { "TorBox (${it?.detail ?: "Essential"})" },
         title = R.string.torbox,
         credentialSaved = R.string.key_saved,
