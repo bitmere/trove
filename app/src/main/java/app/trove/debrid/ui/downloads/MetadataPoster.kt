@@ -7,6 +7,7 @@ import android.util.LruCache
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Refresh
@@ -19,6 +20,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -192,39 +194,86 @@ internal object PosterLoader {
 
 internal val RowPosterSize = DpSize(48.dp, 72.dp)
 
+internal data class PosterSlot<T>(val bitmap: T? = null, val decodedUrl: String? = null) {
+    fun afterLoad(url: String, decoded: T?): PosterSlot<T> =
+        if (decoded == null) this else PosterSlot(decoded, url)
+
+    fun hasPoster(url: String?): Boolean = url != null || bitmap != null
+}
+
 @Composable
-internal fun MetadataPoster(url: String?, size: DpSize = RowPosterSize) {
+internal fun MetadataPoster(
+    url: String?,
+    size: DpSize = RowPosterSize,
+    onFailure: suspend (String) -> Unit = {},
+) {
+    MetadataPoster(rememberPoster(url, onFailure), size)
+}
+
+internal data class PosterPresentation(
+    val bitmap: Bitmap?,
+    val hasPoster: Boolean,
+    val onRetry: (() -> Unit)?,
+)
+
+@Composable
+internal fun rememberPoster(
+    url: String?,
+    onFailure: suspend (String) -> Unit,
+): PosterPresentation {
     val context = LocalContext.current.applicationContext
     val validUrl = remember(url) { publicPosterUrl(url) }
-    var bitmap by remember(validUrl) { mutableStateOf<Bitmap?>(null) }
+    var slot by remember { mutableStateOf(PosterSlot<Bitmap>()) }
     var failed by remember(validUrl) { mutableStateOf(false) }
     var retry by remember(validUrl) { mutableIntStateOf(0) }
+    val reportFailure by rememberUpdatedState(onFailure)
     LaunchedEffect(validUrl, retry) {
-        if (validUrl != null && bitmap == null) {
-            bitmap = PosterLoader.loadVisible(validUrl, force = retry > 0) { context.cacheDir }
+        if (validUrl != null && slot.decodedUrl != validUrl) {
+            val bitmap = PosterLoader.loadVisible(validUrl, force = retry > 0) { context.cacheDir }
+            ensureActive()
+            slot = slot.afterLoad(validUrl, bitmap)
             failed = bitmap == null
+            if (failed) reportFailure(validUrl)
         }
     }
-    val retryLabel = stringResource(R.string.retry_poster)
-    val retryModifier = if (failed) {
-        Modifier.clickable(role = Role.Button, onClickLabel = retryLabel) {
+    val onRetry: (() -> Unit)? = if (failed) {
+        {
             failed = false
             retry++
         }
-    } else Modifier
+    } else null
+    return PosterPresentation(slot.bitmap, slot.hasPoster(validUrl), onRetry)
+}
+
+@Composable
+internal fun MetadataPoster(poster: PosterPresentation, size: DpSize) {
+    val retryLabel = stringResource(R.string.retry_poster)
+    val retryModifier = poster.onRetry?.let { onRetry ->
+        Modifier.clickable(role = Role.Button, onClickLabel = retryLabel, onClick = onRetry)
+    } ?: Modifier
+    val failed = poster.onRetry != null
+    val bitmap = poster.bitmap
     Surface(
         shape = MaterialTheme.shapes.extraSmall,
         color = MaterialTheme.colorScheme.surfaceContainerHigh,
-        modifier = Modifier.size(size),
+        modifier = Modifier.size(size).then(retryModifier),
     ) {
-        val loaded = bitmap
-        if (loaded != null) {
-            Image(loaded.asImageBitmap(), contentDescription = null, contentScale = ContentScale.Crop)
-        } else {
-            Box(modifier = Modifier.size(size).then(retryModifier), contentAlignment = Alignment.Center) {
-                val tint = MaterialTheme.colorScheme.onSurfaceVariant
-                if (failed) Icon(Icons.Filled.Refresh, retryLabel, tint = tint)
-                else Icon(painterResource(R.drawable.ic_poster_placeholder), null, tint = tint)
+        Box(contentAlignment = Alignment.Center) {
+            val tint = MaterialTheme.colorScheme.onSurfaceVariant
+            if (bitmap != null) {
+                Image(bitmap.asImageBitmap(), contentDescription = null,
+                    modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                if (failed) {
+                    Surface(
+                        modifier = Modifier.align(Alignment.BottomEnd),
+                        shape = MaterialTheme.shapes.extraSmall,
+                        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    ) { Icon(Icons.Filled.Refresh, retryLabel, tint = tint) }
+                }
+            } else if (failed) {
+                Icon(Icons.Filled.Refresh, retryLabel, tint = tint)
+            } else {
+                Icon(painterResource(R.drawable.ic_poster_placeholder), null, tint = tint)
             }
         }
     }

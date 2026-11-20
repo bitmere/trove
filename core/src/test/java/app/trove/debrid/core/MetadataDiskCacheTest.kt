@@ -47,6 +47,23 @@ class MetadataDiskCacheTest {
         }
     }
 
+    @Test fun `posterless writes preserve poster order provenance and timestamp`() {
+        var time = 1000L
+        val disk = MetadataDiskCache(folder.root, now = { time })
+        val posterless = metadata.copy(posterUrl = null, provenance = EnrichmentProvenance.TMDB)
+        disk.put(query, posterless, tmdbFirst = true)
+        assertEquals(posterless, disk.get(query)?.metadata)
+        time++
+        disk.put(query, posterless.copy(overview = "Updated"), tmdbFirst = true)
+        assertEquals("Updated", disk.get(query)?.metadata?.overview)
+        time++
+        disk.put(query, metadata)
+        assertEquals(MetadataDiskCache.DiskEntry(metadata, time, false), disk.get(query))
+        time++
+        disk.put(query, posterless, tmdbFirst = true)
+        assertEquals(MetadataDiskCache.DiskEntry(metadata, time - 1, false), disk.get(query))
+    }
+
     @Test fun `normalizes titles and distinguishes years and types`() {
         val disk = MetadataDiskCache(folder.root)
         disk.put(query, metadata)

@@ -444,6 +444,7 @@ fun DownloadsScreen(
                                             download = download,
                                             metadata = state.metadata[download.kind to download.id],
                                             posterUrl = state.posterUrl(download.kind to download.id),
+                                            onPosterFailure = { viewModel.onPosterFailure(download, it) },
                                             resolving = state.resolvingDownload == (download.kind to download.id),
                                             playEnabled = state.resolvingDownload == null && state.playUrl == null,
                                             onPlay = { if (viewModel.isCurrentDownload(download)) viewModel.play(download) },
@@ -525,6 +526,7 @@ fun DownloadsScreen(
             onPlayWith = { if (viewModel.isCurrentDownload(download)) viewModel.playFile(download, it, askEveryTime = true) },
             onPickCandidate = { if (viewModel.isCurrentDownload(download)) viewModel.pickCandidate(download, it) },
             onClearOverride = { if (viewModel.isCurrentDownload(download)) viewModel.clearMetadataOverride(download) },
+            onPosterFailure = { viewModel.onPosterFailure(download, it) },
             onDelete = {
                 scope.launch {
                     detailsSheetState.hide()

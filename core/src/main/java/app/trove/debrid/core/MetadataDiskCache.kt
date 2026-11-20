@@ -55,6 +55,7 @@ class MetadataDiskCache(
     @Synchronized
     fun put(query: MediaQuery, metadata: MediaMetadata, tmdbFirst: Boolean = false) {
         runCatching {
+            if (publicPosterUrl(metadata.posterUrl) == null && get(query)?.metadata?.posterUrl != null) return
             if (!directory.isDirectory && !directory.mkdirs()) return
             directory.listFiles()?.filter { it.name.endsWith(".tmp") }?.forEach { it.delete() }
             if (metadata.title.isBlank() || maxEntries <= 0) return
@@ -78,6 +79,12 @@ class MetadataDiskCache(
                 temp.delete()
             }
         }
+    }
+
+    @Synchronized
+    internal fun replacePoster(query: MediaQuery, previous: MediaMetadata, replacement: MediaMetadata) {
+        val entry = get(query) ?: return
+        if (entry.tmdbFirst && entry.metadata == previous) put(query, replacement, tmdbFirst = true)
     }
 
     @Synchronized
@@ -125,7 +132,7 @@ class MetadataDiskCache(
 
     // Reject large payloads before allocating their JSON tree or UTF-8 buffer.
     private fun minimumSize(metadata: MediaMetadata, source: String): Long = with(metadata) {
-        listOf(title, type, posterUrl, imdbId, overview, director, runtime, source)
+        listOf(title, type, posterUrl, alternatePosterUrl, imdbId, overview, director, runtime, source)
             .sumOf { it.orEmpty().length.toLong() } +
             genres.sumOf { it.length + 2L } + cast.sumOf { it.length + 2L } +
             episodes.sumOf { 24L + it.title.orEmpty().length + it.released.orEmpty().length }
@@ -140,6 +147,7 @@ class MetadataDiskCache(
         addProperty("year", metadata.year)
         addProperty("type", metadata.type)
         addProperty("posterUrl", metadata.posterUrl)
+        metadata.alternatePosterUrl?.let { addProperty("alternatePosterUrl", it) }
         addProperty("imdbId", metadata.imdbId)
         addProperty("overview", metadata.overview)
         add("genres", JsonArray().apply { metadata.genres.forEach { add(it) } })
@@ -169,6 +177,7 @@ class MetadataDiskCache(
             year = primitiveField("year")?.toIntOrNull(),
             type = stringField("type"),
             posterUrl = stringField("posterUrl"),
+            alternatePosterUrl = publicPosterUrl(stringField("alternatePosterUrl")),
             imdbId = stringField("imdbId"),
             overview = stringField("overview"),
             genres = names("genres"),

@@ -19,12 +19,14 @@ import app.trove.debrid.core.DownloadRef
 import app.trove.debrid.core.HttpTransport
 import app.trove.debrid.core.LibraryDiskCache
 import app.trove.debrid.core.LibrarySnapshot
+import app.trove.debrid.core.MediaMetadata
 import app.trove.debrid.core.MetadataDiskCache
 import app.trove.debrid.core.OkHttpTransport
 import app.trove.debrid.core.ShareClassifier
 import app.trove.debrid.core.StreamUrl
 import app.trove.debrid.core.TorBoxProvider
 import app.trove.debrid.core.filterExcluded
+import app.trove.debrid.core.parseMediaName
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
@@ -178,6 +180,9 @@ class DebridRepository(
         metadataResolver.resolveOutcome(app.trove.debrid.core.mediaQueryVariants(name), bypassMiss, onPoster)
     }
 
+    override suspend fun replaceFailedPoster(name: String, metadata: MediaMetadata) =
+        withContext(ioDispatcher) { metadataResolver.replaceFailedPoster(parseMediaName(name), metadata) }
+
     override suspend fun resolveMetadataCandidates(query: app.trove.debrid.core.MediaQuery) =
         withContext(ioDispatcher) { metadataResolver.candidates(query) }
 
@@ -209,9 +214,9 @@ class DebridRepository(
 
     override suspend fun saveTmdbKey(key: String): Unit = withContext(ioDispatcher) {
         tmdbKeyWrites.withLock {
-            val wasConfigured = registry.tmdbKey() != null
+            val previous = registry.tmdbKey()
             registry.saveTmdbKey(key)
-            if (!wasConfigured) metadataOrder.update { it + 1 }
+            if (previous != key.trim()) metadataOrder.update { it + 1 }
         }
     }
 
