@@ -15,6 +15,7 @@ import app.trove.debrid.core.DebridProvider
 import app.trove.debrid.core.DebridService
 import app.trove.debrid.core.DownloadKind
 import app.trove.debrid.core.DownloadRef
+import app.trove.debrid.core.EnrichmentProvenance
 import app.trove.debrid.core.HttpRequest
 import app.trove.debrid.core.HttpResponse
 import app.trove.debrid.core.HttpTransport
@@ -198,8 +199,10 @@ class DebridRepositoryTest {
         val result = repo.resolveMetadata(query)
         assertEquals("Example Film", result?.title)
         assertEquals("https://images.example.invalid/t/p/w342/d.jpg", result?.posterUrl)
-        assertEquals("tmdb", cache.get(query)?.source)
-        assertTrue(cache.get(query)?.isFresh(System.currentTimeMillis()) == true)
+        val entry = cache.get(query)
+        assertEquals(EnrichmentProvenance.TMDB, entry?.metadata?.provenance)
+        assertTrue(entry?.tmdbFirst == true)
+        assertTrue(entry?.isFresh(System.currentTimeMillis()) == true)
     }
 
     @Test

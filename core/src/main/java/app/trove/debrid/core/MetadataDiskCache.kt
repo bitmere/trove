@@ -21,7 +21,7 @@ class MetadataDiskCache(
         private val keyPattern = Regex("[0-9a-f]{64}")
     }
 
-    data class DiskEntry(val metadata: MediaMetadata, val source: String, val fetchedAt: Long) {
+    data class DiskEntry(val metadata: MediaMetadata, val fetchedAt: Long, val tmdbFirst: Boolean) {
         fun isFresh(now: Long): Boolean = fetchedAt > 0 && now >= fetchedAt && now - fetchedAt < TTL_MS
     }
 
@@ -53,16 +53,17 @@ class MetadataDiskCache(
     }.getOrNull()
 
     @Synchronized
-    fun put(query: MediaQuery, metadata: MediaMetadata, source: String = "cinemeta") {
+    fun put(query: MediaQuery, metadata: MediaMetadata, tmdbFirst: Boolean = false) {
         runCatching {
             if (!directory.isDirectory && !directory.mkdirs()) return
             directory.listFiles()?.filter { it.name.endsWith(".tmp") }?.forEach { it.delete() }
             if (metadata.title.isBlank() || maxEntries <= 0) return
             val fetchedAt = now()
             if (fetchedAt <= 0) return
+            val source = (metadata.provenance ?: EnrichmentProvenance.CINEMETA).diskValue
             val limit = minOf(MAX_ENTRY_BYTES.toLong(), maxBytes)
             if (minimumSize(metadata, source) > limit) return
-            val bytes = encode(metadata, source, fetchedAt).toString().toByteArray(Charsets.UTF_8)
+            val bytes = encode(metadata, source, fetchedAt, tmdbFirst).toString().toByteArray(Charsets.UTF_8)
             if (bytes.size > limit) return
 
             val target = file(query)
@@ -130,9 +131,10 @@ class MetadataDiskCache(
             episodes.sumOf { 24L + it.title.orEmpty().length + it.released.orEmpty().length }
     }
 
-    private fun encode(metadata: MediaMetadata, source: String, fetchedAt: Long): JsonObject = JsonObject().apply {
+    private fun encode(metadata: MediaMetadata, source: String, fetchedAt: Long, tmdbFirst: Boolean): JsonObject = JsonObject().apply {
         addProperty("schemaVersion", SCHEMA_VERSION)
         addProperty("source", source)
+        addProperty("tmdbFirst", tmdbFirst)
         addProperty("fetchedAt", fetchedAt)
         addProperty("title", metadata.title)
         addProperty("year", metadata.year)
@@ -160,7 +162,7 @@ class MetadataDiskCache(
     private fun decode(json: JsonObject): DiskEntry? = with(json) {
         if (primitiveField("schemaVersion")?.toIntOrNull() != SCHEMA_VERSION) return null
         val title = stringField("title")?.takeIf { it.isNotBlank() } ?: return null
-        val source = stringField("source") ?: return null
+        val source = EnrichmentProvenance.entries.firstOrNull { it.diskValue == stringField("source") } ?: return null
         val fetchedAt = primitiveField("fetchedAt")?.toLongOrNull()?.takeIf { it > 0 } ?: return null
         val metadata = MediaMetadata(
             title = title,
@@ -174,6 +176,7 @@ class MetadataDiskCache(
             director = stringField("director"),
             imdbRating = primitiveField("imdbRating")?.toDoubleOrNull()?.takeIf { it.isFinite() },
             runtime = stringField("runtime"),
+            provenance = source,
             episodes = elements("episodes").mapNotNull { element ->
                 val episode = element.takeIf { it.isJsonObject }?.asJsonObject ?: return@mapNotNull null
                 val season = episode.primitiveField("season")?.toIntOrNull() ?: return@mapNotNull null
@@ -181,7 +184,7 @@ class MetadataDiskCache(
                 MediaEpisode(season, number, episode.stringField("title"), episode.stringField("released"))
             }.toList(),
         )
-        DiskEntry(metadata, source, fetchedAt)
+        DiskEntry(metadata, fetchedAt, primitiveField("tmdbFirst") == "true")
     }
 
     private fun JsonObject.elements(name: String): Sequence<JsonElement> =

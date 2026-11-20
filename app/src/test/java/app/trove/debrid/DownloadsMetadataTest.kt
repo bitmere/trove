@@ -4,6 +4,8 @@ import app.trove.debrid.core.*
 import app.trove.debrid.data.MetadataOverride
 import app.trove.debrid.data.TroveRepository
 import app.trove.debrid.ui.downloads.DownloadsViewModel
+import app.trove.debrid.ui.downloads.posterUrl
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -33,7 +35,7 @@ class DownloadsMetadataTest {
         val row = sampleDownload().copy(name = "Baththa.2026.1080p.mkv")
         val provider = FakeProvider(downloads = mutableListOf(row))
         val gate = CompletableDeferred<MediaMetadata?>()
-        val repo = object : TroveRepository by FakeRepository(provider = provider) {
+        val repo = object : FakeRepository(provider = provider) {
             override suspend fun resolveMetadataForRelease(name: String, bypassMiss: Boolean): MediaMetadata? {
                 assertEquals("Baththa.2026.1080p.mkv", name)
                 return gate.await()
@@ -55,7 +57,7 @@ class DownloadsMetadataTest {
 
     @Test fun `metadata failure leaves downloads and playback available without load error`() = runTest {
         val row = sampleDownload()
-        val repo = object : TroveRepository by FakeRepository(provider = FakeProvider(downloads = mutableListOf(row))) {
+        val repo = object : FakeRepository(provider = FakeProvider(downloads = mutableListOf(row))) {
             override suspend fun resolveMetadataForRelease(name: String, bypassMiss: Boolean): MediaMetadata? = error("Synthetic failure")
         }
         val vm = viewModel(repo)
@@ -63,11 +65,12 @@ class DownloadsMetadataTest {
         assertEquals(listOf(row), vm.state.value.downloads)
         assertNull(vm.state.value.loadError)
         assertNull(vm.state.value.error)
+        assertEquals(EnrichmentProvenance.UNAVAILABLE, vm.state.value.enrichment[row.kind to row.id])
     }
     @Test fun `unchanged refresh retains metadata without resolving again but renamed rows resolve`() = runTest {
         val provider = FakeProvider(downloads = mutableListOf(sampleDownload()))
         var calls = 0
-        val repo = object : TroveRepository by FakeRepository(provider = provider) {
+        val repo = object : FakeRepository(provider = provider) {
             override suspend fun resolveMetadataForRelease(name: String, bypassMiss: Boolean): MediaMetadata {
                 calls++
                 val query = parseMediaName(name)
@@ -94,7 +97,7 @@ class DownloadsMetadataTest {
 
     @Test fun `only explicit refresh bypasses the metadata miss cache`() = runTest {
         val bypasses = mutableListOf<Boolean>()
-        val repo = object : TroveRepository by FakeRepository(provider = FakeProvider(downloads = mutableListOf(sampleDownload()))) {
+        val repo = object : FakeRepository(provider = FakeProvider(downloads = mutableListOf(sampleDownload()))) {
             override suspend fun resolveMetadataForRelease(name: String, bypassMiss: Boolean): MediaMetadata? {
                 bypasses += bypassMiss
                 return null
@@ -123,6 +126,7 @@ class DownloadsMetadataTest {
         val vm = viewModel(repo)
         advanceUntilIdle()
         assertTrue(vm.state.value.metadata.isEmpty())
+        assertEquals(EnrichmentProvenance.NO_MATCH, vm.state.value.enrichment[row.kind to row.id])
         vm.openDownload(row)
         advanceUntilIdle()
         assertEquals(candidates, vm.state.value.candidates[DownloadKind.TORRENT to row.id])
@@ -131,7 +135,7 @@ class DownloadsMetadataTest {
     @Test fun `no candidates load when the automatic match already resolved`() = runTest {
         val row = sampleDownload().copy(name = "Baththa.2026.1080p.mkv")
         var candidateCalls = 0
-        val repo = object : TroveRepository by FakeRepository(provider = FakeProvider(downloads = mutableListOf(row))) {
+        val repo = object : FakeRepository(provider = FakeProvider(downloads = mutableListOf(row))) {
             override suspend fun resolveMetadataForRelease(name: String, bypassMiss: Boolean) = MediaMetadata("Baththa", 2026, "movie")
             override suspend fun resolveMetadataCandidates(query: MediaQuery): List<MediaCandidate> {
                 candidateCalls++
@@ -157,6 +161,7 @@ class DownloadsMetadataTest {
         advanceUntilIdle()
         assertEquals("Example Film", vm.state.value.metadata[key]?.title)
         assertEquals("tt0000002", vm.state.value.metadataOverrides[key]?.imdbId)
+        assertEquals(EnrichmentProvenance.CINEMETA, vm.state.value.enrichment[key])
     }
 
     @Test fun `picking a candidate stores the override and shows the picked title`() = runTest {
@@ -198,6 +203,53 @@ class DownloadsMetadataTest {
         assertNull(vm.state.value.metadata[key])
         assertNull(vm.state.value.metadataOverrides[key])
         assertEquals(listOf(candidate), vm.state.value.candidates[key])
+    }
+
+    @Test fun `library refresh retains a known poster while an image request can be in flight`() = runTest {
+        val row = sampleDownload()
+        val key = row.kind to row.id
+        val poster = "https://images.example.invalid/row.jpg"
+        val repo = object : FakeRepository(provider = FakeProvider(downloads = mutableListOf(row))) {
+            override suspend fun resolveMetadataForRelease(name: String, bypassMiss: Boolean) =
+                MediaMetadata(name, null, null, posterUrl = poster)
+        }
+        val vm = viewModel(repo)
+        advanceUntilIdle()
+        assertEquals(poster, vm.state.value.posterUrl(key))
+
+        vm.refreshFromUser()
+        assertEquals(poster, vm.state.value.posterUrl(key))
+        runCurrent()
+        advanceUntilIdle()
+        assertEquals(poster, vm.state.value.posterUrl(key))
+    }
+
+    @Test fun `order changes rehydrate loaded rows without changing the library`() = runTest {
+        val row = sampleDownload()
+        val key = row.kind to row.id
+        val order = MutableStateFlow(0)
+        val gate = CompletableDeferred<Unit>()
+        val repo = object : FakeRepository(provider = FakeProvider(downloads = mutableListOf(row))) {
+            override val metadataOrderChanges = order
+            override suspend fun resolveMetadataForRelease(name: String, bypassMiss: Boolean): MediaMetadata {
+                if (order.value == 1) gate.await()
+                val source = if (order.value == 1) EnrichmentProvenance.TMDB else EnrichmentProvenance.CINEMETA
+                return MediaMetadata(name, null, null, provenance = source)
+            }
+        }
+        val vm = viewModel(repo)
+        runCurrent()
+        assertEquals(EnrichmentProvenance.CINEMETA, vm.state.value.enrichment[key])
+        order.value++
+        runCurrent()
+        assertEquals(listOf(row), vm.state.value.downloads)
+        assertNull(vm.state.value.enrichment[key])
+        gate.complete(Unit)
+        runCurrent()
+        assertEquals(EnrichmentProvenance.TMDB, vm.state.value.enrichment[key])
+        order.value++
+        runCurrent()
+        assertEquals(EnrichmentProvenance.CINEMETA, vm.state.value.enrichment[key])
     }
 
 }

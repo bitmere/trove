@@ -25,10 +25,10 @@ class DownloadsLibraryPerformanceTest {
     @Before fun setUp() { Dispatchers.setMain(StandardTestDispatcher()) }
     @After fun tearDown() { Dispatchers.resetMain() }
 
-    @Test fun `batching emits a few updates for many rows, not one per row`() = runTest {
+    @Test fun `offscreen batching emits a few updates after the initial rows`() = runTest {
         val provider = FakeProvider(downloads = metadataRows())
         var calls = 0
-        val repo = object : TroveRepository by FakeRepository(provider = provider) {
+        val repo = object : FakeRepository(provider = provider) {
             override suspend fun resolveMetadataForRelease(name: String, bypassMiss: Boolean): MediaMetadata {
                 calls++
                 // Let the collector observe each publication without StateFlow conflation.
@@ -45,22 +45,22 @@ class DownloadsLibraryPerformanceTest {
         assertEquals(25, vm.state.value.metadata.size)
         assertEquals(25, calls)
         assertEquals(25, sizes.last())
-        assertTrue(sizes.zipWithNext().count { (before, after) -> after > before } <= 4)
+        assertTrue(sizes.zipWithNext().count { (before, after) -> after > before } <= 7)
     }
 
     @Test fun `stale batch after refresh is dropped`() = runTest {
         val provider = FakeProvider(downloads = metadataRows())
         val gate = CompletableDeferred<Unit>()
         var calls = 0
-        val repo = object : TroveRepository by FakeRepository(provider = provider) {
+        val repo = object : FakeRepository(provider = provider) {
             override suspend fun resolveMetadataForRelease(name: String, bypassMiss: Boolean): MediaMetadata {
-                if (++calls > 10) gate.await()
+                if (++calls > 14) gate.await()
                 return parseMediaName(name).let { MediaMetadata(it.title, it.year, it.type) }
             }
         }
         val vm = DownloadsViewModel(repo, StandardTestDispatcher(testScheduler))
         runCurrent()
-        assertEquals(10, vm.state.value.metadata.size)
+        assertEquals(14, vm.state.value.metadata.size)
 
         provider.downloads.clear()
         vm.refresh()
@@ -74,7 +74,7 @@ class DownloadsLibraryPerformanceTest {
     @Test fun `poster arrival order is preserved`() = runTest {
         val rows = metadataRows()
         val provider = FakeProvider(downloads = rows)
-        val repo = object : TroveRepository by FakeRepository(provider = provider) {
+        val repo = object : FakeRepository(provider = provider) {
             override suspend fun resolveMetadataForRelease(name: String, bypassMiss: Boolean) =
                 parseMediaName(name).let { MediaMetadata(it.title, it.year, it.type) }
         }
@@ -89,7 +89,7 @@ class DownloadsLibraryPerformanceTest {
         val rows = metadataRows()
         val gate = CompletableDeferred<Unit>()
         val started = mutableListOf<String>()
-        val repo = object : TroveRepository by FakeRepository(provider = FakeProvider(downloads = rows)) {
+        val repo = object : FakeRepository(provider = FakeProvider(downloads = rows)) {
             override suspend fun resolveMetadataForRelease(name: String, bypassMiss: Boolean): MediaMetadata {
                 started += name
                 gate.await()
@@ -105,6 +105,26 @@ class DownloadsLibraryPerformanceTest {
         gate.complete(Unit)
         advanceUntilIdle()
         assertEquals(rows.size, started.size)
+        assertEquals(rows.size, vm.state.value.metadata.size)
+    }
+
+    @Test fun `a completed viewport lookup publishes while its sibling is in flight`() = runTest {
+        val rows = metadataRows()
+        val viewport = rows.take(4)
+        val slow = CompletableDeferred<Unit>()
+        val repo = object : FakeRepository(provider = FakeProvider(downloads = rows)) {
+            override suspend fun resolveMetadataForRelease(name: String, bypassMiss: Boolean): MediaMetadata {
+                if (name == viewport.first().name) slow.await()
+                return MediaMetadata(name, null, null)
+            }
+        }
+        val vm = DownloadsViewModel(repo, StandardTestDispatcher(testScheduler))
+        vm.updateVisibleRows(DownloadKind.TORRENT, viewport.mapTo(HashSet()) { "${it.kind}:${it.id}" })
+        runCurrent()
+
+        assertEquals(viewport.drop(1).map { it.kind to it.id }.toSet(), vm.state.value.metadata.keys)
+        slow.complete(Unit)
+        advanceUntilIdle()
         assertEquals(rows.size, vm.state.value.metadata.size)
     }
 

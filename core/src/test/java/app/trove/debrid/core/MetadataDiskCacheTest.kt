@@ -13,14 +13,38 @@ class MetadataDiskCacheTest {
         imdbId = "tt0000001", overview = "A synopsis.", genres = listOf("Drama", "Mystery"),
         cast = listOf("Actor One", "Actor Two"), director = "Director One", imdbRating = 8.2,
         runtime = "45m", episodes = listOf(MediaEpisode(1, 2, "Second", "2026-01-02")),
+        provenance = EnrichmentProvenance.CINEMETA,
     )
 
-    @Test fun `round trips full metadata source and timestamp across cache instances`() {
-        MetadataDiskCache(folder.root, now = { 1000 }).put(query, metadata, "test-source")
-        val entry = MetadataDiskCache(folder.root).get(query)!!
-        assertEquals(metadata, entry.metadata)
-        assertEquals("test-source", entry.source)
-        assertEquals(1000L, entry.fetchedAt)
+    @Test fun `round trips typed provenance and lookup order across cache instances`() {
+        for (source in listOf(EnrichmentProvenance.CINEMETA, EnrichmentProvenance.TMDB,
+            EnrichmentProvenance.CINEMETA_TMDB_POSTER, EnrichmentProvenance.TMDB_CINEMETA_BACKFILL)
+        ) {
+            val enriched = metadata.copy(provenance = source)
+            MetadataDiskCache(folder.root, now = { 1000 }).put(query, enriched, tmdbFirst = true)
+            val entry = MetadataDiskCache(folder.root).get(query)!!
+            assertEquals(enriched, entry.metadata)
+            assertTrue(entry.tmdbFirst)
+            assertEquals(1000L, entry.fetchedAt)
+        }
+    }
+
+    @Test fun `legacy sources keep their original meaning and lookup order`() {
+        val disk = MetadataDiskCache(folder.root, now = { 1000 })
+        disk.put(query, metadata)
+        val file = folder.root.listFiles()!!.single()
+        for ((source, provenance) in mapOf("cinemeta" to EnrichmentProvenance.CINEMETA,
+            "tmdb" to EnrichmentProvenance.LEGACY_TMDB)
+        ) {
+            file.writeText(
+                """{"schemaVersion":1,"source":"$source","title":"Example Show","fetchedAt":1000,
+                   "posterUrl":"https://image.tmdb.org/t/p/w342/example.jpg"}""",
+            )
+            val entry = disk.get(query)!!
+            assertEquals(provenance, entry.metadata.provenance)
+            assertEquals("https://image.tmdb.org/t/p/w342/example.jpg", entry.metadata.posterUrl)
+            assertFalse(entry.tmdbFirst)
+        }
     }
 
     @Test fun `normalizes titles and distinguishes years and types`() {
@@ -102,7 +126,8 @@ class MetadataDiskCacheTest {
             """{"schemaVersion":1,"source":"cinemeta","title":"Example Show","fetchedAt":1000,
                 "year":{},"genres":false,"episodes":[null,{"season":1},{"season":1,"episode":2}]}""",
         )
-        assertEquals(MediaMetadata("Example Show", null, null, episodes = listOf(MediaEpisode(1, 2, null, null))),
+        assertEquals(MediaMetadata("Example Show", null, null, episodes = listOf(MediaEpisode(1, 2, null, null)),
+            provenance = EnrichmentProvenance.CINEMETA),
             disk.get(query)?.metadata)
     }
 

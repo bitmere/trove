@@ -11,11 +11,14 @@ import app.trove.debrid.core.DebridProvider
 import app.trove.debrid.core.DebridService
 import app.trove.debrid.core.DownloadKind
 import app.trove.debrid.core.LibrarySnapshot
+import app.trove.debrid.core.MetadataLookup
 import app.trove.debrid.core.ServiceCacheResult
 import app.trove.debrid.core.StreamUrl
 import app.trove.debrid.core.checkCachedEverywhere as coreCheckCachedEverywhere
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.emptyFlow
 import kotlin.coroutines.coroutineContext
 
 internal val debridServiceOrder = listOf(
@@ -90,6 +93,14 @@ interface TroveRepository {
         name: String,
         bypassMiss: Boolean = false,
     ): app.trove.debrid.core.MediaMetadata? = resolveMetadata(app.trove.debrid.core.parseMediaName(name))
+    suspend fun lookupMetadataForRelease(
+        name: String,
+        bypassMiss: Boolean = false,
+        onPoster: suspend (String) -> Unit = {},
+    ): MetadataLookup = MetadataLookup.from(resolveMetadataForRelease(name, bypassMiss))
+
+    val metadataOrderChanges: Flow<Int> get() = emptyFlow()
+
     /** Title matches for the picker when the automatic match fails.
      *  Listing candidates never resolves one. */
     suspend fun resolveMetadataCandidates(

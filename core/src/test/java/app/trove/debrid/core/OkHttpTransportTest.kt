@@ -147,7 +147,8 @@ class OkHttpTransportTest {
         for (path in listOf("fixed", "chunked")) {
             val request = HttpRequest("GET", "$baseUrl/$path")
             assertEquals("abcd", transport.executeBytes(request, 4).decodeToString())
-            assertTrue(runCatching { transport.executeBytes(request, 3) }.exceptionOrNull() is DebridError.Network)
+            val error = runCatching { transport.executeBytes(request, 3) }.exceptionOrNull() as? DebridError.Provider
+            assertEquals("bodyTooLarge", error?.code)
         }
     }
 

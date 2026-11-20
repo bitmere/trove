@@ -125,7 +125,7 @@ class FakeProvider(
 }
 
 /** In-memory repository for ViewModel tests. No Android Context. */
-class FakeRepository(
+open class FakeRepository(
     var provider: FakeProvider? = FakeProvider(),
     var cachedForHash: Map<String, CachedInfo>? = mapOf(
         "aabbccddeeff00112233445566778899aabbccdd" to

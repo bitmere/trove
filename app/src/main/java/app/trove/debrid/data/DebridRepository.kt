@@ -31,6 +31,11 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.io.File
 
 /** The [TroveRepository] facade (unification item 5). The work is
@@ -165,6 +170,14 @@ class DebridRepository(
     override suspend fun resolveMetadataForRelease(name: String, bypassMiss: Boolean) =
         withContext(ioDispatcher) { metadataResolver.resolve(app.trove.debrid.core.mediaQueryVariants(name), bypassMiss) }
 
+    override suspend fun lookupMetadataForRelease(
+        name: String,
+        bypassMiss: Boolean,
+        onPoster: suspend (String) -> Unit,
+    ) = withContext(ioDispatcher) {
+        metadataResolver.resolveOutcome(app.trove.debrid.core.mediaQueryVariants(name), bypassMiss, onPoster)
+    }
+
     override suspend fun resolveMetadataCandidates(query: app.trove.debrid.core.MediaQuery) =
         withContext(ioDispatcher) { metadataResolver.candidates(query) }
 
@@ -190,12 +203,24 @@ class DebridRepository(
 
     override fun maskedTmdbKey(): String = registry.maskedTmdbKey()
 
-    override suspend fun saveTmdbKey(key: String) = withContext(ioDispatcher) {
-        registry.saveTmdbKey(key)
+    private val metadataOrder = MutableStateFlow(0)
+    private val tmdbKeyWrites = Mutex()
+    override val metadataOrderChanges = metadataOrder.asStateFlow()
+
+    override suspend fun saveTmdbKey(key: String): Unit = withContext(ioDispatcher) {
+        tmdbKeyWrites.withLock {
+            val wasConfigured = registry.tmdbKey() != null
+            registry.saveTmdbKey(key)
+            if (!wasConfigured) metadataOrder.update { it + 1 }
+        }
     }
 
-    override suspend fun clearTmdbKey() {
-        withContext(ioDispatcher) { registry.deleteTmdbKey() }
+    override suspend fun clearTmdbKey(): Unit = withContext(ioDispatcher) {
+        tmdbKeyWrites.withLock {
+            val wasConfigured = registry.tmdbKey() != null
+            registry.deleteTmdbKey()
+            if (wasConfigured) metadataOrder.update { it + 1 }
+        }
     }
 
     override suspend fun validateTmdbKey(key: String): Result<Unit> = withContext(ioDispatcher) {

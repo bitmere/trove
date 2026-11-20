@@ -87,7 +87,7 @@ class OkHttpTransport(
             if (maxBytes == null) return@readResponse body.bytes()
             val source = body.source()
             if (body.contentLength() > maxBytes || source.request(maxBytes.toLong() + 1)) {
-                throw IOException("Response exceeds the byte limit")
+                throw DebridError.Provider("bodyTooLarge", "")
             }
             source.readByteArray()
         }

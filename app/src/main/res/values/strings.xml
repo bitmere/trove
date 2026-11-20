@@ -256,7 +256,7 @@
     <string name="tmdb_api_key">TMDB API Read Access Token</string>
     <string name="tmdb_replace_key">Replace TMDB key</string>
     <string name="tmdb_saved_key">Saved TMDB key: %1$s</string>
-    <string name="tmdb_key_help">Optional. Your own TMDB API Read Access Token is used only when Cinemeta has no match for a title. It is stored encrypted on this device and never leaves it except in TMDB requests.</string>
+    <string name="tmdb_key_help">Optional. Your own TMDB API Read Access Token makes TMDB the first source for title enrichment, with Cinemeta as a fallback. It is stored encrypted on this device and never leaves it except in TMDB requests.</string>
     <string name="tmdb_save_key">Save TMDB key</string>
     <string name="tmdb_key_saved">TMDB key saved.</string>
     <string name="tmdb_key_failed">Couldn’t check that TMDB key. Check it and try again.</string>
@@ -308,5 +308,12 @@
     <string name="theme_ember">Ember</string>
     <string name="theme_rose">Rose</string>
     <string name="theme_save_failed">Could not load or save your theme.</string>
+    <string name="enrichment_cinemeta">Enrichment · Cinemeta</string>
+    <string name="enrichment_tmdb">Enrichment · TMDB</string>
+    <string name="enrichment_tmdb_poster">Enrichment · Cinemeta · TMDB poster only</string>
+    <string name="enrichment_cinemeta_backfill">Enrichment · TMDB · Cinemeta backfill</string>
+    <string name="enrichment_tmdb_legacy">Enrichment · TMDB used · details unknown</string>
+    <string name="enrichment_no_match">Enrichment · No match</string>
+    <string name="enrichment_unavailable">Enrichment · Unavailable</string>
     <string name="retry_poster">Retry poster</string>
 </resources>

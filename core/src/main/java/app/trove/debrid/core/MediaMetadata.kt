@@ -33,7 +33,30 @@ data class MediaMetadata(
     val imdbRating: Double? = null,
     val runtime: String? = null,
     val episodes: List<MediaEpisode> = emptyList(),
+    val provenance: EnrichmentProvenance? = null,
 )
+
+enum class EnrichmentProvenance(internal val diskValue: String) {
+    CINEMETA("cinemeta"),
+    TMDB("tmdb-full"),
+    CINEMETA_TMDB_POSTER("cinemeta-tmdb-poster"),
+    TMDB_CINEMETA_BACKFILL("tmdb-cinemeta-backfill"),
+    LEGACY_TMDB("tmdb"),
+    NO_MATCH("no-match"),
+    UNAVAILABLE("unavailable"),
+}
+
+data class MetadataLookup(val metadata: MediaMetadata?, val provenance: EnrichmentProvenance) {
+    companion object {
+        fun from(metadata: MediaMetadata?): MetadataLookup = MetadataLookup(
+            metadata, metadata?.provenance ?: if (metadata == null) {
+                EnrichmentProvenance.NO_MATCH
+            } else EnrichmentProvenance.CINEMETA,
+        )
+
+        val Unavailable = MetadataLookup(null, EnrichmentProvenance.UNAVAILABLE)
+    }
+}
 
 data class MediaEpisode(val season: Int, val episode: Int, val title: String?, val released: String?)
 data class MediaQuery(val title: String, val year: Int?, val type: String?)
@@ -166,7 +189,7 @@ class CinemetaResolver(
     private val now: () -> Long = System::currentTimeMillis,
     private val diskCache: MetadataDiskCache? = null,
     private val revalidationScope: CoroutineScope? = null,
-    /** Optional fallback for missing Cinemeta matches and posters. */
+    /** Optional primary enrichment and fallback artwork when configured. */
     private val tmdbResolver: TmdbResolver? = null,
 ) {
     constructor(transport: HttpTransport, clock: () -> Long) : this(transport, now = clock)
@@ -178,13 +201,18 @@ class CinemetaResolver(
         const val MAX_CANDIDATES = 5
     }
 
-    private data class CacheEntry(val value: MediaMetadata?, val expires: Long, val miss: Boolean = false)
+    private data class CacheEntry(
+        val result: MetadataLookup,
+        val expires: Long,
+        val tmdbFirst: Boolean,
+        val miss: Boolean = false,
+    )
     private val cacheMutex = Mutex()
     private val lookupLanes = Array(32) { Mutex() }
     private val network = Semaphore(4)
 
     private fun lookupLane(key: MediaQuery): Mutex = lookupLanes[(key.hashCode() and Int.MAX_VALUE) % lookupLanes.size]
-    private val refreshing = ConcurrentHashMap<MediaQuery, Unit>()
+    private val refreshing = ConcurrentHashMap<Pair<MediaQuery, Boolean>, Unit>()
     private val cache = object : LinkedHashMap<MediaQuery, CacheEntry>(128, .75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<MediaQuery, CacheEntry>?): Boolean = size > 256
     }
@@ -192,102 +220,157 @@ class CinemetaResolver(
     suspend fun resolve(query: MediaQuery, bypassMiss: Boolean = false): MediaMetadata? =
         resolve(listOf(query), bypassMiss)
 
-    suspend fun resolve(queries: List<MediaQuery>, bypassMiss: Boolean = false): MediaMetadata? {
-        val query = queries.firstOrNull() ?: return null
-        if (query.title.isBlank() || query.title.length > 160) return null
+    suspend fun resolve(queries: List<MediaQuery>, bypassMiss: Boolean = false): MediaMetadata? =
+        resolveOutcome(queries, bypassMiss).metadata
+
+    suspend fun resolveOutcome(
+        queries: List<MediaQuery>,
+        bypassMiss: Boolean = false,
+        onPoster: suspend (String) -> Unit = {},
+    ): MetadataLookup {
+        val query = queries.firstOrNull()?.takeIf(::validQuery) ?: return MetadataLookup.from(null)
         val key = query.copy(title = normalizedTitle(query.title))
         return lookupLane(key).withLock {
+            val token = tmdbResolver?.configuredKey()
+            val tmdbFirst = token != null
             val cached = cacheMutex.withLock {
-                cache[key]?.takeIf { it.expires > now() && !(bypassMiss && it.miss) }
+                cache[key]?.takeIf { it.tmdbFirst == tmdbFirst && it.expires > now() && !(bypassMiss && it.miss) }
             }
-            if (cached != null) return@withLock cached.value
+            if (cached != null) return@withLock cached.result
 
-            val diskEntry = diskCache?.get(query)
-            if (diskEntry?.isFresh(now()) == true) {
-                val metadata = diskEntry.metadata
-                if (metadata.posterUrl != null) {
-                    cacheMutex.withLock { cache[key] = CacheEntry(metadata, now() + SUCCESS_TTL_MS) }
-                    return@withLock metadata
-                }
-                return@withLock network.withPermit { lookupAndStore(queries, key, metadata, diskEntry.source) }
-            }
+            val diskEntry = diskCache?.get(query)?.takeIf { it.tmdbFirst == tmdbFirst }
             val stale = diskEntry?.metadata
-            if (stale != null && revalidationScope != null) {
-                if (refreshing.putIfAbsent(key, Unit) == null) {
+            if (diskEntry?.isFresh(now()) == true && stale?.posterUrl != null) {
+                val result = MetadataLookup.from(stale)
+                cacheMutex.withLock { cache[key] = CacheEntry(result, now() + SUCCESS_TTL_MS, tmdbFirst) }
+                return@withLock result
+            }
+            if (stale != null && diskEntry?.isFresh(now()) == false && revalidationScope != null) {
+                val refreshKey = key to tmdbFirst
+                if (refreshing.putIfAbsent(refreshKey, Unit) == null) {
                     revalidationScope.launch {
                         lookupLane(key).withLock {
-                            network.withPermit { lookupAndStore(queries, key, stale, background = true) }
+                            if (tmdbResolver?.configuredKey() == token) {
+                                network.withPermit { lookupAndStore(queries, key, token, stale, background = true) }
+                            }
                         }
-                    }.invokeOnCompletion { refreshing.remove(key) }
+                    }.invokeOnCompletion { refreshing.remove(refreshKey) }
                 }
-                return@withLock stale
+                return@withLock MetadataLookup.from(stale)
             }
-            network.withPermit { lookupAndStore(queries, key, stale) }
+            network.withPermit {
+                val incomplete = stale?.takeIf {
+                    diskEntry?.isFresh(now()) == true && it.provenance == EnrichmentProvenance.CINEMETA
+                }
+                lookupAndStore(queries, key, token, stale, incomplete = incomplete, onPoster = onPoster)
+            }
         }
     }
+
+    private fun validQuery(query: MediaQuery): Boolean = query.title.isNotBlank() && query.title.length <= 160
 
     private suspend fun lookupAndStore(
         queries: List<MediaQuery>,
         key: MediaQuery,
+        token: String?,
         stale: MediaMetadata?,
-        incompleteSource: String? = null,
         background: Boolean = false,
-    ): MediaMetadata? {
+        incomplete: MediaMetadata? = null,
+        onPoster: suspend (String) -> Unit = {},
+    ): MetadataLookup {
         val query = queries.first()
-        var ttl = MISS_TTL_MS
-        val result = if (incompleteSource != null) stale else try {
-            queries.firstNotNullOfOrNull { variant ->
-                if (variant.title.isBlank() || variant.title.length > 160) null else lookup(variant)
-            }
+        val tmdb = tmdbResolver
+        var failed = false
+        suspend fun lookupSafely(block: suspend () -> MediaMetadata?): MediaMetadata? = try {
+            block()
         } catch (e: CancellationException) {
             throw e
         } catch (_: Exception) {
-            ttl = FAILURE_TTL_MS
+            failed = true
             null
         }
-        // For incomplete disk entries, keep the cached identity and text.
-        val poster = result?.takeIf { it.posterUrl == null }?.let { metadata ->
-            tmdbResolver?.resolvePoster(
-                MediaQuery(metadata.title, metadata.year, metadata.type),
-                metadata.imdbId,
-            )
-        }
-        val refreshedPoster = if (poster == null && incompleteSource == "cinemeta") {
-            try {
-                val id = result?.imdbId
-                val type = result?.type
-                if (id != null && type != null) lookupById(id, type)?.posterUrl
-                else queries.firstNotNullOfOrNull { lookup(it) }?.posterUrl
-            } catch (e: CancellationException) {
-                throw e
-            } catch (_: Exception) {
-                null
+
+        val primary = if (incomplete == null && tmdb != null && token != null) lookupSafely {
+            queries.firstNotNullOfOrNull { variant ->
+                if (validQuery(variant) && variant.year == query.year) tmdb.resolvePrimary(variant, token) else null
             }
         } else null
-        val tmdbResult = if (result == null) tmdbResolver?.let { tmdb ->
-            queries.firstNotNullOfOrNull { variant -> tmdb.resolve(variant) }
-        } else null
-        val resolved = result?.let { metadata ->
-            (poster ?: refreshedPoster)?.let { metadata.copy(posterUrl = it) } ?: metadata
-        } ?: tmdbResult
+
+        val primaryId = primary?.imdbId
+        val primaryType = primary?.type
+        val resolved = if (primary != null) {
+            val backfill = if (primaryId != null && primaryType != null) {
+                primary.posterUrl?.let { onPoster(it) }
+                lookupSafely { lookupById(primaryId, primaryType) }
+            } else null
+            if (backfill == null) primary else {
+                val enriched = primary.copy(
+                    year = primary.year ?: backfill.year,
+                    posterUrl = primary.posterUrl ?: backfill.posterUrl,
+                    overview = primary.overview ?: backfill.overview,
+                    genres = primary.genres.ifEmpty { backfill.genres },
+                    cast = primary.cast.ifEmpty { backfill.cast },
+                    director = primary.director ?: backfill.director,
+                    runtime = primary.runtime ?: backfill.runtime,
+                    imdbRating = backfill.imdbRating,
+                    episodes = backfill.episodes,
+                )
+                if (enriched == primary) primary else enriched.copy(
+                    provenance = EnrichmentProvenance.TMDB_CINEMETA_BACKFILL,
+                )
+            }
+        } else {
+            val cinemeta = incomplete ?: lookupSafely {
+                queries.firstNotNullOfOrNull { if (validQuery(it)) lookup(it) else null }
+            }
+            cinemeta?.let { match ->
+                val poster = if (token != null && match.posterUrl == null && !failed) {
+                    tmdb?.resolvePoster(MediaQuery(match.title, match.year, match.type), match.imdbId)
+                } else null
+                when {
+                    poster != null -> match.copy(
+                        posterUrl = poster, provenance = EnrichmentProvenance.CINEMETA_TMDB_POSTER,
+                    )
+                    incomplete != null -> {
+                        val id = incomplete.imdbId
+                        val type = incomplete.type
+                        val refreshed = lookupSafely {
+                            if (id != null && type != null) lookupById(id, type)
+                            else queries.firstNotNullOfOrNull { if (validQuery(it)) lookup(it) else null }
+                        }
+                        match.copy(posterUrl = refreshed?.posterUrl)
+                    }
+                    else -> match
+                }
+            }
+        }
         coroutineContext.ensureActive()
 
-        if (resolved != null) {
-            if (incompleteSource == null || resolved.posterUrl != null) {
-                val source = if (poster != null || tmdbResult != null) "tmdb" else incompleteSource ?: "cinemeta"
-                diskCache?.put(query, resolved, source)
+        val result = when {
+            resolved != null || stale != null -> MetadataLookup.from(resolved ?: stale)
+            failed -> MetadataLookup.Unavailable
+            else -> MetadataLookup.from(null)
+        }
+        val tmdbFirst = token != null
+        val cooldown = if (token == null) 0L else tmdb?.cooldownUntil() ?: 0L
+        val retrySoon = failed || cooldown > now()
+        if (tmdb?.configuredKey() == token) {
+            if (resolved != null && !retrySoon && (stale?.posterUrl != null || stale == null || resolved.posterUrl != null)) {
+                diskCache?.put(query, resolved, tmdbFirst)
             }
-            val successTtl = if (resolved.posterUrl == null) MISS_TTL_MS else SUCCESS_TTL_MS
-            // A posterless success expires on the miss schedule and is
-            // re-checked on an explicit refresh, like a miss.
-            cacheMutex.withLock { cache[key] = CacheEntry(resolved, now() + successTtl, miss = resolved.posterUrl == null) }
-        } else if (!background) {
-            cacheMutex.withLock {
-                cache[key] = CacheEntry(stale, now() + if (stale == null) ttl else FAILURE_TTL_MS,
-                    miss = stale == null && ttl == MISS_TTL_MS)
+            if (resolved != null || !background) {
+                val ttl = when {
+                    retrySoon || resolved == null && stale != null -> FAILURE_TTL_MS
+                    resolved?.posterUrl != null -> SUCCESS_TTL_MS
+                    else -> MISS_TTL_MS
+                }
+                val expires = if (cooldown > now()) minOf(now() + ttl, cooldown) else now() + ttl
+                cacheMutex.withLock {
+                    cache[key] = CacheEntry(result, expires, tmdbFirst, miss = !retrySoon && result.metadata?.posterUrl == null)
+                }
             }
         }
-        return resolved ?: stale
+        return result
     }
 
     private suspend fun get(path: String): JsonObject {
@@ -319,7 +402,9 @@ class CinemetaResolver(
             val metadata = lookupById(imdbId, type) ?: return@withPermit null
             if (metadata.posterUrl != null) return@withPermit metadata
             val poster = tmdbResolver?.resolvePoster(MediaQuery(metadata.title, metadata.year, type), imdbId)
-            if (poster == null) metadata else metadata.copy(posterUrl = poster)
+            if (poster == null) metadata else metadata.copy(
+                posterUrl = poster, provenance = EnrichmentProvenance.CINEMETA_TMDB_POSTER,
+            )
         }
 
     private suspend fun lookupById(imdbId: String, type: String): MediaMetadata? {
@@ -360,7 +445,7 @@ class CinemetaResolver(
     private fun parseDetail(detail: JsonObject, id: String, type: String): MediaMetadata? {
         if (detail.optString("id") != id || detail.optString("type") != type) return null
         return MediaMetadata(
-            title = detail.optString("name")!!,
+            title = detail.optString("name")?.takeIf { it.isNotBlank() } ?: return null,
             year = mediaYear(detail),
             type = type,
             posterUrl = publicPosterUrl(detail.optString("poster")),
@@ -379,6 +464,7 @@ class CinemetaResolver(
             }?.takeIf { it.isFinite() && it in 0.0..10.0 },
             runtime = detail.nonBlankStringField("runtime"),
             episodes = if (type == "series") parseEpisodes(detail) else emptyList(),
+            provenance = EnrichmentProvenance.CINEMETA,
         )
     }
 

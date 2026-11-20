@@ -108,4 +108,19 @@ class PosterDiskCacheTest {
         assertTrue(folder.root.listFiles()!!.isEmpty())
     }
 
+    @Test fun `known TMDB renditions reuse and migrate existing bytes without downloading again`() = runBlocking {
+        val old = "https://image.tmdb.org/t/p/w342/example.jpg"
+        val thumbnail = "https://image.tmdb.org/t/p/w185/example.jpg"
+        val disk = PosterDiskCache(folder.root)
+        disk.put(old, byteArrayOf(1))
+        val source = PosterSource(disk, { error("Unexpected network call") }) { it.singleOrNull() }
+        assertEquals(posterCacheKey(old), posterCacheKey(thumbnail))
+        assertEquals(1.toByte(), source.load(thumbnail))
+        assertEquals(1.toByte(), source.load(old))
+        assertNull(disk.get(old))
+        assertArrayEquals(byteArrayOf(1), disk.get(thumbnail))
+        val other = "https://example.invalid/t/p/w342/example.jpg"
+        assertEquals(other, posterCacheKey(other))
+    }
+
 }

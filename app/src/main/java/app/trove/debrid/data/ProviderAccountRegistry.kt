@@ -61,7 +61,7 @@ class ProviderAccountRegistry(
         private const val KEY_ACCOUNTS = "accounts"
     }
 
-    /** The TMDB fallback resolver, keyed by the stored TMDB key. The
+    /** The TMDB resolver, keyed by the stored TMDB key. The
      *  facade's metadata wiring consumes this; the key itself never
      *  leaves the registry. */
     internal val tmdbResolver = TmdbResolver(transport) { tmdbKey() }
