@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.28 — 2026-11-20
+
+- Download row redesign (PR 36): flat one-title rows with a 48dp poster, a neutral placeholder instead of the Play glyph, and Play as a compact Jade-tinted trailing icon button; the raw release name, added date, and file facts move to the details sheet.
+- Go-to-top (PR 36): the button now appears on any scroll down, not only after 10 rows, so you can jump straight to the top from anywhere in the list.
+- Poster retry (PR 36): a failed poster is retried when the row re-enters composition or metadata refreshes, instead of showing the Play glyph forever.
+- Details sheet (PR 36): episode and file rows are flat rows with hairline dividers instead of cards; the matched episode is marked with a Jade dot and label, and the cast line allows two lines.
+- Settings and list polish (PR 36): one heading per provider section with no tinted banner, centered empty state, centered Add button label, leading icons on feedback messages, tighter Downloads header without the subtitle, "128+" inside the count pill, a plain "Reset" button, TalkBack announcements on loading spinners, and the official TMDB logo next to the attribution.
+- Baseline: 591 JVM tests, lint 0 errors.
+
 ## 0.1.27 — 2026-11-20
 
 - Search placeholder (PR 33): the "Search downloads" placeholder no longer wraps to three lines once Reset search appears after sorting; it is now single-line with an ellipsis, so the search bar stays 56dp.
