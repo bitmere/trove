@@ -11,6 +11,7 @@ import app.trove.debrid.core.DebridProvider
 import app.trove.debrid.core.DebridService
 import app.trove.debrid.core.DownloadKind
 import app.trove.debrid.core.LibrarySnapshot
+import app.trove.debrid.core.MediaMetadata
 import app.trove.debrid.core.MetadataLookup
 import app.trove.debrid.core.ServiceCacheResult
 import app.trove.debrid.core.StreamUrl
@@ -98,6 +99,8 @@ interface TroveRepository {
         bypassMiss: Boolean = false,
         onPoster: suspend (String) -> Unit = {},
     ): MetadataLookup = MetadataLookup.from(resolveMetadataForRelease(name, bypassMiss))
+
+    suspend fun replaceFailedPoster(name: String, metadata: MediaMetadata): MediaMetadata? = null
 
     val metadataOrderChanges: Flow<Int> get() = emptyFlow()
 

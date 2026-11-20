@@ -4,6 +4,7 @@ import app.trove.debrid.core.*
 import app.trove.debrid.data.MetadataOverride
 import app.trove.debrid.data.TroveRepository
 import app.trove.debrid.ui.downloads.DownloadsViewModel
+import app.trove.debrid.ui.downloads.PosterSlot
 import app.trove.debrid.ui.downloads.posterUrl
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.CompletableDeferred
@@ -74,7 +75,7 @@ class DownloadsMetadataTest {
             override suspend fun resolveMetadataForRelease(name: String, bypassMiss: Boolean): MediaMetadata {
                 calls++
                 val query = parseMediaName(name)
-                return MediaMetadata(query.title, query.year, query.type)
+                return MediaMetadata(query.title, query.year, query.type, "https://example.invalid/poster.jpg")
             }
         }
         val vm = viewModel(repo)
@@ -112,6 +113,103 @@ class DownloadsMetadataTest {
         vm.onAdded(DownloadKind.TORRENT)
         advanceUntilIdle()
         assertEquals(listOf(false, false, true, false), bypasses)
+    }
+
+    @Test fun `explicit refresh retries held posterless metadata for visible and offscreen rows`() = runTest {
+        val rows = List(6) { sampleDownload(id = it.toString()) }
+        val attempts = mutableListOf<Boolean>()
+        val artwork = "https://example.invalid/fresh.jpg"
+        val repo = object : FakeRepository(provider = FakeProvider(downloads = rows.toMutableList())) {
+            override suspend fun resolveMetadataForRelease(name: String, bypassMiss: Boolean): MediaMetadata {
+                attempts += bypassMiss
+                return MediaMetadata(name, null, null, artwork.takeIf { bypassMiss })
+            }
+        }
+        val vm = viewModel(repo)
+        advanceUntilIdle()
+        assertEquals(rows.size, vm.state.value.metadata.size)
+        assertTrue(vm.state.value.metadata.values.none { it.posterUrl != null })
+        vm.refreshFromUser()
+        advanceUntilIdle()
+        assertEquals(List(rows.size) { false } + List(rows.size) { true }, attempts)
+        assertTrue(vm.state.value.metadata.values.all { it.posterUrl == artwork })
+    }
+
+    @Test fun `explicit refresh retries an expired cooldown even when the row already has artwork`() = runTest {
+        val row = sampleDownload()
+        val key = row.kind to row.id
+        val legacy = MediaMetadata("Example", null, null, "https://example.invalid/cached.jpg")
+        val fresh = legacy.copy(posterUrl = "https://example.invalid/refreshed.jpg")
+        val revalidation = CompletableDeferred<MetadataLookup?>()
+        val repo = object : FakeRepository(provider = FakeProvider(downloads = mutableListOf(row))) {
+            var lookups = 0
+            override suspend fun lookupMetadataForRelease(
+                name: String, bypassMiss: Boolean, onPoster: suspend (String) -> Unit,
+            ): MetadataLookup {
+                lookups++
+                return if (bypassMiss) MetadataLookup.from(fresh)
+                else MetadataLookup.from(legacy).copy(revalidation = revalidation)
+            }
+        }
+        var time = 1000L
+        val vm = DownloadsViewModel(repo, StandardTestDispatcher(testScheduler), now = { time })
+        runCurrent()
+        revalidation.complete(MetadataLookup.from(legacy).copy(retryAfter = 5000))
+        runCurrent()
+        vm.refreshFromUser()
+        advanceUntilIdle()
+        assertEquals(1, repo.lookups)
+        assertEquals(legacy.posterUrl, vm.state.value.posterUrl(key))
+        time = 5000
+        vm.refreshFromUser()
+        advanceUntilIdle()
+        assertEquals(2, repo.lookups)
+        assertEquals(fresh.posterUrl, vm.state.value.posterUrl(key))
+    }
+
+    @Test fun `image failure updates the held poster and keeps the resolved identity`() = runTest {
+        val row = sampleDownload()
+        val key = row.kind to row.id
+        val primary = MediaMetadata("Example", null, null, "https://example.invalid/tmdb.jpg",
+            provenance = EnrichmentProvenance.TMDB)
+        val alternate = primary.copy(posterUrl = "https://example.invalid/cinemeta.jpg",
+            provenance = EnrichmentProvenance.TMDB_CINEMETA_POSTER)
+        val repo = object : FakeRepository(provider = FakeProvider(downloads = mutableListOf(row))) {
+            override suspend fun resolveMetadataForRelease(name: String, bypassMiss: Boolean) = primary
+            override suspend fun replaceFailedPoster(name: String, metadata: MediaMetadata): MediaMetadata {
+                assertEquals(primary, metadata)
+                return alternate
+            }
+        }
+        val vm = viewModel(repo)
+        runCurrent()
+        vm.onPosterFailure(row, primary.posterUrl!!)
+        assertEquals(alternate, vm.state.value.metadata[key])
+        assertEquals(alternate.provenance, vm.state.value.enrichment[key])
+    }
+
+    @Test fun `warm viewport exposes cached posters before revalidation and keeps their count`() = runTest {
+        val rows = List(4) { sampleDownload(id = it.toString()).copy(name = "Example ${it + 1}") }
+        val revalidations = rows.associate { it.name to CompletableDeferred<MetadataLookup?>() }
+        val repo = object : FakeRepository(provider = FakeProvider(downloads = rows.toMutableList())) {
+            override suspend fun lookupMetadataForRelease(
+                name: String, bypassMiss: Boolean, onPoster: suspend (String) -> Unit,
+            ): MetadataLookup = MetadataLookup.from(
+                MediaMetadata(name, null, null, "https://example.invalid/${name.last()}.jpg"),
+            ).copy(revalidation = revalidations.getValue(name))
+        }
+        val vm = viewModel(repo)
+        runCurrent()
+        fun posters() = rows.mapNotNull { vm.state.value.posterUrl(it.kind to it.id) }
+        val launch = posters()
+        assertEquals(4, launch.size)
+        val replacement = MediaMetadata(rows[0].name, null, null, "https://example.invalid/new.jpg")
+        revalidations.getValue(rows[0].name).complete(MetadataLookup.from(replacement))
+        revalidations.getValue(rows[1].name).cancel()
+        revalidations.getValue(rows[2].name).complete(null)
+        revalidations.getValue(rows[3].name).complete(null)
+        runCurrent()
+        assertEquals(listOf(replacement.posterUrl) + launch.drop(1), posters())
     }
 
     @Test fun `opening a download without metadata loads picker candidates`() = runTest {
@@ -234,22 +332,32 @@ class DownloadsMetadataTest {
             override suspend fun resolveMetadataForRelease(name: String, bypassMiss: Boolean): MediaMetadata {
                 if (order.value == 1) gate.await()
                 val source = if (order.value == 1) EnrichmentProvenance.TMDB else EnrichmentProvenance.CINEMETA
-                return MediaMetadata(name, null, null, provenance = source)
+                val poster = if (order.value == 0) "https://example.invalid/cached.jpg" else null
+                return MediaMetadata(name, null, null, posterUrl = poster, provenance = source)
             }
         }
         val vm = viewModel(repo)
         runCurrent()
         assertEquals(EnrichmentProvenance.CINEMETA, vm.state.value.enrichment[key])
+        val displayed = PosterSlot<String>().afterLoad(vm.state.value.posterUrl(key)!!, "cached bitmap")
         order.value++
         runCurrent()
         assertEquals(listOf(row), vm.state.value.downloads)
         assertNull(vm.state.value.enrichment[key])
+        assertTrue(displayed.hasPoster(vm.state.value.posterUrl(key)))
         gate.complete(Unit)
         runCurrent()
         assertEquals(EnrichmentProvenance.TMDB, vm.state.value.enrichment[key])
+        assertNull(vm.state.value.posterUrl(key))
+        assertTrue(displayed.hasPoster(vm.state.value.posterUrl(key)))
         order.value++
         runCurrent()
         assertEquals(EnrichmentProvenance.CINEMETA, vm.state.value.enrichment[key])
+        assertTrue(displayed.hasPoster(vm.state.value.posterUrl(key)))
+        order.value++
+        runCurrent()
+        assertEquals("cached bitmap", displayed.bitmap)
+        assertTrue(displayed.hasPoster(vm.state.value.posterUrl(key)))
     }
 
 }

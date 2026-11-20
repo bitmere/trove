@@ -312,6 +312,7 @@
     <string name="enrichment_tmdb">Enrichment · TMDB</string>
     <string name="enrichment_tmdb_poster">Enrichment · Cinemeta · TMDB poster only</string>
     <string name="enrichment_cinemeta_backfill">Enrichment · TMDB · Cinemeta backfill</string>
+    <string name="enrichment_tmdb_cinemeta_poster">Enrichment · TMDB · Cinemeta poster only</string>
     <string name="enrichment_tmdb_legacy">Enrichment · TMDB used · details unknown</string>
     <string name="enrichment_no_match">Enrichment · No match</string>
     <string name="enrichment_unavailable">Enrichment · Unavailable</string>

@@ -56,11 +56,15 @@ internal fun DownloadDetailsSheet(
     showClutterFiles: Boolean = false,
     onPickCandidate: (MediaCandidate) -> Unit = {},
     onClearOverride: () -> Unit = {},
+    onPosterFailure: suspend (String) -> Unit = {},
 ) {
     val visibleFiles = remember(download.files, showClutterFiles) {
         if (showClutterFiles) download.files else download.files.filterNot { isClutterFile(it.name) }
     }
     val metadata = state.metadata
+    val poster = key(download.kind, download.id, download.name) {
+        rememberPoster(state.posterUrl, onPosterFailure)
+    }
     val candidates = state.candidates
     val title = remember(download.name, metadata) {
         downloadIdentity(download, metadata).title
@@ -97,18 +101,17 @@ internal fun DownloadDetailsSheet(
         ) {
             item {
                 Column(verticalArrangement = Arrangement.spacedBy(TroveSpace.compact)) {
-                    val posterUrl = remember(state.posterUrl) { publicPosterUrl(state.posterUrl) }
                     val subtitle = stringResource(
                         R.string.details_metadata, kindWord(download.kind),
                         formatSize(download.sizeBytes), statusWord(download.status),
                     )
-                    if (posterUrl == null) {
+                    if (!poster.hasPoster) {
                         DetailsTitle(title, subtitle)
                     } else {
                         BoxWithConstraints(Modifier.fillMaxWidth()) {
                             val size = detailsPosterSize(maxWidth, LocalDensity.current.fontScale)
                             Row(horizontalArrangement = Arrangement.spacedBy(TroveSpace.medium)) {
-                                MetadataPoster(posterUrl, size)
+                                MetadataPoster(poster, size)
                                 Column(Modifier.weight(1f)) { DetailsTitle(title, subtitle) }
                             }
                         }
@@ -307,6 +310,7 @@ private fun EnrichmentProvenance.label(): Int = when (this) {
     EnrichmentProvenance.TMDB -> R.string.enrichment_tmdb
     EnrichmentProvenance.CINEMETA_TMDB_POSTER -> R.string.enrichment_tmdb_poster
     EnrichmentProvenance.TMDB_CINEMETA_BACKFILL -> R.string.enrichment_cinemeta_backfill
+    EnrichmentProvenance.TMDB_CINEMETA_POSTER -> R.string.enrichment_tmdb_cinemeta_poster
     EnrichmentProvenance.LEGACY_TMDB -> R.string.enrichment_tmdb_legacy
     EnrichmentProvenance.NO_MATCH -> R.string.enrichment_no_match
     EnrichmentProvenance.UNAVAILABLE -> R.string.enrichment_unavailable
