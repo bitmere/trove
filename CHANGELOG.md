@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.32 — 2026-11-21
+
+- List-vs-sheet enrichment gap (PR 48): rows that were never enriched are now re-enqueued instead of staying blank — snapshot restores, page-0 failures, scrolling, and refresh/sort/tab changes no longer drop them; opening the details sheet is no longer the only recovery. Failed poster loads retry, and TMDB-first titles with an IMDb id but no poster now fall through to the Cinemeta artwork search.
+- Web download id fix (PR 49): fixes "TorBox returned no web download id" on web adds — web and Usenet adds now use the sync create endpoints, matching the torrent branches, instead of the async endpoints that return success with no id. When a create still returns no id, the item is recovered from mylist by link hash instead of throwing, and the error now carries TorBox's detail when present.
+- Baseline: 650 JVM tests, lint 0 errors.
+
 ## 0.1.31 — 2026-11-20
 
 - Poster regression fix (PR 45): updated installs serve surviving legacy posters immediately instead of skipping them when a TMDB key is set, and a posterless result no longer overwrites a good cached poster.
