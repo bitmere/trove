@@ -61,6 +61,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.rememberGraphicsLayer
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import app.trove.debrid.ui.theme.TroveSpace
 import app.trove.debrid.ui.theme.TroveSize
@@ -313,7 +314,7 @@ fun DownloadsScreen(
                             onSearch = { keyboard?.hide() },
                             expanded = false,
                             onExpandedChange = {},
-                            placeholder = { Text(stringResource(R.string.search_downloads)) },
+                            placeholder = { Text(stringResource(R.string.search_downloads), maxLines = 1, overflow = TextOverflow.Ellipsis) },
                             leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
                             trailingIcon = {
                                 if (state.query.isNotEmpty()) IconButton(onClick = { viewModel.setQuery("") }) {

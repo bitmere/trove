@@ -68,6 +68,9 @@ class FakeProvider(
     var cacheDelayMs: Long = 0
     var addFailure: DebridError? = null
     var playFailure: Exception? = null
+    /** When set, getStreamUrl throws this instead of returning a result.
+     *  Used to prove a cancelled playback never sticks the resolving state. */
+    var throwOnStreamUrl: Exception? = null
     val playedFileIds = mutableListOf<String>()
     var throwOnPlay: Boolean = false
     var deletedIds = mutableListOf<String>()
@@ -79,8 +82,14 @@ class FakeProvider(
 
     override suspend fun listDownloads() = Result.success(downloads.toList())
 
-    override suspend fun getDownload(id: String) =
-        Result.success(downloads.first { it.id == id })
+    /** When set, getDownload throws this instead of returning a row. Used to
+     *  prove a cancelled/failed lookup never sticks the resolving state. */
+    var getDownloadFailure: Exception? = null
+
+    override suspend fun getDownload(id: String): Result<DebridDownload> {
+        getDownloadFailure?.let { throw it }
+        return Result.success(downloads.first { it.id == id })
+    }
 
     override suspend fun add(input: AddInput): Result<DebridDownload> {
         addedInputs += input
@@ -96,6 +105,7 @@ class FakeProvider(
     }
 
     override suspend fun getStreamUrl(downloadId: String, fileId: String): Result<StreamUrl> {
+        throwOnStreamUrl?.let { throw it }
         playedFileIds += fileId
         if (throwOnPlay) throw IllegalStateException("boom")
         return playFailure?.let { Result.failure(it) } ?: Result.success(StreamUrl(url = playUrl))
