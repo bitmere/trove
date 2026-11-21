@@ -37,12 +37,14 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.unit.dp
 import app.trove.debrid.ui.theme.TroveSize
 import app.trove.debrid.ui.theme.TroveSpace
+import app.trove.debrid.ui.downloads.addedDate
 import app.trove.debrid.ui.Feedback
 
 /** One group per sub-screen; the root list shows these in order. */
 internal enum class SettingsDestination(val titleRes: Int, val summaryRes: Int) {
     PROVIDERS(R.string.providers_title, R.string.settings_group_providers_summary),
     LIBRARY(R.string.settings_group_library, R.string.settings_group_library_summary),
+    SIMKL(R.string.settings_group_simkl, R.string.settings_group_simkl_summary),
     PLAYBACK(R.string.settings_group_playback, R.string.settings_group_playback_summary),
     APPEARANCE(R.string.settings_group_appearance, R.string.settings_group_appearance_summary),
     UPDATES(R.string.update_title, R.string.settings_group_updates_summary),
@@ -130,6 +132,7 @@ fun SettingsScreen(viewModel: SettingsViewModel, updateViewModel: UpdateViewMode
                         ProviderSection(state, canEdit, viewModel, providerDetail)
                     }
                     SettingsDestination.LIBRARY -> LibraryContent(state, canEdit, viewModel)
+                    SettingsDestination.SIMKL -> SimklContent(state, canEdit, viewModel)
                     SettingsDestination.PLAYBACK -> PlaybackContent(state, canEdit) {
                         viewModel.refreshPlayers()
                         showPlayers = true
@@ -413,6 +416,85 @@ private fun LibraryContent(state: SettingsUiState, canEdit: Boolean, viewModel: 
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
+}
+
+/** SIMKL read-only status badges: device/PIN sign-in, sync, sign-out.
+ *  Badges appear on list rows and in the details sheet only while
+ *  signed in; sync is on demand only, never on a timer. */
+@Composable
+private fun SimklContent(state: SettingsUiState, canEdit: Boolean, viewModel: SettingsViewModel) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    if (!state.simklConfigured) {
+        Text(stringResource(R.string.simkl_not_registered), style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(stringResource(R.string.simkl_attribution), style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
+        return
+    }
+    if (!state.simklSignedIn) {
+        Text(stringResource(R.string.simkl_sign_in_help), style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (state.simklSigningIn) {
+            state.simklUserCode?.let {
+                Text(it, style = MaterialTheme.typography.headlineSmall)
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(TroveSpace.small)) {
+                state.simklVerificationUri?.let { uri ->
+                    Button(onClick = { app.trove.debrid.ui.downloads.openWebUrl(context, uri) }) {
+                        Text(stringResource(R.string.simkl_open_pin))
+                    }
+                }
+                OutlinedButton(onClick = viewModel::cancelSimklSignIn) {
+                    Text(stringResource(R.string.cancel))
+                }
+            }
+            Text(stringResource(R.string.simkl_sign_in_waiting), style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+        } else {
+            Button(onClick = viewModel::startSimklSignIn, enabled = canEdit) {
+                Text(stringResource(R.string.simkl_sign_in))
+            }
+        }
+        if (state.simklSignInExpired) {
+            Feedback(stringResource(R.string.simkl_sign_in_expired), error = true)
+        }
+        if (state.simklSignInError) {
+            Feedback(stringResource(R.string.simkl_sign_in_failed), error = true)
+        }
+    } else {
+        state.simklUsername?.let {
+            Text(stringResource(R.string.simkl_signed_in_as, it), style = MaterialTheme.typography.bodyMedium)
+        }
+        Text(stringResource(R.string.simkl_entry_count, state.simklEntryCount),
+            style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        state.simklLastCheckedMs?.let {
+            Text(stringResource(R.string.simkl_last_checked, addedDate(it) ?: ""),
+                style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(TroveSpace.small)) {
+            Button(onClick = viewModel::syncSimklNow, enabled = canEdit && !state.simklSyncing) {
+                if (state.simklSyncing) {
+                    CircularProgressIndicator(
+                        Modifier.padding(end = TroveSpace.small).size(TroveSpace.page),
+                        color = LocalContentColor.current,
+                    )
+                }
+                Text(stringResource(R.string.simkl_sync_now))
+            }
+            OutlinedButton(
+                onClick = viewModel::signOutSimkl,
+                enabled = canEdit && !state.simklSyncing,
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+            ) {
+                Text(stringResource(R.string.simkl_sign_out))
+            }
+        }
+        if (state.simklLastSyncError != null) {
+            Feedback(stringResource(R.string.simkl_sync_failed), error = true)
+        }
+    }
+    Text(stringResource(R.string.simkl_attribution), style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant)
 }
 
 @Composable

@@ -55,6 +55,14 @@ data class BatchDeleteItemResult(val download: DebridDownload, val result: Resul
  *  from both the metadata cache and the encrypted credential store. */
 data class MetadataOverride(val imdbId: String?, val type: String, val title: String, val tmdbId: Int? = null)
 
+/** Snapshot summary for Settings. */
+data class SimklSnapshotInfo(
+    val username: String?,
+    val entryCount: Int,
+    val lastCheckedMs: Long?,
+    val lastFailure: app.trove.debrid.core.SimklSyncFailure?,
+)
+
 /** One viewport page of one kind. `endReached` is true when the
  *  provider has no more rows for the kind after this page, and
  *  `fetchedCount` is the raw row count before release-word filtering,
@@ -138,6 +146,38 @@ interface TroveRepository {
      *  disabling the fallback. */
     suspend fun validateTmdbKey(key: String): Result<Unit> =
         Result.failure(UnsupportedOperationException("TMDB key unavailable"))
+
+    // ---- SIMKL (read-only status badges) ----
+
+    /** Whether the SIMKL V2 app is registered (client id minted). */
+    fun isSimklConfigured(): Boolean = false
+    /** Whether SIMKL OAuth tokens are stored. */
+    fun isSimklSignedIn(): Boolean = false
+    /** Snapshot summary for Settings, or null when never synced. */
+    suspend fun simklSnapshotInfo(): SimklSnapshotInfo? = null
+    /** Snapshot version; increments whenever the SIMKL snapshot
+     *  lands or clears. */
+    val simklSnapshotChanges: Flow<Int> get() = emptyFlow()
+    /** O(1) lookup of the signed-in user's SIMKL entry by
+     *  enrichment id. Null when not signed in or no match. */
+    fun simklEntryFor(imdbId: String?, tmdbId: Int?): app.trove.debrid.core.SimklEntry? = null
+    /** Loads the disk snapshot into memory (no network). */
+    suspend fun loadSimklSnapshot() = Unit
+    /** On-demand sync (activities-gated). Never called on a timer;
+     *  failures leave the last snapshot in place. */
+    suspend fun syncSimkl(): app.trove.debrid.core.SimklSyncResult =
+        app.trove.debrid.core.SimklSyncResult.NotSignedIn
+    /** Starts the device/PIN flow. */
+    suspend fun startSimklDeviceFlow(): Result<app.trove.debrid.core.SimklDeviceCode> =
+        Result.failure(UnsupportedOperationException("SIMKL unavailable"))
+    /** One poll of the device-code grant. */
+    suspend fun pollSimklDeviceCode(
+        deviceCode: app.trove.debrid.core.SimklDeviceCode,
+    ): app.trove.debrid.core.SimklPollResult =
+        app.trove.debrid.core.SimklPollResult.Failed("SIMKL unavailable")
+    /** Best-effort revoke + clear tokens + clear snapshot. */
+    suspend fun signOutSimkl() = Unit
+
     fun accounts(): List<DebridAccount>
     fun torboxAccount(): DebridAccount?
     fun hasTorboxKey(): Boolean

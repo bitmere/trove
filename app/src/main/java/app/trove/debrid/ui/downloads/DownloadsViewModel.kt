@@ -9,6 +9,7 @@ import app.trove.debrid.core.DownloadKind
 import app.trove.debrid.core.DownloadRef
 import app.trove.debrid.core.DownloadSort
 import app.trove.debrid.core.DownloadStatus
+import app.trove.debrid.core.SimklEntry
 import app.trove.debrid.core.LibrarySnapshot
 import app.trove.debrid.core.MediaCandidate
 import app.trove.debrid.core.MediaMetadata
@@ -82,6 +83,11 @@ data class DownloadsUiState(
     val candidates: Map<Pair<DownloadKind, String>, List<MediaCandidate>> = emptyMap(),
     /** Stored picks for downloads whose metadata came from an override. */
     val metadataOverrides: Map<Pair<DownloadKind, String>, MetadataOverride> = emptyMap(),
+    /** SIMKL watch status per download, keyed by (kind, id). Only
+     *  rows with an enrichment id can carry one. */
+    val simklStatuses: Map<Pair<DownloadKind, String>, SimklEntry> = emptyMap(),
+    /** Whether a SIMKL account is signed in (badges can appear). */
+    val simklSignedIn: Boolean = false,
     val loading: Boolean = true,
     /** A refresh of an already-loaded list: rows stay visible and
      *  only the pull indicator shows. Distinct from [loading], the
@@ -159,6 +165,7 @@ class DownloadsViewModel(
     private var fileLookupJob: Job? = null
     private var metadataCandidateJob: Job? = null
     private var playbackJob: Job? = null
+    private var simklSyncJob: Job? = null
     private var pageJobs = mutableMapOf<DownloadKind, Job>()
     private var fullSyncJob: Job? = null
     private var fullSyncTab: DownloadKind? = null
@@ -179,11 +186,21 @@ class DownloadsViewModel(
                     _state.update {
                         it.copy(metadata = emptyMap(), enrichment = emptyMap(), pendingPosters = emptyMap(),
                             metadataOverrides = emptyMap(), posterCooldowns = emptyMap(),
+                            simklStatuses = emptyMap(),
                             tmdbConfigured = repository.isTmdbConfigured())
                     }
                     val current = _state.value
                     enqueueHydration(current.pagedByTab[current.tab]?.loaded.orEmpty(), refreshVersion)
                 }
+            }
+        }
+        viewModelScope.launch {
+            repository.loadSimklSnapshot()
+            _state.update { it.copy(simklSignedIn = repository.isSimklSignedIn()) }
+            refreshSimklStatuses()
+            repository.simklSnapshotChanges.collect {
+                _state.update { it.copy(simklSignedIn = repository.isSimklSignedIn()) }
+                refreshSimklStatuses()
             }
         }
         viewModelScope.launch {
@@ -222,6 +239,7 @@ class DownloadsViewModel(
 
     fun refreshFromUser(fresh: Boolean = true) =
         refreshLibrary(showIndicator = true, fresh = fresh, restoreSnapshot = false, bypassMetadataMiss = true)
+            .also { requestSimklSync() }
 
     private fun refreshLibrary(
         showIndicator: Boolean,
@@ -265,7 +283,7 @@ class DownloadsViewModel(
                     _state.update {
                         it.copy(downloads = emptyList(), metadata = emptyMap(), candidates = emptyMap(),
                             enrichment = emptyMap(), pendingPosters = emptyMap(), posterCooldowns = emptyMap(),
-                            metadataOverrides = emptyMap(), accountLabel = null,
+                            metadataOverrides = emptyMap(), simklStatuses = emptyMap(), accountLabel = null,
                             visibleByTab = emptyMap(), pagedByTab = freshPagedStates(),
                             pendingAnchor = null,
                             filePicker = null, deleteConfirm = null, playUrl = null, playFileName = null,
@@ -280,7 +298,7 @@ class DownloadsViewModel(
                             loading = false, refreshing = false, signedOut = true,
                             downloads = emptyList(), metadata = emptyMap(), candidates = emptyMap(),
                             enrichment = emptyMap(), pendingPosters = emptyMap(), posterCooldowns = emptyMap(),
-                            metadataOverrides = emptyMap(), accountLabel = null, loadError = null,
+                            metadataOverrides = emptyMap(), simklStatuses = emptyMap(), accountLabel = null, loadError = null,
                             authenticationRequired = false,
                             filePicker = null, playUrl = null, playFileName = null,
                             pagedByTab = freshPagedStates(), pendingAnchor = null,
@@ -601,6 +619,7 @@ class DownloadsViewModel(
                 posterCooldowns = state.posterCooldowns.filterKeys(keep),
                 candidates = state.candidates.filterKeys(keep),
                 metadataOverrides = state.metadataOverrides.filterKeys(keep),
+                simklStatuses = state.simklStatuses.filterKeys(keep),
             )
         }
         cachedTabs.remove(tab)
@@ -837,6 +856,40 @@ class DownloadsViewModel(
             }
         }
         flushOffscreen()
+        refreshSimklStatuses()
+    }
+
+    /** Recomputes row badges from the current metadata and the
+     *  in-memory SIMKL index. Cheap (O(rows)); called whenever
+     *  metadata lands or the snapshot changes. */
+    private fun refreshSimklStatuses() {
+        val current = _state.value
+        if (!current.simklSignedIn) {
+            if (current.simklStatuses.isNotEmpty()) _state.update { it.copy(simklStatuses = emptyMap()) }
+            return
+        }
+        val statuses = current.metadata.entries.mapNotNull { (key, metadata) ->
+            val tmdbId = current.metadataOverrides[key]?.tmdbId
+            repository.simklEntryFor(metadata.imdbId, tmdbId)?.let { key to it }
+        }.toMap()
+        if (statuses != current.simklStatuses) _state.update { it.copy(simklStatuses = statuses) }
+    }
+
+    /** On-demand SIMKL sync (activities-gated, never on a timer).
+     *  Fire-and-forget: a failed sync leaves the last snapshot and
+     *  its badges in place; failures surface in Settings only. */
+    fun requestSimklSync() {
+        if (!repository.isSimklSignedIn()) return
+        if (simklSyncJob?.isActive == true) return
+        simklSyncJob = viewModelScope.launch {
+            try {
+                repository.syncSimkl()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                // Settings-only failure; the list keeps its badges.
+            }
+        }
     }
 
     private suspend fun lookupMetadata(block: suspend () -> MetadataLookup): MetadataLookup = try {
@@ -940,6 +993,7 @@ class DownloadsViewModel(
 
     fun openDownload(download: DebridDownload) {
         if (_state.value.resolvingDownload != null || _state.value.playUrl != null) return
+        requestSimklSync()
         if (download.files.isNotEmpty()) {
             _state.update { it.copy(filePicker = download) }
             loadCandidatesFor(download)
@@ -979,6 +1033,7 @@ class DownloadsViewModel(
                     DownloadRef(download.kind, download.id) !in overrideEdits && key !in _state.value.metadataOverrides
                 ) {
                     _state.update { it.withLookup(key, MetadataLookup.from(metadata), storedOverride) }
+                    refreshSimklStatuses()
                     return@launch
                 }
             }
@@ -1042,6 +1097,7 @@ class DownloadsViewModel(
                 ensureActive()
                 if (current()) {
                     _state.update { it.withLookup(key, result, pick) }
+                    refreshSimklStatuses()
                     published = result
                 }
                 if (pick == null && result.metadata == null && current()) loadCandidatesFor(download)

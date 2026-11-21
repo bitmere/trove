@@ -21,6 +21,7 @@ import app.trove.debrid.core.HttpTransport
 import app.trove.debrid.core.OffcloudProvider
 import app.trove.debrid.core.PremiumizeProvider
 import app.trove.debrid.core.RealDebridProvider
+import app.trove.debrid.core.SimklPollResult
 import app.trove.debrid.core.TorBoxProvider
 import app.trove.debrid.core.update.UpdateChannel
 import app.trove.debrid.data.BackupSettings
@@ -38,6 +39,7 @@ import java.io.ByteArrayOutputStream
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ensureActive
@@ -113,6 +115,21 @@ data class SettingsUiState(
     val restoreNeedsPassword: Boolean = false,
     val backupFeedback: Int? = null,
     val backupError: Boolean = false,
+    // ---- SIMKL (read-only status badges) ----
+    /** Whether the SIMKL V2 app is registered (client id minted). */
+    val simklConfigured: Boolean = false,
+    val simklSignedIn: Boolean = false,
+    val simklUsername: String? = null,
+    val simklSigningIn: Boolean = false,
+    /** The 8-char code the user types at simkl.com/pin. */
+    val simklUserCode: String? = null,
+    val simklVerificationUri: String? = null,
+    val simklSignInExpired: Boolean = false,
+    val simklSignInError: Boolean = false,
+    val simklSyncing: Boolean = false,
+    val simklEntryCount: Int = 0,
+    val simklLastCheckedMs: Long? = null,
+    val simklLastSyncError: String? = null,
 ) {
     val canStartBackup: Boolean
         get() = !backupBusy && !restoreNeedsPassword && !anyProviderSaving && !savingPlayer &&
@@ -168,6 +185,7 @@ class SettingsViewModel(
     private var refreshJob: Job? = null
 
     private var playersJob: Job? = null
+    private var simklSignInJob: Job? = null
     private var pendingExport: ByteArray? = null
     private var pendingRestore: SettingsBackup.Envelope? = null
 
@@ -462,6 +480,9 @@ class SettingsViewModel(
                 val tmdbKey = withContext(accountDispatcher) {
                     repository.hasTmdbKey() to repository.maskedTmdbKey()
                 }
+                val simklInfo = withContext(accountDispatcher) {
+                    repository.simklSnapshotInfo()
+                }
                 val torbox = accounts.firstOrNull { it.service == DebridService.TORBOX }
                 val realDebrid = accounts.firstOrNull { it.service == DebridService.REAL_DEBRID }
                 _state.update {
@@ -498,6 +519,12 @@ class SettingsViewModel(
                         activeService = active,
                         hasTmdbKey = tmdbKey.first,
                         maskedTmdbKey = tmdbKey.second,
+                        simklConfigured = repository.isSimklConfigured(),
+                        simklSignedIn = repository.isSimklSignedIn(),
+                        simklUsername = simklInfo?.username,
+                        simklEntryCount = simklInfo?.entryCount ?: 0,
+                        simklLastCheckedMs = simklInfo?.lastCheckedMs,
+                        simklLastSyncError = simklInfo?.lastFailure?.name,
                         message = it.message.takeUnless { message -> message == accountReadError },
                         messageIsError = it.messageIsError && it.message != accountReadError,
                     )
@@ -845,8 +872,105 @@ class SettingsViewModel(
         }
     }
 
-    fun setActiveProvider(service: DebridService) {
-        if (backupBlocksEdits()) return
+    // ---- SIMKL (read-only status badges) ----
+
+    /** Starts the SIMKL device/PIN flow: shows the 8-char code and
+     *  polls until the user authorises, the code expires, or the
+     *  user cancels. The code itself is never logged. */
+    fun startSimklSignIn() {
+        if (!repository.isSimklConfigured() || _state.value.simklSigningIn) return
+        simklSignInJob?.cancel()
+        _state.update {
+            it.copy(simklSigningIn = true, simklUserCode = null, simklVerificationUri = null,
+                simklSignInExpired = false, simklSignInError = false)
+        }
+        simklSignInJob = viewModelScope.launch {
+            val deviceResult = try {
+                repository.startSimklDeviceFlow()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                _state.update { it.copy(simklSigningIn = false, simklSignInError = true) }
+                return@launch
+            }
+            if (deviceResult.isFailure) {
+                _state.update { it.copy(simklSigningIn = false, simklSignInError = true) }
+                return@launch
+            }
+            val device = deviceResult.getOrThrow()
+            _state.update {
+                it.copy(simklUserCode = device.userCode, simklVerificationUri = device.verificationUriComplete)
+            }
+            val deadline = System.currentTimeMillis() + device.expiresInSecs * 1000L
+            var intervalMs = device.intervalSecs * 1000L
+            while (System.currentTimeMillis() < deadline) {
+                delay(intervalMs)
+                val result = try {
+                    repository.pollSimklDeviceCode(device)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    SimklPollResult.Failed("poll_failed")
+                }
+                when (result) {
+                    is SimklPollResult.Authorized -> {
+                        _state.update { it.copy(simklSigningIn = false, simklUserCode = null, simklVerificationUri = null) }
+                        refresh()
+                        return@launch
+                    }
+                    is SimklPollResult.SlowDown -> intervalMs += 5_000L
+                    is SimklPollResult.Expired -> {
+                        _state.update { it.copy(simklSigningIn = false, simklUserCode = null, simklVerificationUri = null, simklSignInExpired = true) }
+                        return@launch
+                    }
+                    is SimklPollResult.InvalidClient, is SimklPollResult.Failed -> {
+                        _state.update { it.copy(simklSigningIn = false, simklUserCode = null, simklVerificationUri = null, simklSignInError = true) }
+                        return@launch
+                    }
+                    is SimklPollResult.Pending -> Unit
+                }
+            }
+            _state.update { it.copy(simklSigningIn = false, simklUserCode = null, simklVerificationUri = null, simklSignInExpired = true) }
+        }
+    }
+
+    fun cancelSimklSignIn() {
+        simklSignInJob?.cancel()
+        _state.update { it.copy(simklSigningIn = false, simklUserCode = null, simklVerificationUri = null) }
+    }
+
+    fun signOutSimkl() {
+        if (_state.value.simklSyncing) return
+        viewModelScope.launch {
+            try {
+                withContext(accountDispatcher) { repository.signOutSimkl() }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                // Local state is cleared by the repository regardless.
+            }
+            refresh()
+        }
+    }
+
+    fun syncSimklNow() {
+        if (!repository.isSimklSignedIn() || _state.value.simklSyncing) return
+        _state.update { it.copy(simklSyncing = true, simklLastSyncError = null) }
+        viewModelScope.launch {
+            try {
+                repository.syncSimkl()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                // The failure is recorded on the snapshot; refresh surfaces it.
+            } finally {
+                _state.update { it.copy(simklSyncing = false) }
+                refresh()
+            }
+        }
+    }
+
+    fun setActiveProvider(service: DebridService) {        if (backupBlocksEdits()) return
         viewModelScope.launch {
             try {
                 val changed = withContext(accountDispatcher) {
