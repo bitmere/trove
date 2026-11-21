@@ -35,6 +35,7 @@ import app.trove.debrid.data.defaultExcludeWords
 import app.trove.debrid.data.defaultPreferWords
 import app.trove.debrid.data.normalizeReleaseWords
 import app.trove.debrid.ui.settings.providerSectionDescriptors
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 
@@ -355,12 +356,17 @@ open class FakeRepository(
 
     /** Per-download picks for picker tests, keyed by (kind, id). */
     var candidatesByQuery: (MediaQuery) -> List<MediaCandidate> = { emptyList() }
+    /** When set, the automatic candidate load suspends here until the
+     *  deferred completes — lets tests hold it in flight while a
+     *  manual search runs. */
+    var candidatesDeferred: CompletableDeferred<List<MediaCandidate>>? = null
     var metadataById: Map<Pair<String, String>, MediaMetadata> = emptyMap()
     var metadataByTmdbId: Map<Pair<Int, String>, MediaMetadata> = emptyMap()
     var tmdbConfigured: Boolean = false
     val savedMetadataOverrides = mutableMapOf<Pair<DownloadKind, String>, MetadataOverride>()
 
-    override suspend fun resolveMetadataCandidates(query: MediaQuery) = candidatesByQuery(query)
+    override suspend fun resolveMetadataCandidates(query: MediaQuery) =
+        candidatesDeferred?.await() ?: candidatesByQuery(query)
     override suspend fun resolveMetadataById(imdbId: String, type: String) = metadataById[imdbId to type]
     override suspend fun resolveMetadataByTmdbId(tmdbId: Int, type: String) = metadataByTmdbId[tmdbId to type]
     /** Manual TMDB search result for picker tests; inputs recorded. */

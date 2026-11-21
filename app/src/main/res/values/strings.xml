@@ -171,7 +171,8 @@
     <string name="match_picker_manual_title">Link it yourself</string>
     <string name="match_picker_manual_label">TMDB title, link or id</string>
     <string name="match_picker_manual_search">Search TMDB</string>
-    <string name="match_picker_manual_no_match">No TMDB match for that title, link or id.</string>
+    <string name="match_picker_manual_found">Found — pick a match from the list above.</string>
+    <string name="match_picker_manual_no_match">No TMDB match for that title, link or id. Try the full title or paste a themoviedb.org link.</string>
     <string name="match_picker_manual_invalid">Enter a TMDB title, a themoviedb.org link, or a numeric id.</string>
     <string name="clear_metadata_override">Clear match</string>
     <string name="episode_matched">Matched episode</string>

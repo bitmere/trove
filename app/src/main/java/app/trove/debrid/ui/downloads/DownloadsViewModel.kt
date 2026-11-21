@@ -72,8 +72,11 @@ data class ScrollAnchor(
 
 private enum class PageOutcome { LOADED, FAILED, STALE }
 
-/** Feedback for a hand-entered TMDB search in the picker. */
-enum class ManualTmdbSearchStatus { SEARCHING, NO_MATCH, INVALID }
+/** Feedback for a hand-entered TMDB search in the picker. `FOUND`
+ *  means the search returned candidates, which render above the
+ *  manual row — without it the spinner simply disappears and the
+ *  user sees nothing change. */
+enum class ManualTmdbSearchStatus { SEARCHING, NO_MATCH, INVALID, FOUND }
 
 private fun freshPagedStates(): Map<DownloadKind, PagedTabState> =
     DownloadKind.entries.associateWith { PagedTabState() }
@@ -1087,6 +1090,11 @@ class DownloadsViewModel(
     fun searchManualTmdbLink(download: DebridDownload, input: String) {
         val key = download.kind to download.id
         if (_state.value.filePicker?.let { it.kind to it.id } != key) return
+        // A manual search owns the picker: a late automatic load must
+        // not overwrite its results or clear its feedback. A
+        // stored-override resolution cancelled here re-runs on the
+        // next open.
+        metadataCandidateJob?.cancel()
         manualTmdbSearchJob?.cancel()
         _state.update {
             it.copy(manualTmdbSearch = it.manualTmdbSearch + (key to ManualTmdbSearchStatus.SEARCHING))
@@ -1101,12 +1109,17 @@ class DownloadsViewModel(
                 ManualTmdbSearch.NoMatch
             }
             ensureActive()
-            if (_state.value.filePicker?.let { it.kind to it.id } != key) return@launch
+            if (_state.value.filePicker?.let { it.kind to it.id } != key) {
+                // The picker closed while the search ran: leave no
+                // stale SEARCHING behind for the next opening.
+                _state.update { it.copy(manualTmdbSearch = it.manualTmdbSearch - key) }
+                return@launch
+            }
             when (result) {
                 is ManualTmdbSearch.Found -> _state.update {
                     it.copy(
                         candidates = it.candidates + (key to result.candidates),
-                        manualTmdbSearch = it.manualTmdbSearch - key,
+                        manualTmdbSearch = it.manualTmdbSearch + (key to ManualTmdbSearchStatus.FOUND),
                     )
                 }
                 ManualTmdbSearch.NoMatch -> _state.update {
@@ -1299,10 +1312,18 @@ class DownloadsViewModel(
 
     fun dismissFilePicker() {
         val current = _state.value
+        val key = current.filePicker?.let { it.kind to it.id }
         val loadingFiles = current.filePicker?.files?.isEmpty() == true &&
             current.resolvingDownload != null && current.resolvingFileId == null
         if (loadingFiles) fileLookupJob?.cancel()
+        // A search dismissed mid-flight must not leave a stale
+        // SEARCHING behind: on reopen the field and Search would
+        // stay disabled with nothing to clear them.
+        if (key != null) {
+            manualTmdbSearchJob?.cancel()
+        }
         _state.update { it.copy(filePicker = null,
+            manualTmdbSearch = if (key != null) it.manualTmdbSearch - key else it.manualTmdbSearch,
             resolvingDownload = if (loadingFiles) null else it.resolvingDownload) }
     }
 
