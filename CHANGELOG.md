@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.34 — 2026-11-21
+
+- SIMKL sync cooldown (PR 56): automatic SIMKL syncs (opening a download's sheet, pull-to-refresh) now run at most once every 30 minutes — inside the window they make zero network calls and badges keep coming from the saved copy on disk. The first sync still runs, a spent quota still reports properly, and "Sync now" in Settings always goes live.
+- Manual TMDB link (PR 56): the details-sheet match picker now has a manual link row — paste a TMDB link (`themoviedb.org/movie/<id>` or `/tv/<id>`), type a bare id, or type a title to search. A manual pick links exactly the same way an automatic TMDB pick does. The row shows whenever a TMDB key is configured, even when Cinemeta already returned candidates.
+- Note: SIMKL sign-in remains inactive in this release — the SIMKL app is not yet registered, so sign-in shows a not-registered note and syncs are skipped until the client ID is in place.
+- Baseline: 724 JVM tests, lint 0 errors.
+
 ## 0.1.33 — 2026-11-21
 
 - TMDB picker fallback (PR 52): when Cinemeta returns no matches, the details-sheet picker now falls back to a TMDB title search — TMDB rows are marked " · TMDB", and a TMDB pick resolves through TMDB detail with a verified IMDb id and Cinemeta backfill. With no TMDB key configured there are no TMDB requests, and the sheet shows a hint pointing at Settings.
