@@ -171,4 +171,60 @@ class DownloadsViewModelManualTmdbTest {
         advanceUntilIdle()
         assertNull(vm.state.value.manualTmdbSearch[key])
     }
+
+    @Test fun `delete cancels a suspended search before reopening the same download`() = runTest {
+        val repo = repoWith()
+        val deferred = CompletableDeferred<ManualTmdbSearch>()
+        repo.manualTmdbDeferred = deferred
+        val vm = viewModel(repo)
+        advanceUntilIdle()
+        openSheet(vm)
+        vm.searchManualTmdbLink(row, "123")
+        runCurrent()
+        assertEquals(1, repo.manualTmdbInputs.size)
+        assertEquals(ManualTmdbSearchStatus.SEARCHING, vm.state.value.manualTmdbSearch[key])
+        vm.requestDelete(row)
+        assertNull(vm.state.value.manualTmdbSearch[key])
+        vm.dismissDelete()
+        openSheet(vm)
+        assertNull(vm.state.value.manualTmdbSearch[key])
+        deferred.complete(ManualTmdbSearch.Found(listOf(manual)))
+        advanceUntilIdle()
+        assertNull(vm.state.value.manualTmdbSearch[key])
+        assertEquals(listOf(auto), vm.state.value.candidates[key])
+    }
+
+    @Test fun `override resolving state lasts until the slow resolution finishes`() = runTest {
+        val repo = repoWith()
+        val deferred = CompletableDeferred<app.trove.debrid.core.MediaMetadata?>()
+        repo.metadataByTmdbIdDeferred = deferred
+        val vm = viewModel(repo)
+        advanceUntilIdle()
+        openSheet(vm)
+        vm.pickCandidate(row, manual)
+        assertEquals(setOf(key), vm.state.value.resolvingOverrides)
+        runCurrent()
+        assertEquals(setOf(key), vm.state.value.resolvingOverrides)
+        deferred.complete(null)
+        advanceUntilIdle()
+        assertTrue(vm.state.value.resolvingOverrides.isEmpty())
+    }
+
+    @Test fun `clearing manual feedback preserves found candidates`() = runTest {
+        val repo = repoWith()
+        repo.manualTmdbResult = ManualTmdbSearch.Found(listOf(manual))
+        val vm = viewModel(repo)
+        advanceUntilIdle()
+        openSheet(vm)
+        vm.searchManualTmdbLink(row, "123")
+        advanceUntilIdle()
+        assertEquals(ManualTmdbSearchStatus.FOUND, vm.state.value.manualTmdbSearch[key])
+        vm.clearManualTmdbSearch(row)
+        assertNull(vm.state.value.manualTmdbSearch[key])
+        assertEquals(listOf(manual), vm.state.value.candidates[key])
+        vm.clearManualTmdbSearch(row)
+        assertNull(vm.state.value.manualTmdbSearch[key])
+        assertEquals(listOf(manual), vm.state.value.candidates[key])
+    }
+
 }

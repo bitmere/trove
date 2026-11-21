@@ -13,6 +13,7 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.LiveRegionMode
@@ -47,6 +48,7 @@ internal data class DownloadDetailsState(
     val simklEntry: SimklEntry? = null,
     /** Feedback for a hand-entered TMDB search, if one ran. */
     val manualTmdbSearch: ManualTmdbSearchStatus? = null,
+    val resolvingOverride: Boolean = false,
 )
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
@@ -68,6 +70,7 @@ internal fun DownloadDetailsSheet(
     onSimklClick: (String) -> Unit = {},
     /** Hand-entered TMDB search from the picker's manual link row. */
     onManualTmdbSearch: (String) -> Unit = {},
+    onManualTmdbInputChanged: () -> Unit = {},
 ) {
     val visibleFiles = remember(download.files, showClutterFiles) {
         if (showClutterFiles) download.files else download.files.filterNot { isClutterFile(it.name) }
@@ -86,7 +89,7 @@ internal fun DownloadDetailsSheet(
     }
     val currentSeason = matchedEpisode?.season ?: episodes.firstOrNull()?.season
     var showAllEpisodes by remember(download.kind, download.id) { mutableStateOf(false) }
-    var manualTmdbInput by remember(download.kind, download.id) { mutableStateOf("") }
+    var manualTmdbInput by rememberSaveable(download.kind, download.id) { mutableStateOf("") }
     val seasonEpisodes = remember(episodes, currentSeason) { episodes.filter { it.season == currentSeason } }
     val visibleEpisodes = if (showAllEpisodes) episodes else seasonEpisodes
     val busy = state.resolving || state.playPending || dismissing
@@ -202,7 +205,7 @@ internal fun DownloadDetailsSheet(
                 }
             } }
             if (state.hasOverride) item {
-                TextButton(onClick = onClearOverride) { Text(stringResource(R.string.clear_metadata_override)) }
+                TextButton(onClick = onClearOverride, enabled = !state.resolvingOverride) { Text(stringResource(R.string.clear_metadata_override)) }
             }
             if (metadata == null && candidates.isNotEmpty()) item {
                 Column(verticalArrangement = Arrangement.spacedBy(TroveSpace.compact)) {
@@ -222,7 +225,7 @@ internal fun DownloadDetailsSheet(
                                 append(stringResource(R.string.match_picker_tmdb))
                             }
                         }
-                        TextButton(onClick = { onPickCandidate(candidate) }, modifier = Modifier.fillMaxWidth()) {
+                        TextButton(onClick = { onPickCandidate(candidate) }, enabled = !state.resolvingOverride, modifier = Modifier.fillMaxWidth()) {
                             Text(label, modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Start)
                         }
                     }
@@ -241,7 +244,10 @@ internal fun DownloadDetailsSheet(
                     Text(stringResource(R.string.match_picker_manual_title), style = MaterialTheme.typography.titleMedium)
                     OutlinedTextField(
                         value = manualTmdbInput,
-                        onValueChange = { manualTmdbInput = it },
+                        onValueChange = {
+                            manualTmdbInput = it
+                            onManualTmdbInputChanged()
+                        },
                         label = { Text(stringResource(R.string.match_picker_manual_label)) },
                         singleLine = true,
                         enabled = !searching,

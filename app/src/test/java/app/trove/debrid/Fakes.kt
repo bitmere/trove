@@ -361,6 +361,7 @@ open class FakeRepository(
      *  manual search runs. */
     var candidatesDeferred: CompletableDeferred<List<MediaCandidate>>? = null
     var metadataById: Map<Pair<String, String>, MediaMetadata> = emptyMap()
+    var metadataByTmdbIdDeferred: CompletableDeferred<MediaMetadata?>? = null
     var metadataByTmdbId: Map<Pair<Int, String>, MediaMetadata> = emptyMap()
     var tmdbConfigured: Boolean = false
     val savedMetadataOverrides = mutableMapOf<Pair<DownloadKind, String>, MetadataOverride>()
@@ -368,13 +369,15 @@ open class FakeRepository(
     override suspend fun resolveMetadataCandidates(query: MediaQuery) =
         candidatesDeferred?.await() ?: candidatesByQuery(query)
     override suspend fun resolveMetadataById(imdbId: String, type: String) = metadataById[imdbId to type]
-    override suspend fun resolveMetadataByTmdbId(tmdbId: Int, type: String) = metadataByTmdbId[tmdbId to type]
+    override suspend fun resolveMetadataByTmdbId(tmdbId: Int, type: String) =
+        metadataByTmdbIdDeferred?.await() ?: metadataByTmdbId[tmdbId to type]
     /** Manual TMDB search result for picker tests; inputs recorded. */
+    var manualTmdbDeferred: CompletableDeferred<ManualTmdbSearch>? = null
     var manualTmdbResult: ManualTmdbSearch = ManualTmdbSearch.NoMatch
     val manualTmdbInputs = mutableListOf<Pair<String, String?>>()
     override suspend fun searchManualTmdbLink(input: String, fallbackType: String?): ManualTmdbSearch {
         manualTmdbInputs += input to fallbackType
-        return manualTmdbResult
+        return manualTmdbDeferred?.await() ?: manualTmdbResult
     }
     override fun isTmdbConfigured(): Boolean = tmdbConfigured
     override suspend fun loadMetadataOverride(ref: DownloadRef) = savedMetadataOverrides[ref.kind to ref.id]
