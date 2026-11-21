@@ -26,6 +26,7 @@ import app.trove.debrid.core.MetadataDiskCache
 import app.trove.debrid.core.OkHttpTransport
 import app.trove.debrid.core.ShareClassifier
 import app.trove.debrid.core.SimklClient
+import app.trove.debrid.core.SIMKL_CLIENT_ID
 import app.trove.debrid.core.SimklDeviceCode
 import app.trove.debrid.core.SimklDiskCache
 import app.trove.debrid.core.SimklEntry
@@ -131,6 +132,10 @@ class DebridRepository(
         /** SIMKL tokens live in the same encrypted store under
          *  their own id, and are never backed up or shipped. */
         const val SIMKL_ACCOUNT_ID = ProviderAccountRegistry.SIMKL_ACCOUNT_ID
+        /** The user's own SIMKL client id lives in the same
+         *  encrypted store under its own id. A saved value
+         *  overrides the compile-time placeholder. */
+        const val SIMKL_CLIENT_ID_ACCOUNT_ID = ProviderAccountRegistry.SIMKL_CLIENT_ID_ACCOUNT_ID
     }
 
     // ---- Preferences (delegated) ----
@@ -268,6 +273,7 @@ class DebridRepository(
 
     private val simklClient = SimklClient(
         transport,
+        clientId = { registry.simklClientId() ?: SIMKL_CLIENT_ID },
         appVersion = simklAppVersion,
         tokens = { registry.simklTokensJson()?.let { SimklTokens.decode(it) } },
         onTokens = { registry.saveSimklTokensJson(it.encode()) },
@@ -279,6 +285,56 @@ class DebridRepository(
     override fun isSimklConfigured(): Boolean = simklClient.isConfigured
 
     override fun isSimklSignedIn(): Boolean = registry.hasSimklTokens()
+
+    /** The user's own SIMKL client id, or null when none is saved. */
+    override fun simklClientId(): String? = registry.simklClientId()
+
+    /** Saves the user's own SIMKL client id (encrypted). A changed
+     *  ID wipes the tokens and the cached library — both were
+     *  minted under the old ID, so the user signs in again under
+     *  the new one. Re-saving the same ID is a no-op and keeps
+     *  them. */
+    override suspend fun saveSimklClientId(id: String) {
+        withContext(ioDispatcher) {
+            val trimmed = id.trim()
+            require(trimmed.isNotEmpty()) { "SIMKL client ID is empty" }
+            if (registry.simklClientId() == trimmed) return@withContext
+            // Best-effort revoke under the OLD id first: after the
+            // save, the client would send the new id with the old
+            // grant. Local state is cleared below regardless.
+            try {
+                simklClient.revoke()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                // Revoke is best-effort; continue with the wipe.
+            }
+            registry.saveSimklClientId(trimmed)
+            registry.deleteSimklTokens()
+            simklEngine.clear()
+            simklSnapshotVersion.update { it + 1 }
+        }
+    }
+
+    /** Removes the saved SIMKL client id; also wipes tokens and the
+     *  cached library, returning the app to the not-configured
+     *  state. Signing out keeps the ID — only this clears it. */
+    override suspend fun clearSimklClientId() {
+        withContext(ioDispatcher) {
+            if (registry.simklClientId() == null && !registry.hasSimklTokens()) return@withContext
+            try {
+                simklClient.revoke()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                // Revoke is best-effort; continue with the wipe.
+            }
+            registry.deleteSimklClientId()
+            registry.deleteSimklTokens()
+            simklEngine.clear()
+            simklSnapshotVersion.update { it + 1 }
+        }
+    }
 
     override suspend fun simklSnapshotInfo(): SimklSnapshotInfo? = withContext(ioDispatcher) {
         val snapshot = simklEngine.loadSnapshot() ?: return@withContext null

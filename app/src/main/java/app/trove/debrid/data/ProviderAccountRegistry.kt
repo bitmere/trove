@@ -61,6 +61,12 @@ class ProviderAccountRegistry(
          *  live in the same encrypted store as one JSON value under
          *  their own id, and are never backed up or shipped. */
         const val SIMKL_ACCOUNT_ID = "simkl-1"
+        /** The user's own SIMKL V2 app client id, entered in
+         *  Settings. Public (safe to show in plain text), but
+         *  stored encrypted like every other credential — stricter
+         *  than Matrix, which keeps it in plain preferences. A
+         *  saved value overrides the compile-time placeholder. */
+        const val SIMKL_CLIENT_ID_ACCOUNT_ID = "simkl-client-id-1"
         private const val KEY_ACTIVE_SERVICE = "active_service"
         private const val KEY_ACCOUNTS = "accounts"
     }
@@ -110,6 +116,24 @@ class ProviderAccountRegistry(
     }
 
     fun hasSimklTokens(): Boolean = credentialStore.has(SIMKL_ACCOUNT_ID)
+
+    /** The user's own SIMKL client id, or null when none is saved.
+     *  Read on every use, so saving or clearing it in Settings
+     *  takes effect without rebuilding anything. */
+    fun simklClientId(): String? =
+        credentialStore.get(SIMKL_CLIENT_ID_ACCOUNT_ID)?.takeIf { it.isNotBlank() }
+
+    fun hasSimklClientId(): Boolean = credentialStore.has(SIMKL_CLIENT_ID_ACCOUNT_ID)
+
+    fun saveSimklClientId(id: String) {
+        val trimmed = id.trim()
+        require(trimmed.isNotEmpty()) { "SIMKL client ID is empty" }
+        credentialStore.save(SIMKL_CLIENT_ID_ACCOUNT_ID, trimmed)
+    }
+
+    fun deleteSimklClientId() {
+        credentialStore.delete(SIMKL_CLIENT_ID_ACCOUNT_ID)
+    }
 
     /** Validates against /3/configuration with the given key, before
      *  it is stored. A failure means the key is wrong or TMDB is

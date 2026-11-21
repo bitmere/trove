@@ -336,7 +336,14 @@
     <string name="simkl_sheet_line_status">SIMKL · %1$s</string>
     <string name="simkl_progress_next">S%1$d E%2$d · %3$d/%4$d episodes</string>
     <string name="simkl_progress_counts">%1$d/%2$d episodes</string>
-    <string name="simkl_not_registered">SIMKL sign-in is not available yet: the app still needs to be registered with SIMKL. Watch status badges will appear once registration is done.</string>
+    <string name="simkl_not_registered">SIMKL sign-in is not available yet. Save your app’s public client ID above to enable it.</string>
+    <string name="simkl_client_id">Public Client ID</string>
+    <string name="simkl_replace_client_id">Replace client ID</string>
+    <string name="simkl_saved_client_id">Saved client ID: %1$s</string>
+    <string name="simkl_client_id_hint">Register an AUTH V2 app at simkl.com/settings/developer and paste its public Client ID. The ID is public — it only identifies the app, not your account.</string>
+    <string name="simkl_save_client_id">Save client ID</string>
+    <string name="simkl_client_id_saved">SIMKL client ID saved.</string>
+    <string name="simkl_client_id_failed">Couldn’t save that client ID. Check it and try again.</string>
     <string name="simkl_sign_in_help">Sign in with your SIMKL account to show watch status badges on your downloads. Trove only reads your library — it never changes it.</string>
     <string name="simkl_sign_in">Sign in with SIMKL</string>
     <string name="simkl_open_pin">Open simkl.com/pin</string>

@@ -31,7 +31,7 @@ class SimklClientTest {
         SimklTokens("simkl_at_1", "simkl_rt_1", nowMs + expiresInMs, nowMs + 180 * 24 * 60 * 60 * 1000L)
 
     private fun client(transport: HttpTransport, stored: () -> SimklTokens?, onTokens: (SimklTokens) -> Unit) =
-        SimklClient(transport, clientId = "test-client", appVersion = "test", now = { nowMs },
+        SimklClient(transport, clientId = { "test-client" }, appVersion = "test", now = { nowMs },
             tokens = stored, onTokens = onTokens)
 
     private val deviceJson = """
@@ -75,6 +75,24 @@ class SimklClientTest {
             appVersion = "test", tokens = { null }, onTokens = {})
         assertFalse(client.isConfigured)
         assertNull(client.currentTokens())
+    }
+
+    @Test fun `a saved client id configures the client and is read on every call`() = runBlocking {
+        var savedId: String? = null
+        val requests = mutableListOf<HttpRequest>()
+        val transport = FakeSimkl { request ->
+            requests += request
+            HttpResponse(200, deviceJson)
+        }
+        val client = SimklClient(transport, clientId = { savedId ?: SIMKL_CLIENT_ID },
+            appVersion = "test", tokens = { null }, onTokens = {})
+
+        assertFalse(client.isConfigured)
+        savedId = "user-app-id"
+        assertTrue(client.isConfigured)
+
+        client.startDeviceFlow()
+        assertTrue(requests.single().url.contains("client_id=user-app-id"))
     }
 
     @Test fun `device flow returns the code and polls through every state`() = runBlocking {

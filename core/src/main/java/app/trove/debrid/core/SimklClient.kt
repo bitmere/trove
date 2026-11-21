@@ -19,6 +19,10 @@ import java.time.ZoneId
  * `client_secret` — never ship one in the app. Until this is replaced,
  * [SimklClient.isConfigured] is false, sign-in is unavailable, and
  * syncs are skipped without any network call. Do not invent a value.
+ *
+ * A client ID saved in Settings overrides this constant (see
+ * [SimklClient]'s `clientId` resolver), so a user with their own
+ * SIMKL app can sign in without a baked-in ID.
  */
 const val SIMKL_CLIENT_ID = "SIMKL_CLIENT_ID_NOT_REGISTERED"
 
@@ -189,7 +193,10 @@ class SimklApiException(val status: Int, val code: String? = null) :
  * Every request carries `client_id`, `app-name`, `app-version` and a
  * `User-Agent`; user calls carry `Authorization: Bearer`. Tokens are
  * supplied by [tokens] and persisted through [onTokens] — the client
- * never stores them itself. Refresh is single-flight, proactive a
+ * never stores them itself. The client id is resolved on every call
+ * through [clientId] (a saved Settings value overrides the
+ * compile-time placeholder), so saving a new ID takes effect
+ * without rebuilding the client. Refresh is single-flight, proactive a
  * day before expiry, and retried once after a 401; a second 401
  * throws [SimklAuthException]. A 429 throws [SimklRateLimited].
  *
@@ -198,7 +205,7 @@ class SimklApiException(val status: Int, val code: String? = null) :
  */
 class SimklClient(
     private val transport: HttpTransport,
-    private val clientId: String = SIMKL_CLIENT_ID,
+    private val clientId: () -> String = { SIMKL_CLIENT_ID },
     private val appName: String = "Trove",
     private val appVersion: String,
     private val now: () -> Long = System::currentTimeMillis,
@@ -215,7 +222,7 @@ class SimklClient(
     }
 
     /** False while [SIMKL_CLIENT_ID] is still the placeholder. */
-    val isConfigured: Boolean get() = clientId != SIMKL_CLIENT_ID
+    val isConfigured: Boolean get() = clientId() != SIMKL_CLIENT_ID
 
     /** Last `X-RateLimit-Remaining` seen on a counted response, or
      *  null when no counted response has been seen yet. A value of 0
@@ -238,7 +245,7 @@ class SimklClient(
         check(isConfigured) { "SIMKL client is not registered" }
         val json = postFormJson(
             "/oauth2/device",
-            mapOf("client_id" to clientId, "scope" to "media:read"),
+            mapOf("client_id" to clientId(), "scope" to "media:read"),
         )
         return SimklDeviceCode(
             deviceCode = json.optString("device_code") ?: throw SimklApiException(200, "bad_device_response"),
@@ -258,7 +265,7 @@ class SimklClient(
             "/oauth2/token",
             mapOf(
                 "grant_type" to "urn:ietf:params:oauth:grant-type:device_code",
-                "client_id" to clientId,
+                "client_id" to clientId(),
                 "device_code" to deviceCode.deviceCode,
             ),
         )
@@ -294,7 +301,7 @@ class SimklClient(
     suspend fun revoke() {
         val held = tokens() ?: return
         runCatching {
-            postFormRaw("/oauth2/revoke", mapOf("client_id" to clientId, "token" to held.accessToken))
+            postFormRaw("/oauth2/revoke", mapOf("client_id" to clientId(), "token" to held.accessToken))
         }
     }
 
@@ -353,7 +360,7 @@ class SimklClient(
 
     private fun url(path: String, params: Map<String, String> = emptyMap()): String {
         val all = linkedMapOf(
-            "client_id" to clientId,
+            "client_id" to clientId(),
             "app-name" to appName,
             "app-version" to appVersion,
         ) + params
@@ -455,7 +462,7 @@ class SimklClient(
                 "/oauth2/token",
                 mapOf(
                     "grant_type" to "refresh_token",
-                    "client_id" to clientId,
+                    "client_id" to clientId(),
                     "refresh_token" to refresh,
                 ),
             )

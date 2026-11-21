@@ -82,7 +82,7 @@ class SimklSyncEngineTest {
         now: Long = nowMs + 31 * 60 * 1000L,
     ): SimklSyncEngine {
         var held = stored
-        val client = SimklClient(transport, clientId = clientId, appVersion = "test",
+        val client = SimklClient(transport, clientId = { clientId }, appVersion = "test",
             now = { nowMs }, tokens = { held }, onTokens = { held = it })
         return SimklSyncEngine(client, cache, now = { now })
     }
