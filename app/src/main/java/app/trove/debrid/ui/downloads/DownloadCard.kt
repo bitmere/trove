@@ -33,6 +33,8 @@ internal fun DownloadRow(
     onLongPress: () -> Unit,
     posterUrl: String? = metadata?.posterUrl,
     onPosterFailure: suspend (String) -> Unit = {},
+    simklEntry: SimklEntry? = null,
+    onSimklClick: ((String) -> Unit)? = null,
 ) {
     Surface(color = MaterialTheme.colorScheme.surface) {
         Column {
@@ -49,7 +51,8 @@ internal fun DownloadRow(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(TroveSpace.small),
                 ) {
-                    DownloadCover(download, Modifier.weight(1f), metadata, posterUrl, onPosterFailure)
+                    DownloadCover(download, Modifier.weight(1f), metadata, posterUrl, onPosterFailure,
+                        simklEntry, onSimklClick)
                     if (download.status == DownloadStatus.READY) {
                         val play = stringResource(R.string.play)
                         val preparing = stringResource(R.string.preparing_player)
@@ -90,6 +93,8 @@ internal fun DownloadCover(
     metadata: MediaMetadata? = null,
     posterUrl: String? = metadata?.posterUrl,
     onPosterFailure: suspend (String) -> Unit = {},
+    simklEntry: SimklEntry? = null,
+    onSimklClick: ((String) -> Unit)? = null,
 ) {
     val colors = MaterialTheme.colorScheme
     val identity = remember(download.name, metadata) { metadata ?: downloadIdentity(download, null) }
@@ -118,8 +123,34 @@ internal fun DownloadCover(
             Text("${statusWord(download.status)} · ${formatSize(download.sizeBytes)}",
                 style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant,
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (simklEntry != null && onSimklClick != null) {
+                SimklRowBadge(simklEntry, onSimklClick)
+            }
         }
     }
+}
+
+/** Compact SIMKL status chip on a list row. Rows only show
+ *  watching / watchlist / completed; hold and dropped are
+ *  sheet-only. Tapping opens the item on simkl.com — the
+ *  attribution link for the data shown. */
+@Composable
+private fun SimklRowBadge(entry: SimklEntry, onClick: (String) -> Unit) {
+    val statusRes = when (entry.status) {
+        SimklStatus.WATCHING -> R.string.simkl_status_watching
+        SimklStatus.PLAN_TO_WATCH -> R.string.simkl_status_plantowatch
+        SimklStatus.COMPLETED -> R.string.simkl_status_completed
+        else -> return
+    }
+    val status = stringResource(statusRes)
+    SuggestionChip(
+        onClick = { onClick(entry.simklUrl) },
+        label = {
+            Text(stringResource(R.string.simkl_row_badge, status),
+                style = MaterialTheme.typography.labelSmall, maxLines = 1)
+        },
+        modifier = Modifier.semantics { contentDescription = "SIMKL $status" },
+    )
 }
 
 @OptIn(ExperimentalLayoutApi::class)

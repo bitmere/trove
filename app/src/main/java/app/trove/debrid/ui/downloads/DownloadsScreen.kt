@@ -450,6 +450,8 @@ fun DownloadsScreen(
                                             onPlay = { if (viewModel.isCurrentDownload(download)) viewModel.play(download) },
                                             onOpen = { if (viewModel.isCurrentDownload(download)) viewModel.openDownload(download) },
                                             onLongPress = { if (viewModel.isCurrentDownload(download)) viewModel.requestDelete(download) },
+                                            simklEntry = state.simklStatuses[download.kind to download.id],
+                                            onSimklClick = { openWebUrl(application, it) },
                                         )
                                     }
                                     // A failed page never clears loaded
@@ -509,12 +511,13 @@ fun DownloadsScreen(
         val error = state.error
         val provenance = state.enrichment[key] ?: metadata?.provenance
         val posterUrl = state.posterUrl(key)
-        val details = remember(metadata, candidates, hasOverride, resolving, playPending, resolvingFileId, error, provenance, posterUrl, state.tmdbConfigured) {
-            DownloadDetailsState(metadata, candidates, hasOverride, resolving, playPending, resolvingFileId, error, provenance, posterUrl, state.tmdbConfigured)
+        val details = remember(metadata, candidates, hasOverride, resolving, playPending, resolvingFileId, error, provenance, posterUrl, state.tmdbConfigured, state.simklStatuses[key]) {
+            DownloadDetailsState(metadata, candidates, hasOverride, resolving, playPending, resolvingFileId, error, provenance, posterUrl, state.tmdbConfigured, state.simklStatuses[key])
         }
         DownloadDetailsSheet(
             download = download, state = details, sheetState = detailsSheetState,
             dismissing = dismissingForPlayback, showClutterFiles = state.showClutterFiles,
+            onSimklClick = { openWebUrl(application, it) },
             onClose = {
                 if (resolving && download.files.isEmpty()) {
                     viewModel.dismissFilePicker()
@@ -660,9 +663,21 @@ private fun SignedOutState(onOpenSettings: () -> Unit) {
     }
 }
 
+/** Opens a URL in the user's browser. Used for SIMKL attribution
+ *  links (row badges, sheet line, Settings). Best-effort: a
+ *  missing browser never surfaces an error. */
+internal fun openWebUrl(context: android.content.Context, url: String) {
+    runCatching {
+        val intent = android.content.Intent(
+            android.content.Intent.ACTION_VIEW,
+            android.net.Uri.parse(url),
+        ).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+        context.startActivity(intent)
+    }
+}
+
 @Composable
-internal fun statusWord(status: DownloadStatus): String = when (status) {
-    DownloadStatus.QUEUED -> stringResource(R.string.queued)
+internal fun statusWord(status: DownloadStatus): String = when (status) {    DownloadStatus.QUEUED -> stringResource(R.string.queued)
     DownloadStatus.DOWNLOADING -> stringResource(R.string.downloading)
     DownloadStatus.READY -> stringResource(R.string.ready)
     DownloadStatus.PAUSED -> stringResource(R.string.paused)

@@ -1,5 +1,6 @@
 package app.trove.debrid.data
 
+import app.trove.debrid.BuildConfig
 import app.trove.debrid.core.PlayerComponent
 import android.content.Context
 import android.content.SharedPreferences
@@ -23,6 +24,15 @@ import app.trove.debrid.core.MediaMetadata
 import app.trove.debrid.core.MetadataDiskCache
 import app.trove.debrid.core.OkHttpTransport
 import app.trove.debrid.core.ShareClassifier
+import app.trove.debrid.core.SimklClient
+import app.trove.debrid.core.SimklDeviceCode
+import app.trove.debrid.core.SimklDiskCache
+import app.trove.debrid.core.SimklEntry
+import app.trove.debrid.core.SimklPollResult
+import app.trove.debrid.core.SimklSyncEngine
+import app.trove.debrid.core.SimklSyncFailure
+import app.trove.debrid.core.SimklSyncResult
+import app.trove.debrid.core.SimklTokens
 import app.trove.debrid.core.StreamUrl
 import app.trove.debrid.core.TorBoxProvider
 import app.trove.debrid.core.filterExcluded
@@ -63,6 +73,8 @@ class DebridRepository(
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val metadataDiskCache: MetadataDiskCache? = null,
     private val libraryDiskCache: LibraryDiskCache? = null,
+    private val simklDiskCache: SimklDiskCache? = null,
+    private val simklAppVersion: String = "dev",
 ) : TroveRepository {
 
     /** Primary entry point for tests and manual wiring: both parts
@@ -74,6 +86,8 @@ class DebridRepository(
         ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
         metadataDiskCache: MetadataDiskCache? = null,
         libraryDiskCache: LibraryDiskCache? = null,
+        simklDiskCache: SimklDiskCache? = null,
+        simklAppVersion: String = "dev",
     ) : this(
         ProviderAccountRegistry(prefs, credentialStore, transport),
         PreferencesStore(prefs, ioDispatcher),
@@ -81,6 +95,8 @@ class DebridRepository(
         ioDispatcher,
         metadataDiskCache,
         libraryDiskCache,
+        simklDiskCache,
+        simklAppVersion,
     )
 
     /** Production entry point: accounts live in "trove_accounts". */
@@ -96,6 +112,8 @@ class DebridRepository(
         ioDispatcher,
         MetadataDiskCache(File(context.filesDir, "metadata")),
         LibraryDiskCache(File(context.filesDir, "library-cache")),
+        SimklDiskCache(File(context.filesDir, "simkl")),
+        BuildConfig.VERSION_NAME,
     )
 
     companion object {
@@ -109,6 +127,9 @@ class DebridRepository(
          *  Token lives in the same encrypted store under its own id,
          *  and is never backed up or shipped. */
         const val TMDB_ACCOUNT_ID = ProviderAccountRegistry.TMDB_ACCOUNT_ID
+        /** SIMKL tokens live in the same encrypted store under
+         *  their own id, and are never backed up or shipped. */
+        const val SIMKL_ACCOUNT_ID = ProviderAccountRegistry.SIMKL_ACCOUNT_ID
     }
 
     // ---- Preferences (delegated) ----
@@ -235,6 +256,96 @@ class DebridRepository(
 
     override suspend fun validateTmdbKey(key: String): Result<Unit> = withContext(ioDispatcher) {
         registry.validateTmdbKey(key)
+    }
+
+    // ---- SIMKL (read-only status badges; on-demand sync only) ----
+
+    private val simklClient = SimklClient(
+        transport,
+        appVersion = simklAppVersion,
+        tokens = { registry.simklTokensJson()?.let { SimklTokens.decode(it) } },
+        onTokens = { registry.saveSimklTokensJson(it.encode()) },
+    )
+    private val simklEngine = SimklSyncEngine(simklClient, simklDiskCache)
+    private val simklSnapshotVersion = MutableStateFlow(0)
+    override val simklSnapshotChanges = simklSnapshotVersion.asStateFlow()
+
+    override fun isSimklConfigured(): Boolean = simklClient.isConfigured
+
+    override fun isSimklSignedIn(): Boolean = registry.hasSimklTokens()
+
+    override suspend fun simklSnapshotInfo(): SimklSnapshotInfo? = withContext(ioDispatcher) {
+        val snapshot = simklEngine.loadSnapshot() ?: return@withContext null
+        SimklSnapshotInfo(
+            username = snapshot.username,
+            entryCount = snapshot.entries.size,
+            lastCheckedMs = snapshot.lastCheckedMs,
+            lastFailure = snapshot.lastError?.let { runCatching { SimklSyncFailure.valueOf(it) }.getOrNull() },
+        )
+    }
+
+    override fun simklEntryFor(imdbId: String?, tmdbId: Int?): SimklEntry? =
+        simklEngine.entryFor(imdbId, tmdbId)
+
+    override suspend fun loadSimklSnapshot() {
+        withContext(ioDispatcher) { simklEngine.loadSnapshot() }
+    }
+
+    override suspend fun syncSimkl(): SimklSyncResult = withContext(ioDispatcher) {
+        val result = simklEngine.sync()
+        when (result) {
+            is SimklSyncResult.Changed, SimklSyncResult.Unchanged ->
+                simklSnapshotVersion.update { it + 1 }
+            is SimklSyncResult.Failed -> {
+                if (result.failure == SimklSyncFailure.AUTH) {
+                    // The grant is gone: sign out and clear the
+                    // snapshot rather than serving stale badges.
+                    registry.deleteSimklTokens()
+                    simklEngine.clear()
+                    simklSnapshotVersion.update { it + 1 }
+                } else {
+                    simklSnapshotVersion.update { it + 1 }
+                }
+            }
+            SimklSyncResult.NotSignedIn, SimklSyncResult.NotConfigured -> Unit
+        }
+        result
+    }
+
+    override suspend fun startSimklDeviceFlow(): Result<SimklDeviceCode> = withContext(ioDispatcher) {
+        try {
+            Result.success(simklClient.startDeviceFlow())
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    override suspend fun pollSimklDeviceCode(deviceCode: SimklDeviceCode): SimklPollResult =
+        withContext(ioDispatcher) {
+            try {
+                simklClient.pollDeviceCode(deviceCode)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                SimklPollResult.Failed("poll_failed")
+            }
+        }
+
+    override suspend fun signOutSimkl() {
+        withContext(ioDispatcher) {
+            try {
+                simklClient.revoke()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                // Revoke is best-effort; local state is cleared below regardless.
+            }
+            registry.deleteSimklTokens()
+            simklEngine.clear()
+            simklSnapshotVersion.update { it + 1 }
+        }
     }
 
     // ---- Accounts + provider registry (delegated) ----

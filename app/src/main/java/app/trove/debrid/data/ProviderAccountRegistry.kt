@@ -57,6 +57,10 @@ class ProviderAccountRegistry(
          *  Token lives in the same encrypted store under its own id,
          *  and is never backed up or shipped. */
         const val TMDB_ACCOUNT_ID = "tmdb-1"
+        /** SIMKL is not a debrid service either: its OAuth tokens
+         *  live in the same encrypted store as one JSON value under
+         *  their own id, and are never backed up or shipped. */
+        const val SIMKL_ACCOUNT_ID = "simkl-1"
         private const val KEY_ACTIVE_SERVICE = "active_service"
         private const val KEY_ACCOUNTS = "accounts"
     }
@@ -91,6 +95,21 @@ class ProviderAccountRegistry(
     fun deleteTmdbKey() {
         credentialStore.delete(TMDB_ACCOUNT_ID)
     }
+
+    /** The stored SIMKL token JSON (access + refresh + expiries),
+     *  or null when signed out. The JSON itself holds secrets; it
+     *  is only ever read here and by the SIMKL client. */
+    fun simklTokensJson(): String? = credentialStore.get(SIMKL_ACCOUNT_ID)
+
+    fun saveSimklTokensJson(json: String) {
+        credentialStore.save(SIMKL_ACCOUNT_ID, json)
+    }
+
+    fun deleteSimklTokens() {
+        credentialStore.delete(SIMKL_ACCOUNT_ID)
+    }
+
+    fun hasSimklTokens(): Boolean = credentialStore.has(SIMKL_ACCOUNT_ID)
 
     /** Validates against /3/configuration with the given key, before
      *  it is stored. A failure means the key is wrong or TMDB is

@@ -30,6 +30,7 @@ import app.trove.debrid.core.TorBoxProvider
 import app.trove.debrid.data.BackupSignIn
 import app.trove.debrid.data.DebridRepository
 import app.trove.debrid.data.MetadataOverride
+import app.trove.debrid.data.ProviderAccountRegistry
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -148,6 +149,25 @@ class DebridRepositoryTest {
         repo.clearTmdbKey()
         assertFalse(repo.hasTmdbKey())
         assertNull(store.get(DebridRepository.TMDB_ACCOUNT_ID))
+    }
+
+    @Test
+    fun `simkl tokens round-trip encrypted under their own id`() {
+        val prefs = FakeSharedPreferences()
+        val store = InMemoryCredentialStore()
+        val registry = ProviderAccountRegistry(prefs, store, FakeHttpTransport { error("Unexpected request") })
+        assertFalse(registry.hasSimklTokens())
+        assertNull(registry.simklTokensJson())
+        val tokens = app.trove.debrid.core.SimklTokens(
+            "simkl_at_1", "simkl_rt_1", 1_700_000_000_000L, 1_800_000_000_000L)
+        registry.saveSimklTokensJson(tokens.encode())
+        assertTrue(registry.hasSimklTokens())
+        assertEquals(tokens, app.trove.debrid.core.SimklTokens.decode(registry.simklTokensJson()!!))
+        // The SIMKL tokens live under their own id, never under a provider id.
+        assertNull(store.get(DebridRepository.TORBOX_ACCOUNT_ID))
+        registry.deleteSimklTokens()
+        assertFalse(registry.hasSimklTokens())
+        assertNull(registry.simklTokensJson())
     }
 
     @Test

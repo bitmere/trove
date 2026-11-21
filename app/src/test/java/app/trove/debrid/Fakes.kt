@@ -21,14 +21,21 @@ import app.trove.debrid.core.MediaQuery
 import app.trove.debrid.core.ProviderCapabilities
 import app.trove.debrid.core.ShareClassifier
 import app.trove.debrid.core.ShareInput
+import app.trove.debrid.core.SimklDeviceCode
+import app.trove.debrid.core.SimklEntry
+import app.trove.debrid.core.SimklPollResult
+import app.trove.debrid.core.SimklSyncResult
 import app.trove.debrid.core.StreamUrl
 import app.trove.debrid.data.MetadataOverride
 import app.trove.debrid.data.SavedConnection
+import app.trove.debrid.data.SimklSnapshotInfo
 import app.trove.debrid.data.TroveRepository
 import app.trove.debrid.data.defaultExcludeWords
 import app.trove.debrid.data.defaultPreferWords
 import app.trove.debrid.data.normalizeReleaseWords
 import app.trove.debrid.ui.settings.providerSectionDescriptors
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
 
 fun sampleDownload(
     id: String = "11",
@@ -377,6 +384,51 @@ open class FakeRepository(
     override suspend fun validateTmdbKey(key: String): Result<Unit> =
         if (key.trim().isNotEmpty() && tmdbKeyValid) Result.success(Unit)
         else Result.failure(IllegalStateException("TMDB key was not accepted"))
+
+    // ---- SIMKL (read-only status badges) ----
+    var simklConfigured: Boolean = false
+    var simklSignedIn: Boolean = false
+    var simklUsername: String? = null
+    var simklEntries: List<SimklEntry> = emptyList()
+    var simklDeviceCode: SimklDeviceCode? = null
+    var simklPollResult: SimklPollResult = SimklPollResult.Pending
+    var simklSyncResult: SimklSyncResult = SimklSyncResult.Unchanged
+    var simklSyncCalls: Int = 0
+    var simklSignOutCalls: Int = 0
+    private val simklChangesFlow = MutableStateFlow(0)
+
+    override fun isSimklConfigured(): Boolean = simklConfigured
+    override fun isSimklSignedIn(): Boolean = simklSignedIn
+    override suspend fun simklSnapshotInfo(): SimklSnapshotInfo? =
+        if (simklEntries.isEmpty() && simklUsername == null) null
+        else SimklSnapshotInfo(simklUsername, simklEntries.size, 1_700_000_000_000L, null)
+    override val simklSnapshotChanges: Flow<Int> get() = simklChangesFlow
+    override fun simklEntryFor(imdbId: String?, tmdbId: Int?): SimklEntry? =
+        simklEntries.firstOrNull {
+            (imdbId != null && it.imdbId == imdbId) || (tmdbId != null && it.tmdbId == tmdbId)
+        }
+    override suspend fun loadSimklSnapshot() = Unit
+    override suspend fun syncSimkl(): SimklSyncResult {
+        simklSyncCalls++
+        if (simklSyncResult is SimklSyncResult.Changed || simklSyncResult == SimklSyncResult.Unchanged) {
+            simklChangesFlow.value++
+        }
+        return simklSyncResult
+    }
+    override suspend fun startSimklDeviceFlow(): Result<SimklDeviceCode> =
+        simklDeviceCode?.let { Result.success(it) }
+            ?: Result.failure(IllegalStateException("SIMKL unavailable"))
+    override suspend fun pollSimklDeviceCode(deviceCode: SimklDeviceCode): SimklPollResult {
+        if (simklPollResult is SimklPollResult.Authorized) simklSignedIn = true
+        return simklPollResult
+    }
+    override suspend fun signOutSimkl() {
+        simklSignOutCalls++
+        simklSignedIn = false
+        simklEntries = emptyList()
+        simklUsername = null
+        simklChangesFlow.value++
+    }
 }
 
 internal suspend fun TroveRepository.saveTestCredential(service: DebridService, credential: String): Result<DebridAccount> {

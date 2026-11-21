@@ -42,6 +42,8 @@ internal data class DownloadDetailsState(
     val posterUrl: String? = metadata?.posterUrl,
     /** Whether a TMDB key is configured, for the picker's no-key hint. */
     val tmdbConfigured: Boolean = false,
+    /** The signed-in user's SIMKL entry for this title, if any. */
+    val simklEntry: SimklEntry? = null,
 )
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
@@ -59,6 +61,8 @@ internal fun DownloadDetailsSheet(
     onPickCandidate: (MediaCandidate) -> Unit = {},
     onClearOverride: () -> Unit = {},
     onPosterFailure: suspend (String) -> Unit = {},
+    /** Opens a SIMKL item page (the attribution link). */
+    onSimklClick: (String) -> Unit = {},
 ) {
     val visibleFiles = remember(download.files, showClutterFiles) {
         if (showClutterFiles) download.files else download.files.filterNot { isClutterFile(it.name) }
@@ -161,6 +165,36 @@ internal fun DownloadDetailsSheet(
             } else {
                 state.provenance?.let { source -> item { MetadataLine(stringResource(source.label())) } }
             }
+            state.simklEntry?.let { entry -> item {
+                val status = stringResource(when (entry.status) {
+                    SimklStatus.WATCHING -> R.string.simkl_status_watching
+                    SimklStatus.PLAN_TO_WATCH -> R.string.simkl_status_plantowatch
+                    SimklStatus.COMPLETED -> R.string.simkl_status_completed
+                    SimklStatus.HOLD -> R.string.simkl_status_hold
+                    SimklStatus.DROPPED -> R.string.simkl_status_dropped
+                })
+                val nextSeason = entry.nextSeason
+                val nextEpisode = entry.nextEpisode
+                val watched = entry.watchedEpisodes
+                val total = entry.totalEpisodes
+                val progress = when {
+                    entry.type == SimklType.MOVIE -> null
+                    nextSeason != null && nextEpisode != null && watched != null && total != null ->
+                        stringResource(R.string.simkl_progress_next, nextSeason, nextEpisode, watched, total)
+                    watched != null && total != null ->
+                        stringResource(R.string.simkl_progress_counts, watched, total)
+                    else -> null
+                }
+                val label = if (progress != null) stringResource(R.string.simkl_sheet_line, status, progress)
+                    else stringResource(R.string.simkl_sheet_line_status, status)
+                // Hold and dropped are sheet-only and shown muted.
+                val muted = entry.status == SimklStatus.HOLD || entry.status == SimklStatus.DROPPED
+                TextButton(onClick = { onSimklClick(entry.simklUrl) }) {
+                    Text(label, modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Start,
+                        color = if (muted) MaterialTheme.colorScheme.onSurfaceVariant
+                            else MaterialTheme.colorScheme.primary)
+                }
+            } }
             if (state.hasOverride) item {
                 TextButton(onClick = onClearOverride) { Text(stringResource(R.string.clear_metadata_override)) }
             }
