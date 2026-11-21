@@ -148,7 +148,7 @@ class TmdbResolver(
         /** themoviedb.org item link, tolerant of scheme, www, and
          *  anything after the id. */
         val tmdbLinkPattern =
-            Regex("^(?:https?://)?(?:www\\.)?themoviedb\\.org/(movie|tv)/(\\d+)(?:[/?#].*)?$",
+            Regex("^(?:https?://)?(?:www\\.)?themoviedb\\.org/(movie|tv)/(\\d+)(?:[-/?#].*)?$",
                 RegexOption.IGNORE_CASE)
         /** Same cap as the Cinemeta picker's MAX_CANDIDATES. */
         const val MAX_PICKER_CANDIDATES = 5

@@ -349,6 +349,16 @@ class TmdbResolverTest {
             parsed.parseManualLink("themoviedb.org/movie/123/", null))
     }
 
+    @Test fun `parseManualLink accepts slugged TMDB links only on TMDB`() {
+        val parsed = resolver(FakeTmdb())
+        assertEquals(ManualTmdbLink.ById(550, "movie"),
+            parsed.parseManualLink("https://www.themoviedb.org/movie/550-fight-club", null))
+        assertEquals(ManualTmdbLink.ById(456, "series"),
+            parsed.parseManualLink("https://themoviedb.org/tv/456-example", "movie"))
+        assertEquals(ManualTmdbLink.ByTitle("https://example.com/movie/550-fight-club"),
+            parsed.parseManualLink("https://example.com/movie/550-fight-club", null))
+    }
+
     @Test fun `parseManualLink accepts a bare id only with a known type`() {
         val parsed = resolver(FakeTmdb())
         assertEquals(ManualTmdbLink.ById(123, "movie"), parsed.parseManualLink("123", "movie"))

@@ -88,6 +88,7 @@ data class DownloadsUiState(
     val posterCooldowns: Map<Pair<DownloadKind, String>, Long> = emptyMap(),
     /** Picker candidates for the open download only, keyed by (kind, id). */
     val candidates: Map<Pair<DownloadKind, String>, List<MediaCandidate>> = emptyMap(),
+    val resolvingOverrides: Set<Pair<DownloadKind, String>> = emptySet(),
     /** Manual TMDB search feedback for the open download, keyed by
      *  (kind, id). Cleared when a search finds candidates. */
     val manualTmdbSearch: Map<Pair<DownloadKind, String>, ManualTmdbSearchStatus> = emptyMap(),
@@ -1132,6 +1133,11 @@ class DownloadsViewModel(
         }
     }
 
+    fun clearManualTmdbSearch(download: DebridDownload) {
+        val key = download.kind to download.id
+        _state.update { it.copy(manualTmdbSearch = it.manualTmdbSearch - key) }
+    }
+
     private fun changeMetadataOverride(download: DebridDownload, pick: MetadataOverride?) {
         val key = download.kind to download.id
         val ref = DownloadRef(download.kind, download.id)
@@ -1140,6 +1146,7 @@ class DownloadsViewModel(
         val order = metadataOrder
         metadataCandidateJob?.cancel()
         overrideEdits.add(ref)
+        _state.update { it.copy(resolvingOverrides = it.resolvingOverrides + key) }
         hydrationQueue.remove(ref)
         viewModelScope.launch {
             var published: MetadataLookup? = null
@@ -1178,6 +1185,7 @@ class DownloadsViewModel(
                 // Keep the previous match if the stored preference could not be changed.
             } finally {
                 overrideEdits.remove(ref)
+                _state.update { it.copy(resolvingOverrides = it.resolvingOverrides - key) }
                 if (version != refreshVersion || order != metadataOrder) {
                     val current = _state.value
                     enqueueHydration(current.pagedByTab[current.tab]?.loaded.orEmpty(), refreshVersion)
@@ -1329,7 +1337,10 @@ class DownloadsViewModel(
 
     fun requestDelete(download: DebridDownload) {
         if (_state.value.resolvingDownload != null || _state.value.playUrl != null) return
-        _state.update { it.copy(deleteConfirm = download, filePicker = null) }
+        manualTmdbSearchJob?.cancel()
+        val key = download.kind to download.id
+        _state.update { it.copy(deleteConfirm = download, filePicker = null,
+            manualTmdbSearch = it.manualTmdbSearch - key) }
     }
 
     fun confirmDelete() {
