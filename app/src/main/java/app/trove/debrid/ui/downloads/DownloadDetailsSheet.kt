@@ -26,6 +26,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
 import app.trove.debrid.core.*
 import app.trove.debrid.ui.theme.TroveSpace
 import java.util.Locale
@@ -44,6 +45,8 @@ internal data class DownloadDetailsState(
     val tmdbConfigured: Boolean = false,
     /** The signed-in user's SIMKL entry for this title, if any. */
     val simklEntry: SimklEntry? = null,
+    /** Feedback for a hand-entered TMDB search, if one ran. */
+    val manualTmdbSearch: ManualTmdbSearchStatus? = null,
 )
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
@@ -63,6 +66,8 @@ internal fun DownloadDetailsSheet(
     onPosterFailure: suspend (String) -> Unit = {},
     /** Opens a SIMKL item page (the attribution link). */
     onSimklClick: (String) -> Unit = {},
+    /** Hand-entered TMDB search from the picker's manual link row. */
+    onManualTmdbSearch: (String) -> Unit = {},
 ) {
     val visibleFiles = remember(download.files, showClutterFiles) {
         if (showClutterFiles) download.files else download.files.filterNot { isClutterFile(it.name) }
@@ -81,6 +86,7 @@ internal fun DownloadDetailsSheet(
     }
     val currentSeason = matchedEpisode?.season ?: episodes.firstOrNull()?.season
     var showAllEpisodes by remember(download.kind, download.id) { mutableStateOf(false) }
+    var manualTmdbInput by remember(download.kind, download.id) { mutableStateOf("") }
     val seasonEpisodes = remember(episodes, currentSeason) { episodes.filter { it.season == currentSeason } }
     val visibleEpisodes = if (showAllEpisodes) episodes else seasonEpisodes
     val busy = state.resolving || state.playPending || dismissing
@@ -225,6 +231,42 @@ internal fun DownloadDetailsSheet(
             if (metadata == null && candidates.isEmpty() && !state.tmdbConfigured) item {
                 Text(stringResource(R.string.match_picker_no_key_hint), style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            // Hand-entered TMDB link: explicit user intent, so it is
+            // offered even when Cinemeta already listed candidates.
+            // Hidden without a TMDB key; the no-key hint covers that.
+            if (metadata == null && state.tmdbConfigured) item {
+                val searching = state.manualTmdbSearch == ManualTmdbSearchStatus.SEARCHING
+                Column(verticalArrangement = Arrangement.spacedBy(TroveSpace.compact)) {
+                    Text(stringResource(R.string.match_picker_manual_title), style = MaterialTheme.typography.titleMedium)
+                    OutlinedTextField(
+                        value = manualTmdbInput,
+                        onValueChange = { manualTmdbInput = it },
+                        label = { Text(stringResource(R.string.match_picker_manual_label)) },
+                        singleLine = true,
+                        enabled = !searching,
+                        modifier = Modifier.fillMaxWidth().testTag("manual_tmdb_link_field"),
+                    )
+                    Row(verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(TroveSpace.small)) {
+                        Button(
+                            onClick = { onManualTmdbSearch(manualTmdbInput) },
+                            enabled = manualTmdbInput.isNotBlank() && !searching,
+                        ) { Text(stringResource(R.string.match_picker_manual_search)) }
+                        if (searching) CircularProgressIndicator(Modifier.size(24.dp))
+                    }
+                    when (state.manualTmdbSearch) {
+                        ManualTmdbSearchStatus.NO_MATCH -> Text(
+                            stringResource(R.string.match_picker_manual_no_match),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        ManualTmdbSearchStatus.INVALID -> Text(
+                            stringResource(R.string.match_picker_manual_invalid),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        else -> Unit
+                    }
+                }
             }
             item {
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(TroveSpace.small)) {

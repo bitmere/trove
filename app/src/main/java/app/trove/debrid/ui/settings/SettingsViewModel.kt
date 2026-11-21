@@ -958,7 +958,7 @@ class SettingsViewModel(
         _state.update { it.copy(simklSyncing = true, simklLastSyncError = null) }
         viewModelScope.launch {
             try {
-                repository.syncSimkl()
+                repository.syncSimkl(force = true)
             } catch (e: CancellationException) {
                 throw e
             } catch (_: Exception) {

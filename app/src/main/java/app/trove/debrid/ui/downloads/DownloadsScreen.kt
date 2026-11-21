@@ -511,8 +511,8 @@ fun DownloadsScreen(
         val error = state.error
         val provenance = state.enrichment[key] ?: metadata?.provenance
         val posterUrl = state.posterUrl(key)
-        val details = remember(metadata, candidates, hasOverride, resolving, playPending, resolvingFileId, error, provenance, posterUrl, state.tmdbConfigured, state.simklStatuses[key]) {
-            DownloadDetailsState(metadata, candidates, hasOverride, resolving, playPending, resolvingFileId, error, provenance, posterUrl, state.tmdbConfigured, state.simklStatuses[key])
+        val details = remember(metadata, candidates, hasOverride, resolving, playPending, resolvingFileId, error, provenance, posterUrl, state.tmdbConfigured, state.simklStatuses[key], state.manualTmdbSearch[key]) {
+            DownloadDetailsState(metadata, candidates, hasOverride, resolving, playPending, resolvingFileId, error, provenance, posterUrl, state.tmdbConfigured, state.simklStatuses[key], state.manualTmdbSearch[key])
         }
         DownloadDetailsSheet(
             download = download, state = details, sheetState = detailsSheetState,
@@ -528,6 +528,7 @@ fun DownloadsScreen(
             onPlay = { if (viewModel.isCurrentDownload(download)) viewModel.playFile(download, it) },
             onPlayWith = { if (viewModel.isCurrentDownload(download)) viewModel.playFile(download, it, askEveryTime = true) },
             onPickCandidate = { if (viewModel.isCurrentDownload(download)) viewModel.pickCandidate(download, it) },
+            onManualTmdbSearch = { if (viewModel.isCurrentDownload(download)) viewModel.searchManualTmdbLink(download, it) },
             onClearOverride = { if (viewModel.isCurrentDownload(download)) viewModel.clearMetadataOverride(download) },
             onPosterFailure = { viewModel.onPosterFailure(download, it) },
             onDelete = {

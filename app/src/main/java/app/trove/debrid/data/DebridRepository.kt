@@ -20,6 +20,7 @@ import app.trove.debrid.core.DownloadRef
 import app.trove.debrid.core.HttpTransport
 import app.trove.debrid.core.LibraryDiskCache
 import app.trove.debrid.core.LibrarySnapshot
+import app.trove.debrid.core.ManualTmdbSearch
 import app.trove.debrid.core.MediaMetadata
 import app.trove.debrid.core.MetadataDiskCache
 import app.trove.debrid.core.OkHttpTransport
@@ -213,6 +214,11 @@ class DebridRepository(
     override suspend fun resolveMetadataByTmdbId(tmdbId: Int, type: String) =
         withContext(ioDispatcher) { metadataResolver.resolveByTmdbId(tmdbId, type) }
 
+    override suspend fun searchManualTmdbLink(input: String, fallbackType: String?): ManualTmdbSearch =
+        withContext(ioDispatcher) {
+            registry.tmdbResolver?.searchManualLink(input, fallbackType) ?: ManualTmdbSearch.NoMatch
+        }
+
     override fun isTmdbConfigured(): Boolean = metadataResolver.isTmdbConfigured()
 
     override suspend fun loadMetadataOverride(ref: DownloadRef) =
@@ -291,8 +297,8 @@ class DebridRepository(
         withContext(ioDispatcher) { simklEngine.loadSnapshot() }
     }
 
-    override suspend fun syncSimkl(): SimklSyncResult = withContext(ioDispatcher) {
-        val result = simklEngine.sync()
+    override suspend fun syncSimkl(force: Boolean): SimklSyncResult = withContext(ioDispatcher) {
+        val result = simklEngine.sync(force)
         when (result) {
             is SimklSyncResult.Changed, SimklSyncResult.Unchanged ->
                 simklSnapshotVersion.update { it + 1 }
@@ -307,7 +313,8 @@ class DebridRepository(
                     simklSnapshotVersion.update { it + 1 }
                 }
             }
-            SimklSyncResult.NotSignedIn, SimklSyncResult.NotConfigured -> Unit
+            SimklSyncResult.NotSignedIn, SimklSyncResult.NotConfigured,
+            SimklSyncResult.CooledDown -> Unit
         }
         result
     }

@@ -163,6 +163,9 @@ sealed interface SimklSyncResult {
     data object NotSignedIn : SimklSyncResult
     data object NotConfigured : SimklSyncResult
     data object Unchanged : SimklSyncResult
+    /** Automatic sync skipped: the last check is inside the
+     *  cooldown window, so no network call was made. */
+    data object CooledDown : SimklSyncResult
     data class Changed(val entryCount: Int) : SimklSyncResult
     data class Failed(val failure: SimklSyncFailure) : SimklSyncResult
 }
