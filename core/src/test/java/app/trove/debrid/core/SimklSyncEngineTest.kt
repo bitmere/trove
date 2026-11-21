@@ -76,11 +76,15 @@ class SimklSyncEngineTest {
         stored: SimklTokens?,
         cache: SimklDiskCache?,
         clientId: String = "test-client",
+        /** Defaults past the 30-minute cooldown, so the existing
+         *  sync tests exercise the network path; cooldown tests
+         *  pass an explicit clock. */
+        now: Long = nowMs + 31 * 60 * 1000L,
     ): SimklSyncEngine {
         var held = stored
         val client = SimklClient(transport, clientId = clientId, appVersion = "test",
             now = { nowMs }, tokens = { held }, onTokens = { held = it })
-        return SimklSyncEngine(client, cache, now = { nowMs })
+        return SimklSyncEngine(client, cache, now = { now })
     }
 
     private fun validTokens() = SimklTokens(
@@ -206,5 +210,59 @@ class SimklSyncEngineTest {
         testEngine.clear()
         assertNull(testEngine.entryFor("tt1234567", null))
         assertNull(cache.load())
+    }
+
+    @Test fun `cooldown skips the network when the last check is recent`() = runBlocking {
+        val cache = SimklDiskCache(temporary.newFolder())
+        cache.save(seedSnapshot())
+        val transport = FakeSimkl { HttpResponse(200, oldActivities) }
+        val testEngine = engine(transport, validTokens(), cache, now = nowMs)
+        assertEquals(SimklSyncResult.CooledDown, testEngine.sync())
+        assertTrue(transport.requests.isEmpty())
+    }
+
+    @Test fun `badges are still served from the cached snapshot while cooled down`() = runBlocking {
+        val cache = SimklDiskCache(temporary.newFolder())
+        cache.save(seedSnapshot())
+        val transport = FakeSimkl { HttpResponse(200, oldActivities) }
+        val testEngine = engine(transport, validTokens(), cache, now = nowMs)
+        assertEquals(SimklSyncResult.CooledDown, testEngine.sync())
+        assertEquals(123, testEngine.entryFor("tt1234567", null)?.simklId)
+        assertEquals(456, testEngine.entryFor(null, 456)?.tmdbId)
+    }
+
+    @Test fun `cooldown allows a sync at exactly 30 minutes`() = runBlocking {
+        val cache = SimklDiskCache(temporary.newFolder())
+        cache.save(seedSnapshot())
+        val transport = FakeSimkl { HttpResponse(200, oldActivities) }
+        val testEngine = engine(transport, validTokens(), cache, now = nowMs + 30 * 60 * 1000L)
+        assertEquals(SimklSyncResult.Unchanged, testEngine.sync())
+        assertEquals(1, transport.requests.size)
+        assertTrue(transport.requests.single().url.contains("/sync/activities"))
+    }
+
+    @Test fun `force bypasses the cooldown`() = runBlocking {
+        val cache = SimklDiskCache(temporary.newFolder())
+        cache.save(seedSnapshot())
+        val transport = FakeSimkl { HttpResponse(200, oldActivities) }
+        val testEngine = engine(transport, validTokens(), cache, now = nowMs)
+        assertEquals(SimklSyncResult.Unchanged, testEngine.sync(force = true))
+        assertEquals(1, transport.requests.size)
+        assertTrue(transport.requests.single().url.contains("/sync/activities"))
+    }
+
+    @Test fun `first sync runs with no snapshot even inside the cooldown window`() = runBlocking {
+        val transport = FakeSimkl { request ->
+            when {
+                request.url.contains("/sync/activities") -> HttpResponse(200, movedActivities)
+                "/sync/all-items/" in request.url -> HttpResponse(200, emptyItems)
+                request.url.contains("/users/settings") ->
+                    HttpResponse(200, """{"user":{"name":"tester"},"account":{"type":"free"}}""")
+                else -> HttpResponse(404, "{}")
+            }
+        }
+        val testEngine = engine(transport, validTokens(), null, now = nowMs)
+        assertEquals(SimklSyncResult.Changed(0), testEngine.sync())
+        assertTrue(transport.requests.any { "/sync/activities" in it.url })
     }
 }

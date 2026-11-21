@@ -15,6 +15,7 @@ import app.trove.debrid.core.DownloadRef
 import app.trove.debrid.core.DownloadSort
 import app.trove.debrid.core.DownloadStatus
 import app.trove.debrid.core.HttpTransport
+import app.trove.debrid.core.ManualTmdbSearch
 import app.trove.debrid.core.MediaCandidate
 import app.trove.debrid.core.MediaMetadata
 import app.trove.debrid.core.MediaQuery
@@ -362,6 +363,13 @@ open class FakeRepository(
     override suspend fun resolveMetadataCandidates(query: MediaQuery) = candidatesByQuery(query)
     override suspend fun resolveMetadataById(imdbId: String, type: String) = metadataById[imdbId to type]
     override suspend fun resolveMetadataByTmdbId(tmdbId: Int, type: String) = metadataByTmdbId[tmdbId to type]
+    /** Manual TMDB search result for picker tests; inputs recorded. */
+    var manualTmdbResult: ManualTmdbSearch = ManualTmdbSearch.NoMatch
+    val manualTmdbInputs = mutableListOf<Pair<String, String?>>()
+    override suspend fun searchManualTmdbLink(input: String, fallbackType: String?): ManualTmdbSearch {
+        manualTmdbInputs += input to fallbackType
+        return manualTmdbResult
+    }
     override fun isTmdbConfigured(): Boolean = tmdbConfigured
     override suspend fun loadMetadataOverride(ref: DownloadRef) = savedMetadataOverrides[ref.kind to ref.id]
     override suspend fun saveMetadataOverride(ref: DownloadRef, pick: MetadataOverride) {
@@ -394,6 +402,9 @@ open class FakeRepository(
     var simklPollResult: SimklPollResult = SimklPollResult.Pending
     var simklSyncResult: SimklSyncResult = SimklSyncResult.Unchanged
     var simklSyncCalls: Int = 0
+    /** The `force` value of the most recent [syncSimkl] call, or
+     *  null when no sync has run. */
+    var lastSimklSyncForce: Boolean? = null
     var simklSignOutCalls: Int = 0
     private val simklChangesFlow = MutableStateFlow(0)
 
@@ -408,8 +419,9 @@ open class FakeRepository(
             (imdbId != null && it.imdbId == imdbId) || (tmdbId != null && it.tmdbId == tmdbId)
         }
     override suspend fun loadSimklSnapshot() = Unit
-    override suspend fun syncSimkl(): SimklSyncResult {
+    override suspend fun syncSimkl(force: Boolean): SimklSyncResult {
         simklSyncCalls++
+        lastSimklSyncForce = force
         if (simklSyncResult is SimklSyncResult.Changed || simklSyncResult == SimklSyncResult.Unchanged) {
             simklChangesFlow.value++
         }

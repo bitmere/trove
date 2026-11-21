@@ -168,6 +168,11 @@
     <string name="match_picker_hint">Pick the right title. It applies to this download only.</string>
     <string name="match_picker_tmdb">TMDB</string>
     <string name="match_picker_no_key_hint">No match found. Add a TMDB key in Settings to search TMDB too.</string>
+    <string name="match_picker_manual_title">Link it yourself</string>
+    <string name="match_picker_manual_label">TMDB title, link or id</string>
+    <string name="match_picker_manual_search">Search TMDB</string>
+    <string name="match_picker_manual_no_match">No TMDB match for that title, link or id.</string>
+    <string name="match_picker_manual_invalid">Enter a TMDB title, a themoviedb.org link, or a numeric id.</string>
     <string name="clear_metadata_override">Clear match</string>
     <string name="episode_matched">Matched episode</string>
     <string name="episodes_count">Episodes (%1$d)</string>

@@ -34,6 +34,24 @@ import kotlin.math.abs
  * shared by all requests through this resolver. Primary lookups fall back
  * to Cinemeta during the cooldown, avoiding repeated TMDB requests.
  */
+/**
+ * A hand-entered TMDB link from the match picker: a TMDB id
+ * (from a themoviedb.org link or a bare number), a title to
+ * search, or input that cannot be used. */
+sealed interface ManualTmdbLink {
+    data class ById(val tmdbId: Int, val type: String) : ManualTmdbLink
+    data class ByTitle(val title: String) : ManualTmdbLink
+    data object Invalid : ManualTmdbLink
+}
+
+/** Outcome of a manual TMDB search: candidates to show, nothing
+ *  matching, or input that cannot be used. */
+sealed interface ManualTmdbSearch {
+    data class Found(val candidates: List<MediaCandidate>) : ManualTmdbSearch
+    data object NoMatch : ManualTmdbSearch
+    data object Invalid : ManualTmdbSearch
+}
+
 class TmdbResolver(
     private val transport: HttpTransport,
     private val now: () -> Long = System::currentTimeMillis,
@@ -78,9 +96,60 @@ class TmdbResolver(
         }
     }
 
+    /** Parses hand-entered picker input without a network call.
+     *  Accepts a themoviedb.org link (`/movie/<id>` or `/tv/<id>`),
+     *  a bare numeric id (typed by [fallbackType], invalid when the
+     *  type is unknown), or a title to search. Blank or over-long
+     *  input is invalid. */
+    fun parseManualLink(input: String, fallbackType: String?): ManualTmdbLink {
+        val trimmed = input.trim()
+        if (trimmed.isEmpty() || trimmed.length > 160) return ManualTmdbLink.Invalid
+        val link = tmdbLinkPattern.matchEntire(trimmed)
+        if (link != null) {
+            val id = link.groupValues[2].toIntOrNull()?.takeIf { it > 0 }
+                ?: return ManualTmdbLink.Invalid
+            val type = if (link.groupValues[1].equals("tv", ignoreCase = true)) "series" else "movie"
+            return ManualTmdbLink.ById(id, type)
+        }
+        if (trimmed.all { it.isDigit() }) {
+            val id = trimmed.toIntOrNull()?.takeIf { it > 0 } ?: return ManualTmdbLink.Invalid
+            val type = fallbackType?.takeIf { it == "movie" || it == "series" }
+                ?: return ManualTmdbLink.Invalid
+            return ManualTmdbLink.ById(id, type)
+        }
+        return ManualTmdbLink.ByTitle(trimmed)
+    }
+
+    /** Manual TMDB search for the picker: an id resolves its detail
+     *  to a single candidate, a title reuses [searchCandidates]
+     *  (same normalized-title gate and cap as the picker). No key
+     *  or any TMDB failure means [ManualTmdbSearch.NoMatch], never
+     *  an exception; invalid input makes no request. */
+    suspend fun searchManualLink(input: String, fallbackType: String?): ManualTmdbSearch {
+        return when (val parsed = parseManualLink(input, fallbackType)) {
+            ManualTmdbLink.Invalid -> ManualTmdbSearch.Invalid
+            is ManualTmdbLink.ById -> {
+                val metadata = resolveByTmdbId(parsed.tmdbId, parsed.type)
+                    ?: return ManualTmdbSearch.NoMatch
+                ManualTmdbSearch.Found(listOf(
+                    MediaCandidate(null, metadata.title, metadata.year, parsed.type, tmdbId = parsed.tmdbId)))
+            }
+            is ManualTmdbLink.ByTitle -> {
+                val type = fallbackType?.takeIf { it == "movie" || it == "series" }
+                val found = searchCandidates(MediaQuery(parsed.title, null, type))
+                if (found.isEmpty()) ManualTmdbSearch.NoMatch else ManualTmdbSearch.Found(found)
+            }
+        }
+    }
+
     private companion object {
         const val BASE_URL = "https://api.themoviedb.org"
         val imdbIdPattern = Regex("tt\\d+")
+        /** themoviedb.org item link, tolerant of scheme, www, and
+         *  anything after the id. */
+        val tmdbLinkPattern =
+            Regex("^(?:https?://)?(?:www\\.)?themoviedb\\.org/(movie|tv)/(\\d+)(?:[/?#].*)?$",
+                RegexOption.IGNORE_CASE)
         /** Same cap as the Cinemeta picker's MAX_CANDIDATES. */
         const val MAX_PICKER_CANDIDATES = 5
     }

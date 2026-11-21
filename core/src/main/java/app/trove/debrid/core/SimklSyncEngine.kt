@@ -30,7 +30,12 @@ internal class SimklStatusIndex(entries: List<SimklEntry>) {
 /** Read-only SIMKL sync, activities-gated, on demand only. There
  *  is no timer, no background job, and no sync on app start: the
  *  caller triggers [sync] from a sheet open, a pull-to-refresh, or
- *  Settings. The loop follows the docs' two-phase model:
+ *  Settings. Automatic triggers are cooled down: when the snapshot
+ *  was last checked less than [SYNC_COOLDOWN_MS] ago, [sync]
+ *  returns [SimklSyncResult.CooledDown] without a network call and
+ *  the badges keep coming from the disk snapshot. Settings "Sync
+ *  now" passes `force = true` and always goes live. The loop
+ *  follows the docs' two-phase model:
  *
  *  1. `GET /sync/activities`; if the top-level `all` watermark is
  *     unchanged, stop — no `/sync/all-items` call is made.
@@ -84,13 +89,21 @@ class SimklSyncEngine(
         }
     }
 
-    suspend fun sync(): SimklSyncResult {
+    suspend fun sync(force: Boolean = false): SimklSyncResult {
         if (!client.isConfigured) return SimklSyncResult.NotConfigured
         if (client.currentTokens() == null) return SimklSyncResult.NotSignedIn
         return syncMutex.withLock {
             val previous = loadSnapshot()
             if (previous != null && previous.quotaBlockedUntilMs > now()) {
                 return@withLock SimklSyncResult.Failed(SimklSyncFailure.QUOTA)
+            }
+            // Cooldown: automatic triggers (sheet open, pull-to-refresh)
+            // share one activities check per window instead of one per
+            // trigger. The persisted lastCheckedMs survives restarts, so
+            // the window holds across app launches. A first sync (no
+            // snapshot) always runs, and an explicit sync forces.
+            if (!force && previous != null && now() - previous.lastCheckedMs < SYNC_COOLDOWN_MS) {
+                return@withLock SimklSyncResult.CooledDown
             }
             val activities = try {
                 client.activities()
@@ -258,5 +271,11 @@ class SimklSyncEngine(
     private fun setSnapshot(value: SimklSnapshot) {
         snapshot = value
         index = SimklStatusIndex(value.entries)
+    }
+
+    companion object {
+        /** Minimum gap between automatic (unforced) sync checks.
+         *  Badges are served from the disk snapshot in between. */
+        const val SYNC_COOLDOWN_MS = 30 * 60 * 1000L
     }
 }

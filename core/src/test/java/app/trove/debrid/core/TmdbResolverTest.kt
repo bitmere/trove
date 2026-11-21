@@ -336,4 +336,91 @@ class TmdbResolverTest {
         assertTrue(result?.cast?.isEmpty() == true)
         assertNull(result?.director)
     }
+
+    @Test fun `parseManualLink accepts TMDB movie and tv links`() {
+        val parsed = resolver(FakeTmdb())
+        assertEquals(ManualTmdbLink.ById(123, "movie"),
+            parsed.parseManualLink("https://www.themoviedb.org/movie/123", null))
+        assertEquals(ManualTmdbLink.ById(456, "series"),
+            parsed.parseManualLink("https://themoviedb.org/tv/456", "movie"))
+        assertEquals(ManualTmdbLink.ById(123, "movie"),
+            parsed.parseManualLink("http://themoviedb.org/movie/123?language=en-US", null))
+        assertEquals(ManualTmdbLink.ById(123, "movie"),
+            parsed.parseManualLink("themoviedb.org/movie/123/", null))
+    }
+
+    @Test fun `parseManualLink accepts a bare id only with a known type`() {
+        val parsed = resolver(FakeTmdb())
+        assertEquals(ManualTmdbLink.ById(123, "movie"), parsed.parseManualLink("123", "movie"))
+        assertEquals(ManualTmdbLink.ById(456, "series"), parsed.parseManualLink(" 456 ", "series"))
+        assertEquals(ManualTmdbLink.Invalid, parsed.parseManualLink("123", null))
+        assertEquals(ManualTmdbLink.Invalid, parsed.parseManualLink("123", "bogus"))
+        assertEquals(ManualTmdbLink.Invalid, parsed.parseManualLink("0", "movie"))
+    }
+
+    @Test fun `parseManualLink treats other text as a title and rejects blank or over-long input`() {
+        val parsed = resolver(FakeTmdb())
+        assertEquals(ManualTmdbLink.ByTitle("Example Film"),
+            parsed.parseManualLink("  Example Film  ", "movie"))
+        assertEquals(ManualTmdbLink.Invalid, parsed.parseManualLink("", null))
+        assertEquals(ManualTmdbLink.Invalid, parsed.parseManualLink("   ", null))
+        assertEquals(ManualTmdbLink.Invalid, parsed.parseManualLink("x".repeat(161), null))
+        assertEquals(ManualTmdbLink.ByTitle("x".repeat(160)), parsed.parseManualLink("x".repeat(160), null))
+        // A non-TMDB link is just text, never an id.
+        assertEquals(ManualTmdbLink.ByTitle("https://example.com/movie/123"),
+            parsed.parseManualLink("https://example.com/movie/123", null))
+    }
+
+    @Test fun `searchManualLink resolves a pasted TMDB link to one candidate`() = runBlocking {
+        val http = FakeTmdb().apply {
+            detailJson = movieDetailJson
+            creditsJson = movieCreditsJson
+        }
+        val result = resolver(http).searchManualLink("https://themoviedb.org/movie/123", null)
+        assertEquals(
+            ManualTmdbSearch.Found(listOf(
+                MediaCandidate(null, "Example Film", 2026, "movie", tmdbId = 123))),
+            result)
+        assertTrue(http.requests.any { it.url.endsWith("/3/movie/123?append_to_response=external_ids") })
+    }
+
+    @Test fun `searchManualLink reports no match when the linked id has no detail`() = runBlocking {
+        val http = FakeTmdb().apply { detailJson = "{}" }
+        assertEquals(ManualTmdbSearch.NoMatch, resolver(http).searchManualLink("123", "movie"))
+    }
+
+    @Test fun `searchManualLink searches by title`() = runBlocking {
+        val http = FakeTmdb().apply {
+            searchMovieJson = """
+                {"results":[
+                {"id":1,"title":"Example Film","release_date":"2026-01-01","poster_path":"/a.jpg"}]}
+            """.trimIndent()
+            searchTvJson = """{"results":[]}"""
+        }
+        val result = resolver(http).searchManualLink("Example Film", "movie")
+        assertEquals(
+            ManualTmdbSearch.Found(listOf(
+                MediaCandidate(null, "Example Film", 2026, "movie", tmdbId = 1))),
+            result)
+    }
+
+    @Test fun `searchManualLink reports no match when the title search is empty`() = runBlocking {
+        val http = FakeTmdb()
+        assertEquals(ManualTmdbSearch.NoMatch, resolver(http).searchManualLink("No Such Film", "movie"))
+    }
+
+    @Test fun `searchManualLink is no match without a key and makes no requests`() = runBlocking {
+        val http = FakeTmdb()
+        assertEquals(ManualTmdbSearch.NoMatch,
+            resolver(http, apiKey = null).searchManualLink("123", "movie"))
+        assertEquals(ManualTmdbSearch.NoMatch,
+            resolver(http, apiKey = null).searchManualLink("Example Film", "movie"))
+        assertTrue(http.requests.isEmpty())
+    }
+
+    @Test fun `searchManualLink never requests for invalid input`() = runBlocking {
+        val http = FakeTmdb()
+        assertEquals(ManualTmdbSearch.Invalid, resolver(http).searchManualLink("   ", null))
+        assertTrue(http.requests.isEmpty())
+    }
 }

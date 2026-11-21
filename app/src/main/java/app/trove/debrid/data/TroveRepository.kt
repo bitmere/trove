@@ -11,6 +11,7 @@ import app.trove.debrid.core.DebridProvider
 import app.trove.debrid.core.DebridService
 import app.trove.debrid.core.DownloadKind
 import app.trove.debrid.core.LibrarySnapshot
+import app.trove.debrid.core.ManualTmdbSearch
 import app.trove.debrid.core.MediaMetadata
 import app.trove.debrid.core.MetadataLookup
 import app.trove.debrid.core.ServiceCacheResult
@@ -122,6 +123,13 @@ interface TroveRepository {
     suspend fun resolveMetadataById(imdbId: String, type: String): app.trove.debrid.core.MediaMetadata? = null
     /** Detail for a user-picked TMDB candidate id. */
     suspend fun resolveMetadataByTmdbId(tmdbId: Int, type: String): app.trove.debrid.core.MediaMetadata? = null
+    /** Manual TMDB link search for the picker: title, themoviedb.org
+     *  link, or bare TMDB id. Explicit user intent — runs even when
+     *  the automatic candidates exist. */
+    suspend fun searchManualTmdbLink(
+        input: String,
+        fallbackType: String?,
+    ): ManualTmdbSearch = ManualTmdbSearch.NoMatch
     /** Whether a TMDB key is configured, for the picker's no-key hint. */
     fun isTmdbConfigured(): Boolean = false
     /** The stored pick for one download, or null when the download
@@ -164,8 +172,10 @@ interface TroveRepository {
     /** Loads the disk snapshot into memory (no network). */
     suspend fun loadSimklSnapshot() = Unit
     /** On-demand sync (activities-gated). Never called on a timer;
-     *  failures leave the last snapshot in place. */
-    suspend fun syncSimkl(): app.trove.debrid.core.SimklSyncResult =
+     *  failures leave the last snapshot in place. `force` bypasses
+     *  the automatic-sync cooldown; only an explicit user sync
+     *  (Settings "Sync now") passes it. */
+    suspend fun syncSimkl(force: Boolean = false): app.trove.debrid.core.SimklSyncResult =
         app.trove.debrid.core.SimklSyncResult.NotSignedIn
     /** Starts the device/PIN flow. */
     suspend fun startSimklDeviceFlow(): Result<app.trove.debrid.core.SimklDeviceCode> =

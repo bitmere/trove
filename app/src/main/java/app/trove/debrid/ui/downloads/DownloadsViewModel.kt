@@ -9,6 +9,7 @@ import app.trove.debrid.core.DownloadKind
 import app.trove.debrid.core.DownloadRef
 import app.trove.debrid.core.DownloadSort
 import app.trove.debrid.core.DownloadStatus
+import app.trove.debrid.core.ManualTmdbSearch
 import app.trove.debrid.core.SimklEntry
 import app.trove.debrid.core.LibrarySnapshot
 import app.trove.debrid.core.MediaCandidate
@@ -71,6 +72,9 @@ data class ScrollAnchor(
 
 private enum class PageOutcome { LOADED, FAILED, STALE }
 
+/** Feedback for a hand-entered TMDB search in the picker. */
+enum class ManualTmdbSearchStatus { SEARCHING, NO_MATCH, INVALID }
+
 private fun freshPagedStates(): Map<DownloadKind, PagedTabState> =
     DownloadKind.entries.associateWith { PagedTabState() }
 
@@ -81,6 +85,9 @@ data class DownloadsUiState(
     val posterCooldowns: Map<Pair<DownloadKind, String>, Long> = emptyMap(),
     /** Picker candidates for the open download only, keyed by (kind, id). */
     val candidates: Map<Pair<DownloadKind, String>, List<MediaCandidate>> = emptyMap(),
+    /** Manual TMDB search feedback for the open download, keyed by
+     *  (kind, id). Cleared when a search finds candidates. */
+    val manualTmdbSearch: Map<Pair<DownloadKind, String>, ManualTmdbSearchStatus> = emptyMap(),
     /** Stored picks for downloads whose metadata came from an override. */
     val metadataOverrides: Map<Pair<DownloadKind, String>, MetadataOverride> = emptyMap(),
     /** SIMKL watch status per download, keyed by (kind, id). Only
@@ -164,6 +171,7 @@ class DownloadsViewModel(
     private val snapshotWrites = Mutex()
     private var fileLookupJob: Job? = null
     private var metadataCandidateJob: Job? = null
+    private var manualTmdbSearchJob: Job? = null
     private var playbackJob: Job? = null
     private var simklSyncJob: Job? = null
     private var pageJobs = mutableMapOf<DownloadKind, Job>()
@@ -282,6 +290,7 @@ class DownloadsViewModel(
                     playbackJob?.cancel()
                     _state.update {
                         it.copy(downloads = emptyList(), metadata = emptyMap(), candidates = emptyMap(),
+                            manualTmdbSearch = emptyMap(),
                             enrichment = emptyMap(), pendingPosters = emptyMap(), posterCooldowns = emptyMap(),
                             metadataOverrides = emptyMap(), simklStatuses = emptyMap(), accountLabel = null,
                             visibleByTab = emptyMap(), pagedByTab = freshPagedStates(),
@@ -297,6 +306,7 @@ class DownloadsViewModel(
                         it.copy(
                             loading = false, refreshing = false, signedOut = true,
                             downloads = emptyList(), metadata = emptyMap(), candidates = emptyMap(),
+                            manualTmdbSearch = emptyMap(),
                             enrichment = emptyMap(), pendingPosters = emptyMap(), posterCooldowns = emptyMap(),
                             metadataOverrides = emptyMap(), simklStatuses = emptyMap(), accountLabel = null, loadError = null,
                             authenticationRequired = false,
@@ -618,6 +628,7 @@ class DownloadsViewModel(
                 pendingPosters = state.pendingPosters.filterKeys(keep),
                 posterCooldowns = state.posterCooldowns.filterKeys(keep),
                 candidates = state.candidates.filterKeys(keep),
+                manualTmdbSearch = state.manualTmdbSearch.filterKeys(keep),
                 metadataOverrides = state.metadataOverrides.filterKeys(keep),
                 simklStatuses = state.simklStatuses.filterKeys(keep),
             )
@@ -1043,7 +1054,12 @@ class DownloadsViewModel(
               catch (_: Exception) { emptyList() }
             ensureActive()
             if (candidates.isNotEmpty() && current() && key !in _state.value.metadataOverrides) {
-                _state.update { it.copy(candidates = it.candidates + (key to candidates)) }
+                _state.update {
+                    it.copy(
+                        candidates = it.candidates + (key to candidates),
+                        manualTmdbSearch = it.manualTmdbSearch - key,
+                    )
+                }
             }
         }
     }
@@ -1059,6 +1075,48 @@ class DownloadsViewModel(
 
     fun clearMetadataOverride(download: DebridDownload) {
         changeMetadataOverride(download, null)
+    }
+
+    /** Hand-entered TMDB search for the picker: a title, a
+     *  themoviedb.org link, or a bare TMDB id. Explicit user
+     *  intent, so it runs even when the automatic candidates exist
+     *  and replaces the shown list for this download only. A found
+     *  search clears the feedback; no match or invalid input sets
+     *  it. A failed search reads as no match, exactly like the
+     *  automatic candidate load. */
+    fun searchManualTmdbLink(download: DebridDownload, input: String) {
+        val key = download.kind to download.id
+        if (_state.value.filePicker?.let { it.kind to it.id } != key) return
+        manualTmdbSearchJob?.cancel()
+        _state.update {
+            it.copy(manualTmdbSearch = it.manualTmdbSearch + (key to ManualTmdbSearchStatus.SEARCHING))
+        }
+        val type = app.trove.debrid.core.parseMediaName(download.name).type
+        manualTmdbSearchJob = viewModelScope.launch {
+            val result = try {
+                repository.searchManualTmdbLink(input, type)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                ManualTmdbSearch.NoMatch
+            }
+            ensureActive()
+            if (_state.value.filePicker?.let { it.kind to it.id } != key) return@launch
+            when (result) {
+                is ManualTmdbSearch.Found -> _state.update {
+                    it.copy(
+                        candidates = it.candidates + (key to result.candidates),
+                        manualTmdbSearch = it.manualTmdbSearch - key,
+                    )
+                }
+                ManualTmdbSearch.NoMatch -> _state.update {
+                    it.copy(manualTmdbSearch = it.manualTmdbSearch + (key to ManualTmdbSearchStatus.NO_MATCH))
+                }
+                ManualTmdbSearch.Invalid -> _state.update {
+                    it.copy(manualTmdbSearch = it.manualTmdbSearch + (key to ManualTmdbSearchStatus.INVALID))
+                }
+            }
+        }
     }
 
     private fun changeMetadataOverride(download: DebridDownload, pick: MetadataOverride?) {
