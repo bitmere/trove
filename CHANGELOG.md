@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.36 — 2026-11-21
+
+- Manual TMDB search races (PR 62): submitting a manual TMDB search in the details-sheet match picker now owns the picker — it cancels the in-flight automatic candidate load, so a late automatic response can no longer overwrite manual results or clear manual feedback. Dismissing the sheet mid-search cancels the pending manual search and clears its status, so the field and Search are never left disabled on reopen. A manual search that finds a match now shows a "Found — pick a match from the list above" line under Search, and the no-match message suggests the full title or a themoviedb.org link.
+- Baseline: 738 JVM tests, lint 0 errors.
+
 ## 0.1.35 — 2026-11-21
 
 - SIMKL client ID field (PR 59): the SIMKL group in Settings now has a "Public Client ID" field — register your own SIMKL app (AUTH V2, "TV, devices & command line") at simkl.com/settings/developer and paste its public client ID to enable sign-in, with no baked-in ID needed. The ID is stored encrypted, like the TorBox key; changing it wipes SIMKL tokens and the cached library, and signing out keeps it. With an ID saved, SIMKL sign-in is active.
