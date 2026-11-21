@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.35 — 2026-11-21
+
+- SIMKL client ID field (PR 59): the SIMKL group in Settings now has a "Public Client ID" field — register your own SIMKL app (AUTH V2, "TV, devices & command line") at simkl.com/settings/developer and paste its public client ID to enable sign-in, with no baked-in ID needed. The ID is stored encrypted, like the TorBox key; changing it wipes SIMKL tokens and the cached library, and signing out keeps it. With an ID saved, SIMKL sign-in is active.
+- Baseline: 735 JVM tests, lint 0 errors.
+
 ## 0.1.34 — 2026-11-21
 
 - SIMKL sync cooldown (PR 56): automatic SIMKL syncs (opening a download's sheet, pull-to-refresh) now run at most once every 30 minutes — inside the window they make zero network calls and badges keep coming from the saved copy on disk. The first sync still runs, a spent quota still reports properly, and "Sync now" in Settings always goes live.
