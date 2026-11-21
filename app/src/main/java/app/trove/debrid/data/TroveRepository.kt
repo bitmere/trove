@@ -48,11 +48,12 @@ data class SavedConnection(
 /** The outcome for one download, retaining its kind because IDs can repeat across kinds. */
 data class BatchDeleteItemResult(val download: DebridDownload, val result: Result<Unit>)
 
-/** A user's picked Cinemeta title for one download, keyed by
- *  (kind, id) because provider IDs repeat across kinds. An IMDb id is
- *  not a secret, so this lives in plain preferences, separately from
- *  both the metadata cache and the encrypted credential store. */
-data class MetadataOverride(val imdbId: String, val type: String, val title: String)
+/** A user's picked title for one download, keyed by (kind, id)
+ *  because provider IDs repeat across kinds. The pick carries
+ *  either a Cinemeta IMDb id or a TMDB id — never both. An id is
+ *  not a secret, so this lives in plain preferences, separately
+ *  from both the metadata cache and the encrypted credential store. */
+data class MetadataOverride(val imdbId: String?, val type: String, val title: String, val tmdbId: Int? = null)
 
 /** One viewport page of one kind. `endReached` is true when the
  *  provider has no more rows for the kind after this page, and
@@ -111,6 +112,10 @@ interface TroveRepository {
     ): List<app.trove.debrid.core.MediaCandidate> = emptyList()
     /** Detail for a user-picked candidate id. */
     suspend fun resolveMetadataById(imdbId: String, type: String): app.trove.debrid.core.MediaMetadata? = null
+    /** Detail for a user-picked TMDB candidate id. */
+    suspend fun resolveMetadataByTmdbId(tmdbId: Int, type: String): app.trove.debrid.core.MediaMetadata? = null
+    /** Whether a TMDB key is configured, for the picker's no-key hint. */
+    fun isTmdbConfigured(): Boolean = false
     /** The stored pick for one download, or null when the download
      *  resolves normally. Keyed by (kind, id). */
     suspend fun loadMetadataOverride(ref: app.trove.debrid.core.DownloadRef): MetadataOverride? = null

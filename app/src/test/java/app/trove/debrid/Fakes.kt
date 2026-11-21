@@ -348,10 +348,14 @@ open class FakeRepository(
     /** Per-download picks for picker tests, keyed by (kind, id). */
     var candidatesByQuery: (MediaQuery) -> List<MediaCandidate> = { emptyList() }
     var metadataById: Map<Pair<String, String>, MediaMetadata> = emptyMap()
+    var metadataByTmdbId: Map<Pair<Int, String>, MediaMetadata> = emptyMap()
+    var tmdbConfigured: Boolean = false
     val savedMetadataOverrides = mutableMapOf<Pair<DownloadKind, String>, MetadataOverride>()
 
     override suspend fun resolveMetadataCandidates(query: MediaQuery) = candidatesByQuery(query)
     override suspend fun resolveMetadataById(imdbId: String, type: String) = metadataById[imdbId to type]
+    override suspend fun resolveMetadataByTmdbId(tmdbId: Int, type: String) = metadataByTmdbId[tmdbId to type]
+    override fun isTmdbConfigured(): Boolean = tmdbConfigured
     override suspend fun loadMetadataOverride(ref: DownloadRef) = savedMetadataOverrides[ref.kind to ref.id]
     override suspend fun saveMetadataOverride(ref: DownloadRef, pick: MetadataOverride) {
         savedMetadataOverrides[ref.kind to ref.id] = pick

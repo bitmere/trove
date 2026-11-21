@@ -228,6 +228,31 @@ class DebridRepositoryTest {
     }
 
     @Test
+    fun `metadata override with a TMDB id survives a repository reload`() = runTest {
+        val prefs = FakeSharedPreferences()
+        val (repo, _) = repository(FakeHttpTransport(), prefs = prefs)
+        val ref = DownloadRef(DownloadKind.TORRENT, "42")
+        repo.saveMetadataOverride(ref, MetadataOverride(null, "movie", "Picked Film", 123))
+        val (reloaded, _) = repository(FakeHttpTransport(), prefs = prefs)
+        assertEquals(MetadataOverride(null, "movie", "Picked Film", 123), reloaded.loadMetadataOverride(ref))
+    }
+
+    @Test
+    fun `a legacy override without a TMDB key loads with a null TMDB id`() = runTest {
+        val prefs = FakeSharedPreferences()
+        prefs.edit()
+            .putString("metadata_override_TORRENT:42:imdb", "tt0000002")
+            .putString("metadata_override_TORRENT:42:type", "movie")
+            .putString("metadata_override_TORRENT:42:title", "Picked Film")
+            .apply()
+        val (repo, _) = repository(FakeHttpTransport(), prefs = prefs)
+        assertEquals(
+            MetadataOverride("tt0000002", "movie", "Picked Film", null),
+            repo.loadMetadataOverride(DownloadRef(DownloadKind.TORRENT, "42")),
+        )
+    }
+
+    @Test
     fun `metadata overrides are independent per kind for the same id`() = runTest {
         val (repo, _) = repository(FakeHttpTransport())
         val torrent = DownloadRef(DownloadKind.TORRENT, "42")

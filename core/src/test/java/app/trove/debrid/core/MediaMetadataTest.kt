@@ -1001,4 +1001,82 @@ class MediaMetadataTest {
         }
     }
 
+    @Test fun `candidates falls back to TMDB when Cinemeta lists nothing`() = runBlocking {
+        val cinemeta = CinemetaTransport().apply { catalog = """{"metas":[]}""" }
+        val calls = mutableListOf<HttpRequest>()
+        val resolver = CinemetaResolver(cinemeta, tmdbResolver = TmdbResolver(tmdbTransport(calls)) { "key" })
+        assertEquals(
+            listOf(MediaCandidate(null, "Example Film", 2026, "movie", tmdbId = 123)),
+            resolver.candidates(movieQuery),
+        )
+        assertTrue(calls.any { "/3/search/movie" in it.url })
+    }
+
+    @Test fun `candidates stays Cinemeta-only when Cinemeta lists anything`() = runBlocking {
+        val cinemeta = CinemetaTransport()
+        val calls = mutableListOf<HttpRequest>()
+        val resolver = CinemetaResolver(cinemeta, tmdbResolver = TmdbResolver(tmdbTransport(calls)) { "key" })
+        assertEquals(
+            listOf(MediaCandidate("tt0000001", "Example Film", 2026, "movie")),
+            resolver.candidates(movieQuery),
+        )
+        assertTrue(calls.isEmpty())
+    }
+
+    @Test fun `candidates is empty without a TMDB key when Cinemeta lists nothing`() = runBlocking {
+        val cinemeta = CinemetaTransport().apply { catalog = """{"metas":[]}""" }
+        val resolver = CinemetaResolver(cinemeta, tmdbResolver = TmdbResolver(tmdbTransport(mutableListOf())) { null })
+        assertTrue(resolver.candidates(movieQuery).isEmpty())
+        assertFalse(resolver.isTmdbConfigured())
+    }
+
+    @Test fun `resolveByTmdbId backfills from Cinemeta with a verified IMDb id`() = runBlocking {
+        val resolver = CinemetaResolver(
+            CinemetaTransport(),
+            tmdbResolver = TmdbResolver(primaryTransport(imdbId = "tt0000001")) { "key" },
+        )
+        val result = resolver.resolveByTmdbId(123, "movie")
+        assertEquals("Example Film", result?.title)
+        assertEquals("tt0000001", result?.imdbId)
+        // The backfill adds only the alternate poster here, so the
+        // shared merge keeps the TMDB provenance — exactly as the
+        // automatic TMDB-first path does for the same fixture.
+        assertEquals(EnrichmentProvenance.TMDB, result?.provenance)
+        assertEquals("https://images.example.invalid/t/p/w342/d.jpg", result?.posterUrl)
+        assertEquals("https://images.example.invalid/poster.jpg", result?.alternatePosterUrl)
+
+        // When the backfill adds more than the alternate poster — an
+        // IMDb rating here — the merge records the backfill provenance.
+        val rated = CinemetaResolver(
+            CinemetaTransport().apply {
+                meta = """{"meta":{"id":"tt0000001","name":"Example Film","year":2026,"type":"movie",
+                    "poster":"https://images.example.invalid/alternate.jpg","imdbRating":"8.3"}}"""
+            },
+            tmdbResolver = TmdbResolver(primaryTransport(imdbId = "tt0000001")) { "key" },
+        )
+        val enriched = rated.resolveByTmdbId(123, "movie")
+        assertEquals(EnrichmentProvenance.TMDB_CINEMETA_BACKFILL, enriched?.provenance)
+        assertEquals(8.3, enriched?.imdbRating)
+        assertEquals("https://images.example.invalid/alternate.jpg", enriched?.alternatePosterUrl)
+    }
+
+    @Test fun `resolveByTmdbId serves TMDB as-is without a verified IMDb id`() = runBlocking {
+        val resolver = CinemetaResolver(
+            CinemetaTransport(),
+            tmdbResolver = TmdbResolver(primaryTransport()) { "key" },
+        )
+        val result = resolver.resolveByTmdbId(123, "movie")
+        assertNull(result?.imdbId)
+        assertEquals(EnrichmentProvenance.TMDB, result?.provenance)
+        assertEquals("Fallback hit.", result?.overview)
+    }
+
+    @Test fun `resolveByTmdbId is null without a key`() = runBlocking {
+        val resolver = CinemetaResolver(
+            CinemetaTransport(),
+            tmdbResolver = TmdbResolver(primaryTransport()) { null },
+        )
+        assertNull(resolver.resolveByTmdbId(123, "movie"))
+    }
+
 }

@@ -424,6 +424,46 @@ class DownloadsMetadataTest {
         assertEquals("tt0000002", vm.state.value.metadataOverrides[key]?.imdbId)
     }
 
+    @Test fun `picking a TMDB candidate stores the TMDB override and shows the picked title`() = runTest {
+        val row = sampleDownload().copy(name = "Example Film.2026.1080p.mkv")
+        val key = DownloadKind.TORRENT to row.id
+        val candidate = MediaCandidate(null, "Example Film", 2026, "movie", tmdbId = 123)
+        val repo = FakeRepository(provider = FakeProvider(downloads = mutableListOf(row))).apply {
+            candidatesByQuery = { listOf(candidate) }
+            metadataByTmdbId = mapOf(123 to "movie" to MediaMetadata("Example Film", 2026, "movie", imdbId = "tt0000002"))
+        }
+        val vm = viewModel(repo)
+        advanceUntilIdle()
+        vm.openDownload(row)
+        advanceUntilIdle()
+        vm.pickCandidate(row, candidate)
+        advanceUntilIdle()
+        assertEquals(MetadataOverride(null, "movie", "Example Film", 123), repo.savedMetadataOverrides[key])
+        assertEquals("Example Film", vm.state.value.metadata[key]?.title)
+        assertEquals(123, vm.state.value.metadataOverrides[key]?.tmdbId)
+    }
+
+    @Test fun `hydration applies a stored TMDB override so the card shows the picked title`() = runTest {
+        val row = sampleDownload().copy(name = "Example Film.2026.1080p.mkv")
+        val key = DownloadKind.TORRENT to row.id
+        val repo = FakeRepository(provider = FakeProvider(downloads = mutableListOf(row))).apply {
+            metadataByTmdbId = mapOf(123 to "movie" to MediaMetadata("Example Film", 2026, "movie", imdbId = "tt0000002"))
+            savedMetadataOverrides[key] = MetadataOverride(null, "movie", "Example Film", 123)
+        }
+        val vm = viewModel(repo)
+        advanceUntilIdle()
+        assertEquals("Example Film", vm.state.value.metadata[key]?.title)
+        assertEquals(123, vm.state.value.metadataOverrides[key]?.tmdbId)
+        assertEquals(EnrichmentProvenance.CINEMETA, vm.state.value.enrichment[key])
+    }
+
+    @Test fun `tmdbConfigured reflects the repository key state`() = runTest {
+        val repo = FakeRepository().apply { tmdbConfigured = true }
+        val vm = viewModel(repo)
+        advanceUntilIdle()
+        assertTrue(vm.state.value.tmdbConfigured)
+    }
+
     @Test fun `clearing an override restores the parsed title and reloads candidates`() = runTest {
         val row = sampleDownload().copy(name = "Example Film.2026.1080p.mkv")
         val key = DownloadKind.TORRENT to row.id
