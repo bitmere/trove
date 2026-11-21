@@ -189,6 +189,11 @@ class DebridRepository(
     override suspend fun resolveMetadataById(imdbId: String, type: String) =
         withContext(ioDispatcher) { metadataResolver.resolveById(imdbId, type) }
 
+    override suspend fun resolveMetadataByTmdbId(tmdbId: Int, type: String) =
+        withContext(ioDispatcher) { metadataResolver.resolveByTmdbId(tmdbId, type) }
+
+    override fun isTmdbConfigured(): Boolean = metadataResolver.isTmdbConfigured()
+
     override suspend fun loadMetadataOverride(ref: DownloadRef) =
         preferences.loadMetadataOverride(ref)
 

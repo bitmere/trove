@@ -509,8 +509,8 @@ fun DownloadsScreen(
         val error = state.error
         val provenance = state.enrichment[key] ?: metadata?.provenance
         val posterUrl = state.posterUrl(key)
-        val details = remember(metadata, candidates, hasOverride, resolving, playPending, resolvingFileId, error, provenance, posterUrl) {
-            DownloadDetailsState(metadata, candidates, hasOverride, resolving, playPending, resolvingFileId, error, provenance, posterUrl)
+        val details = remember(metadata, candidates, hasOverride, resolving, playPending, resolvingFileId, error, provenance, posterUrl, state.tmdbConfigured) {
+            DownloadDetailsState(metadata, candidates, hasOverride, resolving, playPending, resolvingFileId, error, provenance, posterUrl, state.tmdbConfigured)
         }
         DownloadDetailsSheet(
             download = download, state = details, sheetState = detailsSheetState,

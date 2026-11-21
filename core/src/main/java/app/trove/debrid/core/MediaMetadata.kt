@@ -73,8 +73,10 @@ data class MediaQuery(val title: String, val year: Int?, val type: String?)
 data class ReleaseDetails(val episode: String?, val quality: String?)
 
 /** One title the user can pick when the automatic match fails. The
- *  automatic gate stays strict: a candidate list is never auto-applied. */
-data class MediaCandidate(val imdbId: String, val title: String, val year: Int?, val type: String)
+ *  automatic gate stays strict: a candidate list is never auto-applied.
+ *  Exactly one of [imdbId] / [tmdbId] is present; [tmdbId] set means
+ *  the candidate came from TMDB, otherwise from Cinemeta. */
+data class MediaCandidate(val imdbId: String?, val title: String, val year: Int?, val type: String, val tmdbId: Int? = null)
 
 private val extension = Regex("\\.(mkv|mp4|avi|mov|webm|m4v|ts|torrent|nzb)$", RegexOption.IGNORE_CASE)
 private val yearToken = Regex("(?<!\\d)(19\\d{2}|20\\d{2})(?!\\d)")
@@ -294,6 +296,10 @@ class CinemetaResolver(
 
     private fun validQuery(query: MediaQuery): Boolean = query.title.isNotBlank() && query.title.length <= 160
 
+    /** Whether a TMDB key is configured, so the sheet can hint at
+     *  it when no candidate was found. */
+    fun isTmdbConfigured(): Boolean = tmdbResolver?.configuredKey() != null
+
     private suspend fun lookupAndStore(
         queries: List<MediaQuery>,
         key: MediaQuery,
@@ -321,40 +327,9 @@ class CinemetaResolver(
             }
         } else null
 
-        val primaryId = primary?.imdbId
-        val primaryType = primary?.type
         val resolved = if (primary != null) {
-            val backfill = if (primaryId != null && primaryType != null) {
-                primary.posterUrl?.let { onPoster(it) }
-                lookupSafely { lookupById(primaryId, primaryType) }
-            } else null
-            val enriched = if (backfill == null) {
-                primary
-            } else {
-                val combined = primary.copy(
-                    year = primary.year ?: backfill.year,
-                    posterUrl = primary.posterUrl ?: backfill.posterUrl,
-                    alternatePosterUrl = backfill.posterUrl?.takeIf {
-                        primary.posterUrl != null && primary.posterUrl != it
-                    },
-                    overview = primary.overview ?: backfill.overview,
-                    genres = primary.genres.ifEmpty { backfill.genres },
-                    cast = primary.cast.ifEmpty { backfill.cast },
-                    director = primary.director ?: backfill.director,
-                    runtime = primary.runtime ?: backfill.runtime,
-                    imdbRating = backfill.imdbRating,
-                    episodes = backfill.episodes,
-                )
-                if (combined.copy(alternatePosterUrl = null) == primary) combined else combined.copy(
-                    provenance = EnrichmentProvenance.TMDB_CINEMETA_BACKFILL,
-                )
-            }
-            val artwork = if (enriched.posterUrl == null) {
-                lookupSafely { lookup(artworkQuery(query, primary), exactYear = true) }?.posterUrl
-            } else null
-            if (artwork == null) enriched else enriched.copy(
-                posterUrl = artwork, provenance = EnrichmentProvenance.TMDB_CINEMETA_POSTER,
-            )
+            if (primary.imdbId != null && primary.type != null) primary.posterUrl?.let { onPoster(it) }
+            mergeTmdbPrimary(primary, query) { block -> lookupSafely(block) }
         } else {
             val cinemeta = incomplete ?: lookupSafely {
                 queries.firstNotNullOfOrNull { if (validQuery(it)) lookup(it) else null }
@@ -467,15 +442,20 @@ class CinemetaResolver(
     /** Title matches for the user to pick from when the automatic match
      *  fails (ambiguous or no-match). Reuses the catalog fetch the
      *  resolver already does — no new network call per candidate — and
-     *  never resolves anything itself. */
+     *  never resolves anything itself. When Cinemeta lists nothing
+     *  and a TMDB key is configured, TMDB is asked for the same
+     *  title instead; a Cinemeta transport failure still propagates
+     *  as today and is never masked by the fallback. */
     suspend fun candidates(query: MediaQuery): List<MediaCandidate> = network.withPermit {
         if (query.title.isBlank() || query.title.length > 160) return@withPermit emptyList()
-        fetchTitleMatches(query).take(MAX_CANDIDATES).mapNotNull { obj ->
+        val cinemeta = fetchTitleMatches(query).take(MAX_CANDIDATES).mapNotNull { obj ->
             val id = obj.optString("id")?.takeIf { it.matches(imdbIdPattern) } ?: return@mapNotNull null
             val title = obj.optString("name")?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
             val type = obj.optString("type") ?: return@mapNotNull null
             MediaCandidate(id, title, mediaYear(obj), type)
         }
+        if (cinemeta.isNotEmpty()) return@withPermit cinemeta
+        tmdbResolver?.searchCandidates(query).orEmpty()
     }
 
     /** Detail for a user-picked candidate. Deliberately NOT stored in
@@ -491,6 +471,70 @@ class CinemetaResolver(
                 posterUrl = poster, provenance = EnrichmentProvenance.CINEMETA_TMDB_POSTER,
             )
         }
+
+    /** Detail for a user-picked TMDB candidate. Same per-download
+     *  rule as [resolveById]: never stored in the shared disk
+     *  cache. With a verified IMDb id the TMDB primary is backfilled
+     *  from Cinemeta exactly as the automatic TMDB-first path does;
+     *  without one the TMDB metadata is served as-is. */
+    suspend fun resolveByTmdbId(tmdbId: Int, type: String): MediaMetadata? =
+        network.withPermit {
+            val tmdb = tmdbResolver ?: return@withPermit null
+            val primary = tmdb.resolveByTmdbId(tmdbId, type) ?: return@withPermit null
+            mergeTmdbPrimary(primary, MediaQuery(primary.title, primary.year, type)) { block ->
+                try {
+                    block()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    null
+                }
+            }
+        }
+
+    /** TMDB-primary + Cinemeta-backfill merge, shared by the
+     *  automatic TMDB-first path and a user-picked TMDB candidate
+     *  so the two cannot drift. [lookupSafely] swallows a failed
+     *  backfill/artwork lookup; the automatic path also records it
+     *  for its retry TTL. */
+    private suspend fun mergeTmdbPrimary(
+        primary: MediaMetadata,
+        query: MediaQuery,
+        lookupSafely: suspend (suspend () -> MediaMetadata?) -> MediaMetadata?,
+    ): MediaMetadata {
+        val primaryId = primary.imdbId
+        val primaryType = primary.type
+        val backfill = if (primaryId != null && primaryType != null) {
+            lookupSafely { lookupById(primaryId, primaryType) }
+        } else null
+        val enriched = if (backfill == null) {
+            primary
+        } else {
+            val combined = primary.copy(
+                year = primary.year ?: backfill.year,
+                posterUrl = primary.posterUrl ?: backfill.posterUrl,
+                alternatePosterUrl = backfill.posterUrl?.takeIf {
+                    primary.posterUrl != null && primary.posterUrl != it
+                },
+                overview = primary.overview ?: backfill.overview,
+                genres = primary.genres.ifEmpty { backfill.genres },
+                cast = primary.cast.ifEmpty { backfill.cast },
+                director = primary.director ?: backfill.director,
+                runtime = primary.runtime ?: backfill.runtime,
+                imdbRating = backfill.imdbRating,
+                episodes = backfill.episodes,
+            )
+            if (combined.copy(alternatePosterUrl = null) == primary) combined else combined.copy(
+                provenance = EnrichmentProvenance.TMDB_CINEMETA_BACKFILL,
+            )
+        }
+        val artwork = if (enriched.posterUrl == null) {
+            lookupSafely { lookup(artworkQuery(query, primary), exactYear = true) }?.posterUrl
+        } else null
+        return if (artwork == null) enriched else enriched.copy(
+            posterUrl = artwork, provenance = EnrichmentProvenance.TMDB_CINEMETA_POSTER,
+        )
+    }
 
     private suspend fun lookupById(imdbId: String, type: String): MediaMetadata? {
         if (!imdbId.matches(imdbIdPattern) || type !in listOf("movie", "series")) return null

@@ -101,6 +101,8 @@ data class DownloadsUiState(
     val preferWords: List<String> = defaultPreferWords,
     /** When true the details sheet shows clutter files (.nfo, samples, covers). */
     val showClutterFiles: Boolean = false,
+    /** Whether a TMDB key is configured, for the picker's no-key hint. */
+    val tmdbConfigured: Boolean = false,
     val error: String? = null,
     val loadError: String? = null,
     val authenticationRequired: Boolean = false,
@@ -176,7 +178,8 @@ class DownloadsViewModel(
                     cancelRevalidationObservers()
                     _state.update {
                         it.copy(metadata = emptyMap(), enrichment = emptyMap(), pendingPosters = emptyMap(),
-                            metadataOverrides = emptyMap(), posterCooldowns = emptyMap())
+                            metadataOverrides = emptyMap(), posterCooldowns = emptyMap(),
+                            tmdbConfigured = repository.isTmdbConfigured())
                     }
                     val current = _state.value
                     enqueueHydration(current.pagedByTab[current.tab]?.loaded.orEmpty(), refreshVersion)
@@ -187,10 +190,12 @@ class DownloadsViewModel(
             val savedSort = repository.loadDownloadSort()
             val preferWords = repository.loadPreferWords()
             val showClutterFiles = repository.loadShowClutterFiles()
+            val tmdbConfigured = repository.isTmdbConfigured()
             val previous = _state.value
             _state.update {
                 it.copy(sort = if (sortChanged) it.sort else savedSort,
-                    preferWords = preferWords, showClutterFiles = showClutterFiles)
+                    preferWords = preferWords, showClutterFiles = showClutterFiles,
+                    tmdbConfigured = tmdbConfigured)
             }
             if (previous.sort != _state.value.sort || previous.preferWords != preferWords) {
                 schedulePreparation(debounced = searchDebouncePending)
@@ -795,7 +800,12 @@ class DownloadsViewModel(
                     var appliedOverride: MetadataOverride? = null
                     val result = lookupMetadata {
                         val override = storedOverride?.let { pick ->
-                            lookupMetadata { MetadataLookup.from(repository.resolveMetadataById(pick.imdbId, pick.type)) }.metadata
+                            lookupMetadata {
+                                MetadataLookup.from(
+                                    if (pick.tmdbId != null) repository.resolveMetadataByTmdbId(pick.tmdbId, pick.type)
+                                    else pick.imdbId?.let { repository.resolveMetadataById(it, pick.type) },
+                                )
+                            }.metadata
                         }
                         if (override != null) {
                             appliedOverride = storedOverride
@@ -955,7 +965,13 @@ class DownloadsViewModel(
                 catch (e: CancellationException) { throw e }
                 catch (_: Exception) { null }
             if (storedOverride != null) {
-                val metadata = try { repository.resolveMetadataById(storedOverride.imdbId, storedOverride.type) }
+                val metadata = try {
+                    if (storedOverride.tmdbId != null) {
+                        repository.resolveMetadataByTmdbId(storedOverride.tmdbId, storedOverride.type)
+                    } else {
+                        storedOverride.imdbId?.let { repository.resolveMetadataById(it, storedOverride.type) }
+                    }
+                }
                     catch (e: CancellationException) { throw e }
                     catch (_: Exception) { null }
                 ensureActive()
@@ -980,7 +996,10 @@ class DownloadsViewModel(
     /** Stores the user's pick for this download only, then shows the
      *  picked title. The pick is keyed by (kind, id). */
     fun pickCandidate(download: DebridDownload, candidate: MediaCandidate) {
-        changeMetadataOverride(download, MetadataOverride(candidate.imdbId, candidate.type, candidate.title))
+        changeMetadataOverride(
+            download,
+            MetadataOverride(candidate.imdbId, candidate.type, candidate.title, candidate.tmdbId),
+        )
     }
 
     fun clearMetadataOverride(download: DebridDownload) {
@@ -1014,7 +1033,10 @@ class DownloadsViewModel(
                     )
                 }
                 val result = lookupMetadata {
-                    if (pick != null) MetadataLookup.from(repository.resolveMetadataById(pick.imdbId, pick.type))
+                    if (pick != null) MetadataLookup.from(
+                        if (pick.tmdbId != null) repository.resolveMetadataByTmdbId(pick.tmdbId, pick.type)
+                        else pick.imdbId?.let { repository.resolveMetadataById(it, pick.type) },
+                    )
                     else repository.lookupMetadataForRelease(download.name)
                 }
                 ensureActive()

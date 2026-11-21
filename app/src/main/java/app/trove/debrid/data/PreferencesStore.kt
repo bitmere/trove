@@ -165,25 +165,34 @@ class PreferencesStore(
         }
     }
 
-    // One override is three plain-preference keys under
-    // "metadata_override_<kind>:<id>:" — an IMDb id is not a secret, so
+    // One override is four plain-preference keys under
+    // "metadata_override_<kind>:<id>:" — an id is not a secret, so
     // this stays out of the encrypted CredentialStore, and apart from
     // the metadata cache so clearing the cache never drops a pick.
+    // A legacy override has no tmdb key and loads with tmdbId null.
     private fun metadataOverrideKey(ref: DownloadRef, field: String) =
         "$KEY_METADATA_OVERRIDE_PREFIX${ref.kind.name}:${ref.id}:$field"
 
     suspend fun loadMetadataOverride(ref: DownloadRef) = withContext(ioDispatcher) {
         val imdbId = prefs.getString(metadataOverrideKey(ref, "imdb"), null)?.takeIf { it.isNotBlank() }
-            ?: return@withContext null
+        val tmdbId = prefs.getString(metadataOverrideKey(ref, "tmdb"), null)?.toIntOrNull()
         val type = prefs.getString(metadataOverrideKey(ref, "type"), null)?.takeIf { it.isNotBlank() }
             ?: return@withContext null
-        MetadataOverride(imdbId, type, prefs.getString(metadataOverrideKey(ref, "title"), null) ?: imdbId)
+        if (imdbId == null && tmdbId == null) return@withContext null
+        MetadataOverride(
+            imdbId, type,
+            prefs.getString(metadataOverrideKey(ref, "title"), null) ?: imdbId ?: "tmdb:$tmdbId",
+            tmdbId,
+        )
     }
 
     suspend fun saveMetadataOverride(ref: DownloadRef, pick: MetadataOverride) =
         withContext(ioDispatcher) {
             prefs.edit {
-                putString(metadataOverrideKey(ref, "imdb"), pick.imdbId)
+                if (pick.imdbId != null) putString(metadataOverrideKey(ref, "imdb"), pick.imdbId)
+                else remove(metadataOverrideKey(ref, "imdb"))
+                if (pick.tmdbId != null) putString(metadataOverrideKey(ref, "tmdb"), pick.tmdbId.toString())
+                else remove(metadataOverrideKey(ref, "tmdb"))
                 putString(metadataOverrideKey(ref, "type"), pick.type)
                 putString(metadataOverrideKey(ref, "title"), pick.title)
             }
@@ -192,6 +201,7 @@ class PreferencesStore(
     suspend fun clearMetadataOverride(ref: DownloadRef) = withContext(ioDispatcher) {
         prefs.edit {
             remove(metadataOverrideKey(ref, "imdb"))
+            remove(metadataOverrideKey(ref, "tmdb"))
             remove(metadataOverrideKey(ref, "type"))
             remove(metadataOverrideKey(ref, "title"))
         }

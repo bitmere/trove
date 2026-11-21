@@ -39,9 +39,50 @@ class TmdbResolver(
     private val now: () -> Long = System::currentTimeMillis,
     private val apiKey: () -> String?,
 ) {
+    /** Title matches for the picker when Cinemeta lists nothing.
+     *  Key required: no key means an empty list and zero TMDB
+     *  requests. Failures (including the 429 cooldown) mean an
+     *  empty list, never an exception. Results are in TMDB's
+     *  returned order (movies, then series) and capped at the
+     *  picker's [MAX_PICKER_CANDIDATES]. No year filter: the
+     *  picker shows all years and the user chooses. */
+    suspend fun searchCandidates(query: MediaQuery): List<MediaCandidate> {
+        val key = configuredKey() ?: return emptyList()
+        if (query.title.isBlank() || query.title.length > 160) return emptyList()
+        return try {
+            searchMatches(query, key).take(MAX_PICKER_CANDIDATES).mapNotNull { match ->
+                val title = match.displayTitle.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                MediaCandidate(null, title, match.year, match.hit.type, tmdbId = match.hit.tmdbId)
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    /** Detail for a known TMDB id, as picked from the picker list.
+     *  Fetches with `primary = true` so `external_ids` supplies a
+     *  verified IMDb id when TMDB knows one. Null when no key is
+     *  configured (no network call), for an invalid id/type, for a
+     *  detail id that does not match, or when any TMDB call fails. */
+    suspend fun resolveByTmdbId(tmdbId: Int, type: String): MediaMetadata? {
+        val key = configuredKey() ?: return null
+        if (tmdbId <= 0 || type !in listOf("movie", "series")) return null
+        return try {
+            detail(TmdbHit(tmdbId, type, null), null, imageConfig(key, primary = true), key, primary = true)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     private companion object {
         const val BASE_URL = "https://api.themoviedb.org"
         val imdbIdPattern = Regex("tt\\d+")
+        /** Same cap as the Cinemeta picker's MAX_CANDIDATES. */
+        const val MAX_PICKER_CANDIDATES = 5
     }
 
     private data class ImageConfig(val baseUrl: String, val posterSizes: List<String>)
@@ -55,6 +96,8 @@ class TmdbResolver(
         val language: String?,
         val popularity: Double?,
         val localizedTitleMatches: Boolean,
+        /** Display title as TMDB returned it (never the normalized form). */
+        val displayTitle: String,
     )
 
     private val configMutex = Mutex()
@@ -157,11 +200,15 @@ class TmdbResolver(
         }
     }
 
-    private suspend fun searchHit(query: MediaQuery, key: String, strict: Boolean = false): TmdbHit? {
+    /** Title matches in TMDB's returned order, across the query's
+     *  type (or movie + series when the type is unknown). The
+     *  caller decides what a match means — the strict single-hit
+     *  gate picks from these, the picker lists them. */
+    private suspend fun searchMatches(query: MediaQuery, key: String): List<SearchMatch> {
         val encoded = URLEncoder.encode(query.title, "UTF-8").replace("+", "%20")
         val titleKey = normalizedTitle(query.title)
         val types = query.type?.let { listOf(it) } ?: listOf("movie", "series")
-        val hits = types.flatMap { type ->
+        return types.flatMap { type ->
             val series = type == "series"
             val endpoint = if (series) "tv" else "movie"
             get("/3/search/$endpoint?query=$encoded", key)
@@ -175,9 +222,16 @@ class TmdbResolver(
                         obj.optString("original_language")?.takeIf { it.isNotBlank() },
                         obj.optString("popularity")?.toDoubleOrNull()?.takeIf { it.isFinite() },
                         localizedTitleMatches = title == titleKey,
+                        displayTitle = obj.optString(if (series) "name" else "title")
+                            ?.takeIf { it.isNotBlank() }
+                            ?: obj.optString(if (series) "original_name" else "original_title").orEmpty(),
                     )
                 }
         }.distinctBy { it.hit.tmdbId to it.hit.type }
+    }
+
+    private suspend fun searchHit(query: MediaQuery, key: String, strict: Boolean = false): TmdbHit? {
+        val hits = searchMatches(query, key)
         if (query.year == null) return hits.singleOrNull()?.hit
         if (strict) return hits.singleOrNull { it.year == query.year }?.hit
         val eligible = hits.filter { matchesYear(it.year, query.year, tolerance = 1) }

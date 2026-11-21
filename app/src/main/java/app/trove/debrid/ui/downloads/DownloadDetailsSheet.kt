@@ -40,6 +40,8 @@ internal data class DownloadDetailsState(
     val error: String?,
     val provenance: EnrichmentProvenance? = metadata?.provenance,
     val posterUrl: String? = metadata?.posterUrl,
+    /** Whether a TMDB key is configured, for the picker's no-key hint. */
+    val tmdbConfigured: Boolean = false,
 )
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
@@ -175,12 +177,20 @@ internal fun DownloadDetailsSheet(
                             candidate.year?.let { append(" ($it)") }
                             append(" · ")
                             append(typeWord)
+                            if (candidate.tmdbId != null) {
+                                append(" · ")
+                                append(stringResource(R.string.match_picker_tmdb))
+                            }
                         }
                         TextButton(onClick = { onPickCandidate(candidate) }, modifier = Modifier.fillMaxWidth()) {
                             Text(label, modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Start)
                         }
                     }
                 }
+            }
+            if (metadata == null && candidates.isEmpty() && !state.tmdbConfigured) item {
+                Text(stringResource(R.string.match_picker_no_key_hint), style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             item {
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(TroveSpace.small)) {

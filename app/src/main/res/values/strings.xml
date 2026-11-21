@@ -166,6 +166,8 @@
     <string name="cast_list">Cast: %1$s</string>
     <string name="match_picker_title">Which one is this?</string>
     <string name="match_picker_hint">Pick the right title. It applies to this download only.</string>
+    <string name="match_picker_tmdb">TMDB</string>
+    <string name="match_picker_no_key_hint">No match found. Add a TMDB key in Settings to search TMDB too.</string>
     <string name="clear_metadata_override">Clear match</string>
     <string name="episode_matched">Matched episode</string>
     <string name="episodes_count">Episodes (%1$d)</string>

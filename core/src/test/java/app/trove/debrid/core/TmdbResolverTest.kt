@@ -278,6 +278,53 @@ class TmdbResolverTest {
         assertNull(resolver(http).resolveById("tt0000001", "movie"))
     }
 
+    @Test fun `searchCandidates lists TMDB matches in returned order`() = runBlocking {
+        val http = FakeTmdb().apply {
+            searchMovieJson = """
+                {"results":[
+                {"id":1,"title":"Example Film","release_date":"2026-01-01","poster_path":"/a.jpg"},
+                {"id":2,"title":"Example Film","release_date":"2025-06-01","poster_path":"/b.jpg"}]}
+            """.trimIndent()
+            searchTvJson = """{"results":[]}"""
+        }
+        val candidates = resolver(http).searchCandidates(MediaQuery("Example Film", 2026, "movie"))
+        assertEquals(2, candidates.size)
+        assertEquals(MediaCandidate(null, "Example Film", 2026, "movie", tmdbId = 1), candidates[0])
+        assertEquals(MediaCandidate(null, "Example Film", 2025, "movie", tmdbId = 2), candidates[1])
+    }
+
+    @Test fun `searchCandidates is empty without a key and makes no requests`() = runBlocking {
+        val http = FakeTmdb()
+        assertTrue(resolver(http, apiKey = null).searchCandidates(MediaQuery("Example Film", 2026, "movie")).isEmpty())
+        assertTrue(http.requests.isEmpty())
+    }
+
+    @Test fun `resolveByTmdbId returns detail with a verified IMDb id`() = runBlocking {
+        val http = FakeTmdb().apply {
+            detailJson = """
+                {"id":123,"title":"Example Film","release_date":"2026-03-01","overview":"A synopsis.",
+                "genres":[{"name":"Drama"},{"name":"Mystery"}],"runtime":148,
+                "poster_path":"/detail.jpg","vote_average":7.5,
+                "external_ids":{"imdb_id":"tt0000001"}}
+            """.trimIndent()
+            creditsJson = movieCreditsJson
+        }
+        val result = resolver(http).resolveByTmdbId(123, "movie")
+        assertEquals("Example Film", result?.title)
+        assertEquals("tt0000001", result?.imdbId)
+        assertEquals("https://images.example.invalid/t/p/w185/detail.jpg", result?.posterUrl)
+        assertEquals(EnrichmentProvenance.TMDB, result?.provenance)
+        assertTrue(http.requests.any { it.url.endsWith("/3/movie/123?append_to_response=external_ids") })
+    }
+
+    @Test fun `resolveByTmdbId is null without a key or for an invalid id`() = runBlocking {
+        val http = FakeTmdb()
+        assertNull(resolver(http, apiKey = null).resolveByTmdbId(123, "movie"))
+        assertNull(resolver(http).resolveByTmdbId(0, "movie"))
+        assertNull(resolver(http).resolveByTmdbId(123, "bogus"))
+        assertTrue(http.requests.isEmpty())
+    }
+
     @Test fun `credit failures degrade instead of failing the resolve`() = runBlocking {
         val http = FakeTmdb().apply {
             findJson = findMovieJson
