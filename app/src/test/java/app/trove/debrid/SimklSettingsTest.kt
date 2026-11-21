@@ -58,6 +58,72 @@ class SimklSettingsTest {
         )
     }
 
+    @Test fun `saving a client id configures SIMKL and clears the field`() = runTest {
+        val repo = FakeRepository()
+        val vm = SettingsViewModel(repo)
+        advanceUntilIdle()
+        assertFalse(vm.state.value.simklConfigured)
+
+        vm.setSimklClientIdField("my-app-id")
+        assertEquals("my-app-id", vm.state.value.simklClientIdField)
+        vm.saveSimklClientId()
+        advanceUntilIdle()
+
+        assertTrue(vm.state.value.simklConfigured)
+        assertEquals("my-app-id", vm.state.value.simklClientId)
+        assertEquals("", vm.state.value.simklClientIdField)
+        assertTrue(vm.state.value.simklClientIdSaved)
+        assertFalse(vm.state.value.simklClientIdError)
+        assertEquals(1, repo.simklClientIdSaveCalls)
+    }
+
+    @Test fun `an empty client id is rejected without a save call`() = runTest {
+        val repo = FakeRepository()
+        val vm = SettingsViewModel(repo)
+        advanceUntilIdle()
+
+        vm.setSimklClientIdField("   ")
+        vm.saveSimklClientId()
+        advanceUntilIdle()
+
+        assertTrue(vm.state.value.simklClientIdError)
+        assertFalse(vm.state.value.simklClientIdSaved)
+        assertFalse(vm.state.value.simklConfigured)
+        assertEquals(0, repo.simklClientIdSaveCalls)
+    }
+
+    @Test fun `changing the client id signs the user out in state`() = runTest {
+        val repo = signedInRepo().apply { savedSimklClientId = "old-id" }
+        val vm = SettingsViewModel(repo)
+        advanceUntilIdle()
+        assertTrue(vm.state.value.simklSignedIn)
+
+        vm.setSimklClientIdField("new-id")
+        vm.saveSimklClientId()
+        advanceUntilIdle()
+
+        assertEquals("new-id", vm.state.value.simklClientId)
+        assertTrue(vm.state.value.simklConfigured)
+        assertFalse(vm.state.value.simklSignedIn)
+        assertNull(vm.state.value.simklUsername)
+        assertEquals(0, vm.state.value.simklEntryCount)
+    }
+
+    @Test fun `clearing the client id unconfigures SIMKL`() = runTest {
+        val repo = signedInRepo().apply { savedSimklClientId = "old-id" }
+        val vm = SettingsViewModel(repo)
+        advanceUntilIdle()
+        assertTrue(vm.state.value.simklConfigured)
+
+        vm.clearSimklClientId()
+        advanceUntilIdle()
+
+        assertFalse(vm.state.value.simklConfigured)
+        assertNull(vm.state.value.simklClientId)
+        assertFalse(vm.state.value.simklSignedIn)
+        assertEquals(1, repo.simklClientIdClearCalls)
+    }
+
     @Test fun `refresh loads the signed-in snapshot summary`() = runTest {
         val repo = signedInRepo()
         val vm = SettingsViewModel(repo)

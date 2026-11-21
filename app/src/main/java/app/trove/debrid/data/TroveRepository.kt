@@ -157,8 +157,20 @@ interface TroveRepository {
 
     // ---- SIMKL (read-only status badges) ----
 
-    /** Whether the SIMKL V2 app is registered (client id minted). */
+    /** Whether the SIMKL V2 app is registered (client id minted).
+     *  A client id saved in Settings configures it; otherwise the
+     *  compile-time placeholder leaves it unconfigured. */
     fun isSimklConfigured(): Boolean = false
+    /** The user's own SIMKL client id, or null when none is saved.
+     *  Public value; stored encrypted. */
+    fun simklClientId(): String? = null
+    /** Saves the user's own SIMKL client id, encrypted. A changed
+     *  id wipes tokens + the cached library; re-saving the same id
+     *  is a no-op. Blank ids are rejected. */
+    suspend fun saveSimklClientId(id: String) = Unit
+    /** Removes the saved SIMKL client id; also wipes tokens + the
+     *  cached library. Sign-out keeps the id. */
+    suspend fun clearSimklClientId() = Unit
     /** Whether SIMKL OAuth tokens are stored. */
     fun isSimklSignedIn(): Boolean = false
     /** Snapshot summary for Settings, or null when never synced. */

@@ -424,6 +424,61 @@ private fun LibraryContent(state: SettingsUiState, canEdit: Boolean, viewModel: 
 @Composable
 private fun SimklContent(state: SettingsUiState, canEdit: Boolean, viewModel: SettingsViewModel) {
     val context = androidx.compose.ui.platform.LocalContext.current
+    // The user's own SIMKL app client ID. Plain text: the ID is
+    // public, and it is stored encrypted on this device.
+    state.simklClientId?.let {
+        Text(
+            stringResource(R.string.simkl_saved_client_id, it),
+            style = MaterialTheme.typography.bodyMedium,
+        )
+    }
+    OutlinedTextField(
+        value = state.simklClientIdField,
+        onValueChange = viewModel::setSimklClientIdField,
+        label = { Text(stringResource(if (state.simklClientId != null) R.string.simkl_replace_client_id else R.string.simkl_client_id)) },
+        singleLine = true,
+        shape = MaterialTheme.shapes.medium,
+        enabled = canEdit && !state.savingSimklClientId && !state.simklSigningIn && !state.simklSyncing,
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text, autoCorrectEnabled = false),
+        modifier = Modifier.fillMaxWidth().testTag("simkl_client_id_field"),
+    )
+    Text(
+        stringResource(R.string.simkl_client_id_hint),
+        style = MaterialTheme.typography.bodyMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    Row(horizontalArrangement = Arrangement.spacedBy(TroveSpace.small)) {
+        Button(
+            onClick = viewModel::saveSimklClientId,
+            enabled = canEdit && !state.savingSimklClientId && !state.simklSigningIn && !state.simklSyncing &&
+                state.simklClientIdField.isNotBlank(),
+            modifier = Modifier.weight(1f),
+        ) {
+            if (state.savingSimklClientId) {
+                CircularProgressIndicator(
+                    Modifier.padding(end = TroveSpace.small).size(TroveSpace.page),
+                    color = LocalContentColor.current,
+                )
+            }
+            Text(stringResource(R.string.simkl_save_client_id))
+        }
+        if (state.simklClientId != null) {
+            OutlinedButton(
+                onClick = viewModel::clearSimklClientId,
+                enabled = canEdit && !state.savingSimklClientId && !state.simklSigningIn && !state.simklSyncing,
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+            ) {
+                Text(stringResource(R.string.clear))
+            }
+        }
+    }
+    if (state.simklClientIdSaved) {
+        Feedback(stringResource(R.string.simkl_client_id_saved))
+    }
+    if (state.simklClientIdError) {
+        Feedback(stringResource(R.string.simkl_client_id_failed), error = true)
+    }
+    HorizontalDivider()
     if (!state.simklConfigured) {
         Text(stringResource(R.string.simkl_not_registered), style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant)

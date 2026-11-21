@@ -120,6 +120,12 @@ data class SettingsUiState(
     val simklConfigured: Boolean = false,
     val simklSignedIn: Boolean = false,
     val simklUsername: String? = null,
+    /** The saved client ID, shown in plain text — it is public. */
+    val simklClientId: String? = null,
+    val simklClientIdField: String = "",
+    val savingSimklClientId: Boolean = false,
+    val simklClientIdError: Boolean = false,
+    val simklClientIdSaved: Boolean = false,
     val simklSigningIn: Boolean = false,
     /** The 8-char code the user types at simkl.com/pin. */
     val simklUserCode: String? = null,
@@ -483,6 +489,9 @@ class SettingsViewModel(
                 val simklInfo = withContext(accountDispatcher) {
                     repository.simklSnapshotInfo()
                 }
+                val simklClientId = withContext(accountDispatcher) {
+                    repository.simklClientId()
+                }
                 val torbox = accounts.firstOrNull { it.service == DebridService.TORBOX }
                 val realDebrid = accounts.firstOrNull { it.service == DebridService.REAL_DEBRID }
                 _state.update {
@@ -522,6 +531,7 @@ class SettingsViewModel(
                         simklConfigured = repository.isSimklConfigured(),
                         simklSignedIn = repository.isSimklSignedIn(),
                         simklUsername = simklInfo?.username,
+                        simklClientId = simklClientId,
                         simklEntryCount = simklInfo?.entryCount ?: 0,
                         simklLastCheckedMs = simklInfo?.lastCheckedMs,
                         simklLastSyncError = simklInfo?.lastFailure?.name,
@@ -877,6 +887,59 @@ class SettingsViewModel(
     /** Starts the SIMKL device/PIN flow: shows the 8-char code and
      *  polls until the user authorises, the code expires, or the
      *  user cancels. The code itself is never logged. */
+    fun setSimklClientIdField(text: String) {
+        _state.update { it.copy(simklClientIdField = text, simklClientIdSaved = false, simklClientIdError = false) }
+    }
+
+    /** Stores the user's own SIMKL client id. No live validation:
+     *  there is no endpoint that validates a client id without
+     *  starting a device flow, and the flow itself reports an
+     *  invalid client at sign-in. A changed ID wipes the tokens
+     *  and the cached library in the repository, so the state is
+     *  refreshed after the save. */
+    fun saveSimklClientId() {
+        val state = _state.value
+        if (backupBlocksEdits() || state.savingSimklClientId || state.simklSigningIn || state.simklSyncing) return
+        val id = state.simklClientIdField.trim()
+        if (id.isEmpty()) {
+            _state.update { it.copy(simklClientIdError = true) }
+            return
+        }
+        _state.update { it.copy(savingSimklClientId = true, simklClientIdError = false, simklClientIdSaved = false) }
+        viewModelScope.launch {
+            try {
+                repository.saveSimklClientId(id)
+                refresh()
+                _state.update { it.copy(simklClientIdField = "", simklClientIdSaved = true) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                _state.update { it.copy(simklClientIdError = true) }
+            } finally {
+                _state.update { it.copy(savingSimklClientId = false) }
+            }
+        }
+    }
+
+    fun clearSimklClientId() {
+        val state = _state.value
+        if (backupBlocksEdits() || state.savingSimklClientId || state.simklSigningIn || state.simklSyncing) return
+        _state.update { it.copy(savingSimklClientId = true, simklClientIdError = false, simklClientIdSaved = false) }
+        viewModelScope.launch {
+            try {
+                repository.clearSimklClientId()
+                refresh()
+                _state.update { it.copy(simklClientIdField = "", simklClientIdSaved = false) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                _state.update { it.copy(simklClientIdError = true) }
+            } finally {
+                _state.update { it.copy(savingSimklClientId = false) }
+            }
+        }
+    }
+
     fun startSimklSignIn() {
         if (!repository.isSimklConfigured() || _state.value.simklSigningIn) return
         simklSignInJob?.cancel()

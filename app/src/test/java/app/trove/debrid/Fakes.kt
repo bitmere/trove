@@ -397,6 +397,11 @@ open class FakeRepository(
     var simklConfigured: Boolean = false
     var simklSignedIn: Boolean = false
     var simklUsername: String? = null
+    /** The saved client ID. Mirrors production: saving a changed
+     *  ID wipes the sign-in state; sign-out keeps the ID. */
+    var savedSimklClientId: String? = null
+    var simklClientIdSaveCalls: Int = 0
+    var simklClientIdClearCalls: Int = 0
     var simklEntries: List<SimklEntry> = emptyList()
     var simklDeviceCode: SimklDeviceCode? = null
     var simklPollResult: SimklPollResult = SimklPollResult.Pending
@@ -410,6 +415,29 @@ open class FakeRepository(
 
     override fun isSimklConfigured(): Boolean = simklConfigured
     override fun isSimklSignedIn(): Boolean = simklSignedIn
+    override fun simklClientId(): String? = savedSimklClientId
+    override suspend fun saveSimklClientId(id: String) {
+        simklClientIdSaveCalls++
+        val trimmed = id.trim()
+        require(trimmed.isNotEmpty()) { "SIMKL client ID is empty" }
+        if (savedSimklClientId == trimmed) return
+        savedSimklClientId = trimmed
+        simklConfigured = true
+        // A changed ID wipes the grant minted under the old one.
+        simklSignedIn = false
+        simklEntries = emptyList()
+        simklUsername = null
+        simklChangesFlow.value++
+    }
+    override suspend fun clearSimklClientId() {
+        simklClientIdClearCalls++
+        savedSimklClientId = null
+        simklConfigured = false
+        simklSignedIn = false
+        simklEntries = emptyList()
+        simklUsername = null
+        simklChangesFlow.value++
+    }
     override suspend fun simklSnapshotInfo(): SimklSnapshotInfo? =
         if (simklEntries.isEmpty() && simklUsername == null) null
         else SimklSnapshotInfo(simklUsername, simklEntries.size, 1_700_000_000_000L, null)
