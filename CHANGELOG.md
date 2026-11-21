@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.33 — 2026-11-21
+
+- TMDB picker fallback (PR 52): when Cinemeta returns no matches, the details-sheet picker now falls back to a TMDB title search — TMDB rows are marked " · TMDB", and a TMDB pick resolves through TMDB detail with a verified IMDb id and Cinemeta backfill. With no TMDB key configured there are no TMDB requests, and the sheet shows a hint pointing at Settings.
+- SIMKL read-only status badges (PR 53): sign in with SIMKL via device/PIN (Auth V2, read-only scope) from the new SIMKL group in Settings; tokens are stored encrypted. Library rows show "SIMKL · Watching/Watchlist/Completed" badges linking to simkl.com, and the details sheet shows episode progress for shows. Sync is on-demand only — sheet open, pull-to-refresh, or Settings — never on a timer.
+- Note: SIMKL sign-in is inactive in this release — the SIMKL app is not yet registered, so sign-in shows a not-registered note and syncs are skipped until the client ID is in place.
+- Baseline: 705 JVM tests, lint 0 errors.
+
 ## 0.1.32 — 2026-11-21
 
 - List-vs-sheet enrichment gap (PR 48): rows that were never enriched are now re-enqueued instead of staying blank — snapshot restores, page-0 failures, scrolling, and refresh/sort/tab changes no longer drop them; opening the details sheet is no longer the only recovery. Failed poster loads retry, and TMDB-first titles with an IMDb id but no poster now fall through to the Cinemeta artwork search.
