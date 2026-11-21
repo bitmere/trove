@@ -289,8 +289,34 @@ class TmdbResolverTest {
         }
         val candidates = resolver(http).searchCandidates(MediaQuery("Example Film", 2026, "movie"))
         assertEquals(2, candidates.size)
-        assertEquals(MediaCandidate(null, "Example Film", 2026, "movie", tmdbId = 1), candidates[0])
-        assertEquals(MediaCandidate(null, "Example Film", 2025, "movie", tmdbId = 2), candidates[1])
+        assertEquals(MediaCandidate(null, "Example Film", 2026, "movie", tmdbId = 1,
+                    posterUrl = "https://images.example.invalid/t/p/w185/a.jpg"), candidates[0])
+        assertEquals(MediaCandidate(null, "Example Film", 2025, "movie", tmdbId = 2,
+                    posterUrl = "https://images.example.invalid/t/p/w185/b.jpg"), candidates[1])
+    }
+
+    @Test fun `searchCandidates preserves synopsis and missing artwork independently`() = runBlocking {
+        val http = FakeTmdb().apply {
+            searchTvJson = """{"results":[
+                {"id":1,"name":"Example Show","poster_path":"/a.jpg","overview":"First synopsis"},
+                {"id":2,"name":"Example Show","overview":"Second synopsis"},
+                {"id":3,"name":"Example Show","poster_path":"/b.jpg"},
+                {"id":4,"name":"Example Show","overview":" "}]}"""
+        }
+        val candidates = resolver(http).searchCandidates(MediaQuery("Example Show", null, "series"))
+        assertEquals(listOf("First synopsis", "Second synopsis", null, null), candidates.map { it.overview })
+        assertEquals(listOf("https://images.example.invalid/t/p/w185/a.jpg", null,
+            "https://images.example.invalid/t/p/w185/b.jpg", null), candidates.map { it.posterUrl })
+        assertEquals(1, http.requests.count { it.url.endsWith("/configuration") })
+    }
+
+    @Test fun `searchCandidates keeps titles and synopsis when configuration fails`() = runBlocking {
+        val http = FakeTmdb().apply {
+            configStatus = 503
+            searchMovieJson = """{"results":[{"id":1,"title":"Example Film","poster_path":"/a.jpg","overview":"Synopsis"}]}"""
+        }
+        assertEquals(listOf(MediaCandidate(null, "Example Film", null, "movie", tmdbId = 1,
+            overview = "Synopsis")), resolver(http).searchCandidates(MediaQuery("Example Film", null, "movie")))
     }
 
     @Test fun `searchCandidates is empty without a key and makes no requests`() = runBlocking {
@@ -389,7 +415,8 @@ class TmdbResolverTest {
         val result = resolver(http).searchManualLink("https://themoviedb.org/movie/123", null)
         assertEquals(
             ManualTmdbSearch.Found(listOf(
-                MediaCandidate(null, "Example Film", 2026, "movie", tmdbId = 123))),
+                MediaCandidate(null, "Example Film", 2026, "movie", tmdbId = 123,
+                    posterUrl = "https://images.example.invalid/t/p/w185/detail.jpg", overview = "A synopsis."))),
             result)
         assertTrue(http.requests.any { it.url.endsWith("/3/movie/123?append_to_response=external_ids") })
     }
@@ -410,7 +437,8 @@ class TmdbResolverTest {
         val result = resolver(http).searchManualLink("Example Film", "movie")
         assertEquals(
             ManualTmdbSearch.Found(listOf(
-                MediaCandidate(null, "Example Film", 2026, "movie", tmdbId = 1))),
+                MediaCandidate(null, "Example Film", 2026, "movie", tmdbId = 1,
+                    posterUrl = "https://images.example.invalid/t/p/w185/a.jpg"))),
             result)
     }
 

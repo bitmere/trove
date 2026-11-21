@@ -110,7 +110,7 @@ internal fun DownloadDetailsSheet(
     ) {
         val listInsets = WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Bottom)
         LazyColumn(
-            modifier = Modifier.fillMaxWidth().padding(listInsets.asPaddingValues()),
+            modifier = Modifier.fillMaxWidth().windowInsetsPadding(listInsets),
             contentPadding = PaddingValues(start = TroveSpace.large, end = TroveSpace.large, bottom = TroveSpace.section),
             verticalArrangement = Arrangement.spacedBy(TroveSpace.medium),
         ) {
@@ -213,21 +213,8 @@ internal fun DownloadDetailsSheet(
                     Text(stringResource(R.string.match_picker_hint), style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                     candidates.forEach { candidate ->
-                        val typeWord = stringResource(
-                            if (candidate.type == "series") R.string.media_series else R.string.media_movie)
-                        val label = buildString {
-                            append(candidate.title)
-                            candidate.year?.let { append(" ($it)") }
-                            append(" · ")
-                            append(typeWord)
-                            if (candidate.tmdbId != null) {
-                                append(" · ")
-                                append(stringResource(R.string.match_picker_tmdb))
-                            }
-                        }
-                        TextButton(onClick = { onPickCandidate(candidate) }, enabled = !state.resolvingOverride, modifier = Modifier.fillMaxWidth()) {
-                            Text(label, modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Start)
-                        }
+                        CandidateRow(candidate, enabled = !state.resolvingOverride,
+                            onClick = { onPickCandidate(candidate) })
                     }
                 }
             }
@@ -410,4 +397,29 @@ private fun EnrichmentProvenance.label(): Int = when (this) {
     EnrichmentProvenance.LEGACY_TMDB -> R.string.enrichment_tmdb_legacy
     EnrichmentProvenance.NO_MATCH -> R.string.enrichment_no_match
     EnrichmentProvenance.UNAVAILABLE -> R.string.enrichment_unavailable
+}
+
+@Composable
+internal fun CandidateRow(candidate: MediaCandidate, enabled: Boolean, onClick: () -> Unit) {
+    val poster = rememberPoster(candidate.posterUrl) {}
+    val typeWord = stringResource(if (candidate.type == "series") R.string.media_series else R.string.media_movie)
+    val facts = listOfNotNull(candidate.year?.toString(), typeWord,
+        if (candidate.tmdbId != null) stringResource(R.string.match_picker_tmdb) else null).joinToString(" · ")
+    TextButton(onClick = onClick, enabled = enabled, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(TroveSpace.medium),
+            verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.testTag("candidate_poster")) { MetadataPoster(poster.copy(onRetry = null), DpSize(56.dp, 84.dp)) }
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(TroveSpace.compact)) {
+                Text(candidate.title, style = MaterialTheme.typography.titleSmall,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(facts, style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                candidate.overview?.takeIf { it.isNotBlank() }?.let {
+                    Text(it, style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 2, overflow = TextOverflow.Ellipsis)
+                }
+            }
+        }
+    }
 }

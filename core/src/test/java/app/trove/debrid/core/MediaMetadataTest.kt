@@ -28,6 +28,20 @@ class MediaMetadataTest {
             throw AssertionError("Network must not run")
     }
 
+    @Test fun `candidate catalog preserves synopsis and missing artwork independently`() = runBlocking {
+        val http = CinemetaTransport().apply {
+            catalog = """{"metas":[
+                {"id":"tt1","name":"Example Film","type":"movie","poster":"https://images.example.invalid/a.jpg","description":"First synopsis"},
+                {"id":"tt2","name":"Example Film","type":"movie","description":"Second synopsis"},
+                {"id":"tt3","name":"Example Film","type":"movie","poster":"https://images.example.invalid/b.jpg"},
+                {"id":"tt4","name":"Example Film","type":"movie","description":" "}]}"""
+        }
+        val candidates = CinemetaResolver(http).candidates(movieQuery)
+        assertEquals(listOf("First synopsis", "Second synopsis", null, null), candidates.map { it.overview })
+        assertEquals(listOf("https://images.example.invalid/a.jpg", null,
+            "https://images.example.invalid/b.jpg", null), candidates.map { it.posterUrl })
+    }
+
     @Test fun `parses release titles years and tags`() {
         assertEquals(MediaQuery("Baththa", 2026, null), parseMediaName("Baththa.2026.1080p.WEB-Rip.HEVC-GROUP.mkv"))
         assertEquals(MediaQuery("Baahubali The Beginning", 2015, null),
@@ -1006,7 +1020,9 @@ class MediaMetadataTest {
         val calls = mutableListOf<HttpRequest>()
         val resolver = CinemetaResolver(cinemeta, tmdbResolver = TmdbResolver(tmdbTransport(calls)) { "key" })
         assertEquals(
-            listOf(MediaCandidate(null, "Example Film", 2026, "movie", tmdbId = 123)),
+            listOf(MediaCandidate(null, "Example Film", 2026, "movie", tmdbId = 123,
+                posterUrl = "https://images.example.invalid/t/p/w342/s.jpg",
+                overview = "Fallback hit.")),
             resolver.candidates(movieQuery),
         )
         assertTrue(calls.any { "/3/search/movie" in it.url })

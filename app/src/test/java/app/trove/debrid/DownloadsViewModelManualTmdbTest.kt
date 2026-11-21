@@ -36,8 +36,10 @@ class DownloadsViewModelManualTmdbTest {
 
     private val row = sampleDownload()
     private val key = DownloadKind.TORRENT to "11"
-    private val auto = MediaCandidate("tt0000001", "Auto Film", 2024, "movie")
-    private val manual = MediaCandidate(null, "Manual Film", 2026, "movie", tmdbId = 123)
+    private val auto = MediaCandidate("tt0000001", "Auto Film", 2024, "movie",
+        posterUrl = "https://images.example.invalid/auto.jpg", overview = "Automatic synopsis")
+    private val manual = MediaCandidate(null, "Manual Film", 2026, "movie", tmdbId = 123,
+        posterUrl = "https://images.example.invalid/manual.jpg", overview = "Manual synopsis")
 
     private fun repoWith(autoCandidates: List<MediaCandidate> = listOf(auto)): FakeRepository {
         val repo = FakeRepository(provider = FakeProvider(downloads = mutableListOf(row)))
