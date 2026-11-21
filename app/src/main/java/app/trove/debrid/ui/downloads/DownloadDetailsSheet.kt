@@ -256,6 +256,10 @@ internal fun DownloadDetailsSheet(
                         if (searching) CircularProgressIndicator(Modifier.size(24.dp))
                     }
                     when (state.manualTmdbSearch) {
+                        ManualTmdbSearchStatus.FOUND -> Text(
+                            stringResource(R.string.match_picker_manual_found),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
                         ManualTmdbSearchStatus.NO_MATCH -> Text(
                             stringResource(R.string.match_picker_manual_no_match),
                             style = MaterialTheme.typography.bodyMedium,

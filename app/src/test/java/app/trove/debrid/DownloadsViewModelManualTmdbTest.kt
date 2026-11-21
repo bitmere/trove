@@ -6,12 +6,14 @@ import app.trove.debrid.core.MediaCandidate
 import app.trove.debrid.data.TroveRepository
 import app.trove.debrid.ui.downloads.DownloadsViewModel
 import app.trove.debrid.ui.downloads.ManualTmdbSearchStatus
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.junit.After
@@ -59,7 +61,7 @@ class DownloadsViewModelManualTmdbTest {
         vm.searchManualTmdbLink(row, "https://themoviedb.org/movie/123")
         advanceUntilIdle()
         assertEquals(listOf(manual), vm.state.value.candidates[key])
-        assertNull(vm.state.value.manualTmdbSearch[key])
+        assertEquals(ManualTmdbSearchStatus.FOUND, vm.state.value.manualTmdbSearch[key])
         // "Dune Part Two 2024" parses with no media type, so the
         // fallback type is null.
         assertEquals(listOf("https://themoviedb.org/movie/123" to null), repo.manualTmdbInputs)
@@ -75,7 +77,7 @@ class DownloadsViewModelManualTmdbTest {
         assertEquals(ManualTmdbSearchStatus.SEARCHING, vm.state.value.manualTmdbSearch[key])
         advanceUntilIdle()
         assertEquals(listOf(manual), vm.state.value.candidates[key])
-        assertNull(vm.state.value.manualTmdbSearch[key])
+        assertEquals(ManualTmdbSearchStatus.FOUND, vm.state.value.manualTmdbSearch[key])
     }
 
     @Test fun `invalid input sets INVALID and keeps the candidates`() = runTest {
@@ -110,5 +112,63 @@ class DownloadsViewModelManualTmdbTest {
         advanceUntilIdle()
         assertTrue(repo.manualTmdbInputs.isEmpty())
         assertTrue(vm.state.value.manualTmdbSearch.isEmpty())
+    }
+
+    @Test fun `late automatic load does not overwrite a manual search`() = runTest {
+        val repo = repoWith()
+        repo.manualTmdbResult = ManualTmdbSearch.Found(listOf(manual))
+        val deferred = CompletableDeferred<List<MediaCandidate>>()
+        repo.candidatesDeferred = deferred
+        val vm = viewModel(repo)
+        advanceUntilIdle()
+        // Open the sheet and let the automatic load start, suspended
+        // on the deferred; the manual search then takes ownership.
+        vm.openDownload(row)
+        runCurrent()
+        vm.searchManualTmdbLink(row, "https://themoviedb.org/movie/123")
+        advanceUntilIdle()
+        assertEquals(listOf(manual), vm.state.value.candidates[key])
+        assertEquals(ManualTmdbSearchStatus.FOUND, vm.state.value.manualTmdbSearch[key])
+        // The automatic load finishing late must not clobber it.
+        deferred.complete(listOf(auto))
+        advanceUntilIdle()
+        assertEquals(listOf(manual), vm.state.value.candidates[key])
+        assertEquals(ManualTmdbSearchStatus.FOUND, vm.state.value.manualTmdbSearch[key])
+    }
+
+    @Test fun `dismissing mid-search leaves no stale searching state`() = runTest {
+        val repo = repoWith()
+        repo.manualTmdbResult = ManualTmdbSearch.Found(listOf(manual))
+        val vm = viewModel(repo)
+        advanceUntilIdle()
+        openSheet(vm)
+        vm.searchManualTmdbLink(row, "https://themoviedb.org/movie/123")
+        assertEquals(ManualTmdbSearchStatus.SEARCHING, vm.state.value.manualTmdbSearch[key])
+        vm.dismissFilePicker()
+        advanceUntilIdle()
+        assertNull(vm.state.value.manualTmdbSearch[key])
+        // The dismissed search never ran its lookup.
+        assertTrue(repo.manualTmdbInputs.isEmpty())
+        // Reopening the same download starts clean: a new search is
+        // accepted and its results publish.
+        openSheet(vm)
+        assertNull(vm.state.value.manualTmdbSearch[key])
+        vm.searchManualTmdbLink(row, "https://themoviedb.org/movie/123")
+        advanceUntilIdle()
+        assertEquals(listOf(manual), vm.state.value.candidates[key])
+        assertEquals(ManualTmdbSearchStatus.FOUND, vm.state.value.manualTmdbSearch[key])
+    }
+
+    @Test fun `manual search completing after delete clears its status`() = runTest {
+        val repo = repoWith()
+        repo.manualTmdbResult = ManualTmdbSearch.Found(listOf(manual))
+        val vm = viewModel(repo)
+        advanceUntilIdle()
+        openSheet(vm)
+        vm.searchManualTmdbLink(row, "https://themoviedb.org/movie/123")
+        assertEquals(ManualTmdbSearchStatus.SEARCHING, vm.state.value.manualTmdbSearch[key])
+        vm.requestDelete(row)
+        advanceUntilIdle()
+        assertNull(vm.state.value.manualTmdbSearch[key])
     }
 }
