@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.39 — 2026-11-22
+
+- Partial titles in manual TMDB search (PR 71): typing a partial title (e.g. "pushpa") now also matches titles starting with it (minimum 3 letters), so "Pushpa: The Rise" and "Pushpa 2: The Rule" appear instead of "No TMDB match". The automatic picker gate stays exact.
+- Baseline: 750 JVM tests, lint 0 errors.
+
 ## 0.1.38 — 2026-11-22
 
 - Blank details sheet with keyboard open (PR 68): the details sheet's list now uses inset-aware padding, so opening the keyboard no longer collapses the sheet to blank — the title, manual field, Search button and results stay visible while typing. Picker rows now show a poster and a two-line synopsis, so same-name matches (e.g. five "The Odyssey" results) can be told apart. Cleanup: the old inline row renderer was removed, superseded by the new row; no other dead code was found in the touched files.
