@@ -1028,6 +1028,14 @@ class MediaMetadataTest {
         assertTrue(calls.any { "/3/search/movie" in it.url })
     }
 
+    @Test fun `automatic picker keeps the exact gate for a partial title`() = runBlocking {
+        val cinemeta = CinemetaTransport().apply { catalog = """{"metas":[]}""" }
+        val calls = mutableListOf<HttpRequest>()
+        val resolver = CinemetaResolver(cinemeta, tmdbResolver = TmdbResolver(tmdbTransport(calls)) { "test-key" })
+        assertTrue(resolver.candidates(MediaQuery("Example", null, "movie")).isEmpty())
+        assertTrue(calls.any { "/3/search/movie" in it.url })
+    }
+
     @Test fun `candidates stays Cinemeta-only when Cinemeta lists anything`() = runBlocking {
         val cinemeta = CinemetaTransport()
         val calls = mutableListOf<HttpRequest>()
