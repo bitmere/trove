@@ -21,6 +21,7 @@ import app.trove.debrid.data.MetadataOverride
 import app.trove.debrid.data.TroveRepository
 import app.trove.debrid.data.defaultPreferWords
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -153,6 +154,8 @@ class DownloadsViewModel(
     companion object {
         /** Rows per viewport append (Step 2). */
         const val PAGE_SIZE = 100
+        // TorBox Get Torrent List documents information updates every 600 seconds.
+        const val HEAD_REVALIDATION_INTERVAL_MS = 600_000L
     }
 
     private val _state = MutableStateFlow(DownloadsUiState())
@@ -160,6 +163,9 @@ class DownloadsViewModel(
 
     private var refreshJob: Job? = null
     private var refreshVersion = 0
+    private var generationBypass = false
+    private val lastHeadValidation = mutableMapOf<DownloadKind, Long>()
+    private val failedPages = mutableMapOf<DownloadKind, Pair<Int, Boolean>>()
     private var missBypassVersion: Int? = null
     private var hydrationJob: Job? = null
     private var revalidationObservers: Job? = null
@@ -243,8 +249,8 @@ class DownloadsViewModel(
      *  `() -> Unit` for `viewModel::refresh` references.
      *
      *  A refresh resets pagination to page 0 for every tab (offsets
-     *  to 0, end-reached cleared) and reloads page 0 of the visible
-     *  tab only; other tabs reload page 0 on first visit. Loaded rows
+     *  to 0, end-reached cleared). Fresh refreshes traverse the visible
+     *  tab; other tabs reload page 0 on first visit. Loaded rows
      *  stay visible until page 0 replaces them. */
     fun refresh(showIndicator: Boolean = true, fresh: Boolean) =
         refreshLibrary(showIndicator, fresh, restoreSnapshot = false)
@@ -265,6 +271,8 @@ class DownloadsViewModel(
         fullSyncJob?.cancel()
         fullSyncTab = null
         val version = ++refreshVersion
+        generationBypass = fresh
+        failedPages.clear()
         missBypassVersion = version.takeIf { bypassMetadataMiss }
         // Set feedback synchronously, then do all account/Keystore reads in
         // the repository's suspending IO path, after construction can return.
@@ -286,6 +294,7 @@ class DownloadsViewModel(
                 val restored = provider != null && snapshot != null && restoreLibrary(provider, snapshot)
                 val accountLabel = connection.account?.label?.substringAfter('(')?.trimEnd(')')
                 if (libraryProvider !== provider) {
+                    lastHeadValidation.clear()
                     if (libraryProvider != null) missBypassVersion = null
                     cancelHydration()
                     cancelRevalidationObservers()
@@ -325,7 +334,7 @@ class DownloadsViewModel(
                 _state.update { it.copy(signedOut = false, accountLabel = accountLabel) }
                 if (!restored) resetPagination(keepRows = true, currentTab = _state.value.tab)
                 launchPage(provider, _state.value.tab, offset = 0, bypassCache = fresh,
-                    version = version, replace = true)
+                    version = version, replace = true, traverse = fresh)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -441,6 +450,8 @@ class DownloadsViewModel(
         fullSyncJob?.cancel()
         fullSyncTab = null
         ++refreshVersion
+        generationBypass = false
+        failedPages.clear()
         cachedTabs.clear()
         _state.update { it.copy(sort = sort, pendingAnchor = null) }
         resetPagination(keepRows = true, currentTab = _state.value.tab)
@@ -472,19 +483,37 @@ class DownloadsViewModel(
     fun loadNextPage(tab: DownloadKind = _state.value.tab) {
         val provider = libraryProvider ?: return
         val current = _state.value.pagedByTab[tab] ?: PagedTabState()
-        if (current.pageLoading) return
+        if (current.pageLoading || current.pageError != null) return
         if (tab in cachedTabs) {
-            launchPage(provider, tab, offset = 0, bypassCache = false,
+            launchPage(provider, tab, offset = 0, bypassCache = generationBypass,
                 version = refreshVersion, replace = true)
             return
         }
         if (current.endReached) return
-        launchPage(provider, tab, offset = current.nextOffset, bypassCache = false,
+        launchPage(provider, tab, offset = current.nextOffset, bypassCache = generationBypass,
             version = refreshVersion, replace = false)
     }
 
     /** Re-requests only the failed page of [tab]. */
-    fun retryPage(tab: DownloadKind = _state.value.tab) = loadNextPage(tab)
+    fun retryPage(tab: DownloadKind = _state.value.tab) {
+        val provider = libraryProvider ?: return
+        if (_state.value.pagedByTab[tab]?.pageLoading == true) return
+        val failed = failedPages[tab] ?: return
+        launchPage(provider, tab, failed.first, failed.first == 0 || failed.second,
+            refreshVersion, replace = failed.first == 0, traverse = generationBypass)
+    }
+
+    fun onForeground() = revalidateHead(_state.value.tab)
+
+    private fun revalidateHead(tab: DownloadKind) {
+        val provider = libraryProvider ?: return
+        val state = _state.value
+        if (state.signedOut || state.loading || state.refreshing || refreshJob?.isActive == true ||
+            fullSyncJob?.isActive == true || state.pagedByTab.values.any { it.pageLoading }) return
+        val last = lastHeadValidation[tab]
+        if (last != null && now() - last < HEAD_REVALIDATION_INTERVAL_MS) return
+        launchPage(provider, tab, 0, true, refreshVersion, replace = true, headOnly = true)
+    }
 
     /** Item 29: only the visible tab loads eagerly. Other tabs load
      *  page 0 on first visit; a visited tab with an active query
@@ -492,9 +521,10 @@ class DownloadsViewModel(
     private fun ensureTabLoaded(tab: DownloadKind) {
         val provider = libraryProvider ?: return
         val current = _state.value.pagedByTab[tab] ?: PagedTabState()
-        if (tab in cachedTabs && current.pageLoading) return
+        if (current.pageLoading || refreshJob?.isActive == true) return
         if (current.visited && tab !in cachedTabs) {
             if (_state.value.query.isNotBlank()) ensureFullSync(tab)
+            else revalidateHead(tab)
             return
         }
         launchPage(provider, tab, offset = 0, bypassCache = false,
@@ -513,15 +543,18 @@ class DownloadsViewModel(
         val version = refreshVersion
         fullSyncJob = viewModelScope.launch {
             while (version == refreshVersion) {
+                pageJobs[tab]?.join()
                 val current = _state.value.pagedByTab[tab] ?: return@launch
                 if (tab in cachedTabs || current.endReached || current.pageError != null) return@launch
-                if (current.pageLoading) {
-                    delay(50)
-                    continue
+                delay(300)
+                if (version != refreshVersion || pageJobs[tab]?.isActive == true) continue
+                val latest = _state.value.pagedByTab.getValue(tab)
+                if (latest.endReached || latest.pageError != null) return@launch
+                launchPage(provider, tab, latest.nextOffset, generationBypass, version, false)
+                val pageJob = pageJobs[tab] ?: return@launch
+                try { pageJob.join() } finally {
+                    if (!currentCoroutineContext().isActive) pageJob.cancel()
                 }
-                val outcome = fetchPage(provider, tab, current.nextOffset,
-                    bypassCache = false, version = version, replace = false)
-                if (outcome != PageOutcome.LOADED) return@launch
             }
         }
     }
@@ -533,6 +566,8 @@ class DownloadsViewModel(
         bypassCache: Boolean,
         version: Int,
         replace: Boolean,
+        traverse: Boolean = false,
+        headOnly: Boolean = false,
     ) {
         pageJobs[tab]?.cancel()
         _state.update { state ->
@@ -540,9 +575,33 @@ class DownloadsViewModel(
             state.copy(pagedByTab = state.pagedByTab +
                 (tab to current.copy(pageLoading = true, pageError = null, visited = true)))
         }
-        pageJobs[tab] = viewModelScope.launch {
-            fetchPage(provider, tab, offset, bypassCache, version, replace)
+        val job = viewModelScope.launch(start = CoroutineStart.LAZY) {
+            try {
+                if (traverse) _state.update { it.copy(refreshing = true) }
+                var next = offset
+                var replacePage = replace
+                do {
+                    val outcome = fetchPage(provider, tab, next, bypassCache, version, replacePage)
+                    if (outcome != PageOutcome.LOADED) break
+                    if (next == 0 && !headOnly && _state.value.query.isNotBlank()) ensureFullSync(tab)
+                    val current = _state.value.pagedByTab.getValue(tab)
+                    if (!traverse || current.endReached) break
+                    next = current.nextOffset
+                    replacePage = false
+                    // At most 200 calls/minute, below TorBox's 300/min endpoint limit.
+                    delay(300)
+                } while (version == refreshVersion)
+            } finally {
+                if (version == refreshVersion && pageJobs[tab] === currentCoroutineContext()[Job]) {
+                    _state.update { state -> state.copy(
+                        refreshing = if (traverse || tab == state.tab) false else state.refreshing,
+                        pagedByTab = state.pagedByTab + (tab to state.pagedByTab.getValue(tab).copy(pageLoading = false)),
+                    ) }
+                }
+            }
         }
+        pageJobs[tab] = job
+        job.start()
     }
 
     /** Fetches one page, publishes it, and reconciles metadata for loaded
@@ -557,6 +616,10 @@ class DownloadsViewModel(
         version: Int,
         replace: Boolean,
     ): PageOutcome {
+        val owner = currentCoroutineContext()[Job]
+        if (version != refreshVersion || pageJobs[tab] !== owner) return PageOutcome.STALE
+        if (offset == 0) lastHeadValidation[tab] = now()
+        failedPages[tab] = offset to bypassCache
         _state.update { state ->
             val current = state.pagedByTab[tab] ?: PagedTabState()
             state.copy(pagedByTab = state.pagedByTab +
@@ -568,19 +631,19 @@ class DownloadsViewModel(
             throw e
         } catch (e: Exception) {
             currentCoroutineContext().ensureActive()
-            if (version != refreshVersion || libraryProvider !== provider) return PageOutcome.STALE
+            if (version != refreshVersion || libraryProvider !== provider || pageJobs[tab] !== owner) return PageOutcome.STALE
             _state.update { state ->
                 val current = state.pagedByTab[tab] ?: PagedTabState()
                 state.copy(
                     loading = false,
-                    refreshing = if (offset == 0 && tab == state.tab) false else state.refreshing,
+                    error = userMessage(e, "Couldn't load downloads. Try again or check Settings."),
                     pagedByTab = state.pagedByTab + (tab to current.copy(
                         pageLoading = false,
                         pageError = userMessage(e, "Couldn't load downloads. Try again or check Settings."),
                     )),
                     // A failed page 0 is the list failing: keep the
                     // global load error (and rows, if any) as today.
-                    // A failed append only gets the per-page error row.
+                    // Appends also surface the snackbar and per-tab retry.
                     loadError = if (offset == 0) {
                         userMessage(e, "Couldn't load downloads. Try again or check Settings.")
                     } else state.loadError,
@@ -591,7 +654,7 @@ class DownloadsViewModel(
             return PageOutcome.FAILED
         }
         currentCoroutineContext().ensureActive()
-        if (version != refreshVersion || libraryProvider !== provider) return PageOutcome.STALE
+        if (version != refreshVersion || libraryProvider !== provider || pageJobs[tab] !== owner) return PageOutcome.STALE
         val oldTab = _state.value.pagedByTab[tab] ?: PagedTabState()
         val merged = if (replace) {
             page.rows
@@ -607,7 +670,7 @@ class DownloadsViewModel(
                 loaded = merged,
                 nextOffset = offset + page.fetchedCount,
                 endReached = page.endReached,
-                pageLoading = false,
+                pageLoading = true,
                 pageError = null,
                 visited = true,
             ))
@@ -625,7 +688,6 @@ class DownloadsViewModel(
                 pagedByTab = byTab,
                 downloads = union,
                 loading = false,
-                refreshing = if (offset == 0 && tab == state.tab) false else state.refreshing,
                 loadError = if (offset == 0) null else state.loadError,
                 metadata = state.metadata.filterKeys(keep),
                 enrichment = state.enrichment.filterKeys(keep),
@@ -637,10 +699,10 @@ class DownloadsViewModel(
                 simklStatuses = state.simklStatuses.filterKeys(keep),
             )
         }
+        failedPages.remove(tab)
         cachedTabs.remove(tab)
         scheduleSnapshotSave(provider)
         schedulePreparation(debounced = false)
-        if (offset == 0 && _state.value.query.isNotBlank()) ensureFullSync(tab)
         val bypassMiss = version == missBypassVersion
         if (tab == _state.value.tab || bypassMiss) {
             reconcileHydration(tab, version, bypassMiss)
@@ -1309,7 +1371,9 @@ class DownloadsViewModel(
 
     private fun userMessage(error: Throwable, fallback: String): String = when (error) {
         is DebridError.AuthInvalid -> "TorBox rejected your API key. Open Settings and re-enter it, then tap Test & save."
-        is DebridError.Provider -> if (error.detail.isBlank()) fallback else error.message ?: fallback
+        is DebridError.Provider -> error.detail.ifBlank { fallback }
+        is DebridError.QuotaExceeded -> error.detail.ifBlank { fallback }
+        is DebridError.NameRefused -> error.detail.ifBlank { fallback }
         is DebridError -> error.message ?: fallback
         else -> fallback
     }

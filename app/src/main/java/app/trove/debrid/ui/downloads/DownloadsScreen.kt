@@ -428,8 +428,8 @@ fun DownloadsScreen(
                                 if (tabState.pageLoading || !tabState.visited) {
                                     LibraryLoading()
                                 } else {
-                                    LibraryEmptyState(tab, state.query, state.loadError, onAdd,
-                                        { viewModel.setQuery("") }, { viewModel.refreshFromUser(fresh = false) })
+                                    LibraryEmptyState(tab, state.query, tabState.pageError, onAdd,
+                                        { viewModel.setQuery("") }, { viewModel.retryPage(tab) })
                                 }
                             } else {
                                 LazyColumn(

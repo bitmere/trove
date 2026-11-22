@@ -520,8 +520,8 @@ class DebridRepository(
                 provider, kind, offset, limit, bypassCache,
             )
         torBox.listPage(kind, offset, limit, bypassCache).map { raw ->
-            val rows = filterExcluded(raw, preferences.currentExcludeWords())
-            DownloadPage(rows, raw.size < limit, fetchedCount = raw.size)
+            val rows = filterExcluded(raw.rows, preferences.currentExcludeWords())
+            DownloadPage(rows, raw.rawCount < limit, fetchedCount = raw.rawCount)
         }
     }
 

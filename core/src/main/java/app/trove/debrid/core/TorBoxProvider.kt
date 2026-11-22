@@ -499,20 +499,23 @@ class TorBoxProvider(
      *  a Usenet page error is surfaced to the caller, never swallowed,
      *  so the UI can offer a Retry for just that page. The page is
      *  deduped by id (first row wins), matching [listKind]. */
+    data class ListPage(val rows: List<DebridDownload>, val rawCount: Int)
+
     suspend fun listPage(
         kind: DownloadKind,
         offset: Int,
         limit: Int,
         bypassCache: Boolean = false,
-    ): Result<List<DebridDownload>> = runCatching {
+    ): Result<ListPage> = runCatching {
         require(offset >= 0) { "offset must be >= 0" }
         require(limit > 0) { "limit must be > 0" }
         val seen = linkedMapOf<String, DebridDownload>()
-        for (item in listKindPage(kind.listPath(), offset = offset, bypassCache = bypassCache, limit = limit)) {
+        val raw = listKindPage(kind.listPath(), offset = offset, bypassCache = bypassCache, limit = limit)
+        for (item in raw) {
             val download = (item as? JsonObject)?.toDownload(kind) ?: continue
             seen.putIfAbsent(download.id, download)
         }
-        seen.values.toList()
+        ListPage(seen.values.toList(), raw.size)
     }.mapError()
 
     private fun DownloadKind.listPath(): String = when (this) {

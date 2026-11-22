@@ -48,6 +48,9 @@ class MainActivity : ComponentActivity() {
     }
 
     private val container by lazy { AppContainer(applicationContext) }
+    private val downloadsViewModel by lazy {
+        androidx.lifecycle.ViewModelProvider(this, SimpleFactory { DownloadsViewModel(container.repository) })[DownloadsViewModel::class.java]
+    }
     private var openAddRequested by mutableStateOf(false)
     private var clipboardOffer by mutableStateOf<String?>(null)
     private var clipboardCheckPending = false
@@ -66,6 +69,7 @@ class MainActivity : ComponentActivity() {
             TroveTheme(preference = theme) {
                 TroveApp(
                     container = container,
+                    downloadsViewModel = downloadsViewModel,
                     updatePreferences = updatePreferences,
                     onPlayUrl = ::playUrl,
                     openAddRequested = openAddRequested,
@@ -91,6 +95,7 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         resumed = true
+        downloadsViewModel.onForeground()
         // Both cold launches and singleTop intent deliveries go through onResume.
         clipboardCheckPending = true
         checkClipboardWhenFocused()
@@ -191,6 +196,7 @@ private class SimpleFactory<V : ViewModel>(private val create: () -> V) :
 @Composable
 private fun TroveApp(
     container: AppContainer,
+    downloadsViewModel: DownloadsViewModel,
     updatePreferences: SharedPreferences,
     onPlayUrl: suspend (String, String?, Boolean) -> Unit,
     openAddRequested: Boolean,
@@ -205,9 +211,6 @@ private fun TroveApp(
     // the same instances: returning from Settings must find the same
     // Downloads model — same tab, query and scroll position — not a
     // fresh one.
-    val downloadsViewModel: DownloadsViewModel = viewModel(
-        factory = SimpleFactory { DownloadsViewModel(container.repository) },
-    )
     val addViewModel: AddViewModel = viewModel(
         factory = SimpleFactory { AddViewModel(container.repository) },
     )

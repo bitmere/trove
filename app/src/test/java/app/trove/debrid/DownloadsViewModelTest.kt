@@ -220,7 +220,7 @@ class DownloadsViewModelTest {
         advanceUntilIdle()
         vm.play(vm.state.value.downloads.first())
         advanceUntilIdle()
-        assertEquals("Provider error stream: No stream link", vm.state.value.error)
+        assertEquals("No stream link", vm.state.value.error)
         assertNull(vm.state.value.playUrl)
         provider.playFailure = null
         vm.play(vm.state.value.downloads.first())
