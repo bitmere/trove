@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.40 — 2026-11-22
+
+- Sync freshness (PR 74): the library no longer stops fetching early — pagination is counted from the raw TorBox page, so a page that loses rows to dedup cannot cut off the rest of the library. A fresh refresh now walks the visible tab to the end instead of re-checking only page 0, and a stale visible head revalidates on foreground return (at most once per tab per 10 minutes). Page failures now show an error with retry instead of hiding at the bottom of the list, and a cancelled search can no longer strand a tab in "loading".
+- Baseline: 756 JVM tests, lint 0 errors.
+
 ## 0.1.39 — 2026-11-22
 
 - Partial titles in manual TMDB search (PR 71): typing a partial title (e.g. "pushpa") now also matches titles starting with it (minimum 3 letters), so "Pushpa: The Rise" and "Pushpa 2: The Rule" appear instead of "No TMDB match". The automatic picker gate stays exact.
