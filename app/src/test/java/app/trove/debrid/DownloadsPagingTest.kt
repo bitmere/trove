@@ -395,4 +395,147 @@ class DownloadsPagingTest {
         assertTrue(vm.state.value.downloads.none { it.id == "stale-marker" })
         assertEquals(100, vm.state.value.downloads.size)
     }
+    private fun pagingRepo(
+        rows: MutableList<DebridDownload> = manyRows(250),
+        page: suspend (Int, Boolean, () -> Result<DownloadPage>) -> Result<DownloadPage>,
+    ): TroveRepository = object : TroveRepository by FakeRepository(provider = FakeProvider(downloads = rows)) {
+        override suspend fun listDownloadPage(
+            provider: app.trove.debrid.core.DebridProvider, kind: DownloadKind,
+            offset: Int, limit: Int, bypassCache: Boolean,
+        ): Result<DownloadPage> {
+            val result = super.listDownloadPage(provider, kind, offset, limit, bypassCache)
+            return page(offset, bypassCache) { result }
+        }
+    }
+
+    @Test
+    fun `fresh refresh reaches newest late page across 2401 rows with bypass`() = runTest {
+        val calls = mutableListOf<Pair<Int, Boolean>>()
+        val vm = viewModel(pagingRepo(manyRows(2401)) { offset, bypass, result ->
+            calls += offset to bypass
+            result()
+        })
+        advanceUntilIdle()
+        assertEquals(listOf(0 to false), calls)
+        calls.clear()
+        vm.refreshFromUser()
+        runCurrent()
+        assertTrue(vm.state.value.refreshing)
+        advanceUntilIdle()
+        assertEquals((0..24).map { it * 100 to true }, calls)
+        assertEquals(2401, vm.state.value.downloads.size)
+        assertEquals("2400", vm.visibleDownloads(vm.state.value).first().id)
+        assertTrue(vm.state.value.pagedByTab.getValue(DownloadKind.TORRENT).endReached)
+        assertFalse(vm.state.value.refreshing)
+        assertFalse(vm.state.value.pagedByTab.getValue(DownloadKind.WEB).visited)
+    }
+
+    @Test
+    fun `raw cursor survives fewer accepted rows and nonfresh search keeps cache mode`() = runTest {
+        val calls = mutableListOf<Pair<Int, Boolean>>()
+        val vm = viewModel(pagingRepo { offset, bypass, result ->
+            calls += offset to bypass
+            if (offset == 0) Result.success(DownloadPage(manyRows(98), false, 100)) else result()
+        })
+        advanceUntilIdle()
+        vm.setQuery("Movie 249")
+        advanceUntilIdle()
+        assertEquals(listOf(0 to false, 100 to false, 200 to false), calls)
+        assertEquals(listOf("249"), vm.visibleDownloads(vm.state.value).map { it.id })
+    }
+
+    @Test
+    fun `failed head surfaces detail with zero matches and retry replaces using bypass`() = runTest {
+        var fail = false
+        var updated = false
+        val calls = mutableListOf<Pair<Int, Boolean>>()
+        val vm = viewModel(pagingRepo(manyRows(1)) { offset, bypass, result ->
+            calls += offset to bypass
+            when {
+                fail -> Result.failure(app.trove.debrid.core.DebridError.Provider("busy", "Please try later"))
+                updated -> Result.success(DownloadPage(listOf(sampleDownload(id = "0", name = "Updated")), true))
+                else -> result()
+            }
+        })
+        advanceUntilIdle()
+        vm.setQuery("no match")
+        fail = true
+        vm.refreshFromUser()
+        advanceUntilIdle()
+        assertEquals("Please try later", vm.state.value.error)
+        assertEquals("Please try later", vm.state.value.pagedByTab.getValue(DownloadKind.TORRENT).pageError)
+        assertTrue(vm.visibleDownloads(vm.state.value).isEmpty())
+        assertEquals(1, vm.state.value.downloads.size)
+        fail = false
+        updated = true
+        vm.retryPage()
+        advanceUntilIdle()
+        assertEquals(0 to true, calls.last())
+        assertEquals("Updated", vm.state.value.downloads.single().name)
+        assertNull(vm.state.value.pagedByTab.getValue(DownloadKind.TORRENT).pageError)
+    }
+
+    @Test
+    fun `cancelled search fetch releases loading and a continuation can resume`() = runTest {
+        val gate = CompletableDeferred<Unit>()
+        var block = true
+        val vm = viewModel(pagingRepo { offset, _, result ->
+            if (offset == 100 && block) gate.await()
+            result()
+        })
+        advanceUntilIdle()
+        vm.setQuery("Movie")
+        advanceUntilIdle()
+        assertTrue(vm.state.value.pagedByTab.getValue(DownloadKind.TORRENT).pageLoading)
+        vm.setQuery("")
+        runCurrent()
+        assertFalse(vm.state.value.pagedByTab.getValue(DownloadKind.TORRENT).pageLoading)
+        block = false
+        vm.loadNextPage()
+        advanceUntilIdle()
+        assertEquals(200, vm.state.value.downloads.size)
+    }
+
+    @Test
+    fun `fresh continuation failure retries its offset and freshness`() = runTest {
+        var fail = true
+        val calls = mutableListOf<Pair<Int, Boolean>>()
+        val vm = viewModel(pagingRepo { offset, bypass, result ->
+            calls += offset to bypass
+            if (offset == 100 && fail) Result.failure(IllegalStateException()) else result()
+        })
+        advanceUntilIdle()
+        vm.refreshFromUser()
+        advanceUntilIdle()
+        assertNotNull(vm.state.value.error)
+        assertFalse(vm.state.value.refreshing)
+        fail = false
+        calls.clear()
+        vm.retryPage()
+        advanceUntilIdle()
+        assertEquals(listOf(100 to true, 200 to true), calls)
+        assertEquals(250, vm.state.value.downloads.size)
+    }
+
+    @Test
+    fun `foreground revalidation is head only and bounded per tab`() = runTest {
+        var time = 0L
+        val calls = mutableListOf<Pair<Int, Boolean>>()
+        val repo = pagingRepo { offset, bypass, result -> calls += offset to bypass; result() }
+        val vm = DownloadsViewModel(repo, StandardTestDispatcher(testScheduler), now = { time })
+        advanceUntilIdle()
+        vm.onForeground()
+        advanceUntilIdle()
+        assertEquals(1, calls.size)
+        time += DownloadsViewModel.HEAD_REVALIDATION_INTERVAL_MS
+        vm.onForeground()
+        vm.onForeground()
+        advanceUntilIdle()
+        assertEquals(listOf(0 to false, 0 to true), calls)
+        vm.setTab(DownloadKind.TORRENT)
+        advanceUntilIdle()
+        assertEquals(2, calls.size)
+        assertEquals(100, vm.state.value.downloads.size)
+    }
+
 }

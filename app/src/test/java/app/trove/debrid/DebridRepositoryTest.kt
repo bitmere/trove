@@ -457,7 +457,7 @@ class DebridRepositoryTest {
             val offset = request.url.substringAfter("offset=", "").substringBefore("&").toIntOrNull() ?: 0
             val data = when {
                 !request.url.contains("/torrents/mylist") -> "[]"
-                offset == 0 -> """[{"id":1,"name":"Film.CAM"},{"id":2,"name":"Film.1080p"}]"""
+                offset == 0 -> """[{"id":1,"name":"Film.CAM"},{"id":2,"name":"Film.1080p"},{"id":2,"name":"Duplicate"},null,{}]"""
                 else -> """[{"id":3,"name":"Film.2160p"}]"""
             }
             HttpResponse(200, """{"success":true,"data":$data}""")
@@ -465,19 +465,19 @@ class DebridRepositoryTest {
         val (repo, _) = repository(transport, store)
         val provider = requireNotNull(repo.provider())
 
-        // The CAM row is excluded, but the raw page was full (2 of 2),
+        // The CAM row is excluded, but the raw page was full (5 of 5), including duplicates/invalid rows,
         // so the tab is not at its end yet.
-        val first = repo.listDownloadPage(provider, DownloadKind.TORRENT, 0, 2).getOrThrow()
+        val first = repo.listDownloadPage(provider, DownloadKind.TORRENT, 0, 5).getOrThrow()
         assertEquals(listOf("2"), first.rows.map { it.id })
         assertFalse(first.endReached)
-        assertEquals(2, first.fetchedCount)
+        assertEquals(5, first.fetchedCount)
         assertTrue(requests.all { it.url.contains("/torrents/mylist") })
-        assertTrue(requests.single().url.contains("limit=2"))
+        assertTrue(requests.single().url.contains("limit=5"))
 
-        val second = repo.listDownloadPage(provider, DownloadKind.TORRENT, 2, 2).getOrThrow()
+        val second = repo.listDownloadPage(provider, DownloadKind.TORRENT, 5, 5).getOrThrow()
         assertEquals(listOf("3"), second.rows.map { it.id })
         assertTrue(second.endReached)
-        assertEquals(1, requests.count { it.url.contains("offset=2") })
+        assertEquals(1, requests.count { it.url.contains("offset=5") })
     }
 
     @Test

@@ -974,8 +974,8 @@ class TorBoxProviderTest {
     fun `listPage fetches one kind page with offset and limit and touches no other kind`() {
         val (p, transport) = pagedTorrents(listOf(1, 2), listOf(3, 4), listOf(5))
         val rows = kotlinx.coroutines.runBlocking { p.listPage(DownloadKind.TORRENT, 2, 2) }.getOrThrow()
-        assertEquals(listOf("3", "4"), rows.map { it.id })
-        assertTrue(rows.all { it.kind == DownloadKind.TORRENT })
+        assertEquals(listOf("3", "4"), rows.rows.map { it.id })
+        assertTrue(rows.rows.all { it.kind == DownloadKind.TORRENT })
         val requests = transport.requests.filter { it.url.contains("/mylist") }
         assertEquals(1, requests.size)
         val query = requests.single().queryParameters()
@@ -990,7 +990,7 @@ class TorBoxProviderTest {
         val rows = kotlinx.coroutines.runBlocking {
             p.listPage(DownloadKind.TORRENT, 0, 2, bypassCache = true)
         }.getOrThrow()
-        assertEquals(listOf("1", "2"), rows.map { it.id })
+        assertEquals(listOf("1", "2"), rows.rows.map { it.id })
         val query = transport.requests.single { it.url.contains("/torrents/mylist") }.queryParameters()
         assertEquals("true", query["bypass_cache"])
     }
@@ -999,13 +999,14 @@ class TorBoxProviderTest {
     fun `listPage dedupes within a page and keeps the first row`() {
         val (p, _) = provider { request ->
             val rows = if (request.url.contains("/torrents/mylist")) {
-                """[{"id":7,"name":"First"},{"id":7,"name":"Second"},{"id":8,"name":"Other"}]"""
+                """[{"id":7,"name":"First"},{"id":7,"name":"Second"},{"id":8,"name":"Other"},null,{}]"""
             } else "[]"
             HttpResponse(200, envelope(rows))
         }
         val rows = kotlinx.coroutines.runBlocking { p.listPage(DownloadKind.TORRENT, 0, 3) }.getOrThrow()
-        assertEquals(listOf("7", "8"), rows.map { it.id })
-        assertEquals("First", rows.single { it.id == "7" }.name)
+        assertEquals(listOf("7", "8"), rows.rows.map { it.id })
+        assertEquals(5, rows.rawCount)
+        assertEquals("First", rows.rows.single { it.id == "7" }.name)
     }
 
     @Test
