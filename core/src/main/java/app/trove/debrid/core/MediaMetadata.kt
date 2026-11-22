@@ -76,7 +76,9 @@ data class ReleaseDetails(val episode: String?, val quality: String?)
  *  automatic gate stays strict: a candidate list is never auto-applied.
  *  Exactly one of [imdbId] / [tmdbId] is present; [tmdbId] set means
  *  the candidate came from TMDB, otherwise from Cinemeta. */
-data class MediaCandidate(val imdbId: String?, val title: String, val year: Int?, val type: String, val tmdbId: Int? = null)
+data class MediaCandidate(val imdbId: String?, val title: String, val year: Int?, val type: String, val tmdbId: Int? = null,
+    val posterUrl: String? = null, val overview: String? = null,
+)
 
 private val extension = Regex("\\.(mkv|mp4|avi|mov|webm|m4v|ts|torrent|nzb)$", RegexOption.IGNORE_CASE)
 private val yearToken = Regex("(?<!\\d)(19\\d{2}|20\\d{2})(?!\\d)")
@@ -452,7 +454,9 @@ class CinemetaResolver(
             val id = obj.optString("id")?.takeIf { it.matches(imdbIdPattern) } ?: return@mapNotNull null
             val title = obj.optString("name")?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
             val type = obj.optString("type") ?: return@mapNotNull null
-            MediaCandidate(id, title, mediaYear(obj), type)
+            MediaCandidate(id, title, mediaYear(obj), type,
+                posterUrl = publicPosterUrl(obj.optString("poster")),
+                overview = obj.nonBlankStringField("description"))
         }
         if (cinemeta.isNotEmpty()) return@withPermit cinemeta
         tmdbResolver?.searchCandidates(query).orEmpty()

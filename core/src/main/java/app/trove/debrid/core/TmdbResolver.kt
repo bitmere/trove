@@ -68,9 +68,12 @@ class TmdbResolver(
         val key = configuredKey() ?: return emptyList()
         if (query.title.isBlank() || query.title.length > 160) return emptyList()
         return try {
-            searchMatches(query, key).take(MAX_PICKER_CANDIDATES).mapNotNull { match ->
+            val matches = searchMatches(query, key).take(MAX_PICKER_CANDIDATES)
+            val config = if (matches.isEmpty()) null else imageConfig(key)
+            matches.mapNotNull { match ->
                 val title = match.displayTitle.takeIf { it.isNotBlank() } ?: return@mapNotNull null
-                MediaCandidate(null, title, match.year, match.hit.type, tmdbId = match.hit.tmdbId)
+                MediaCandidate(null, title, match.year, match.hit.type, tmdbId = match.hit.tmdbId,
+                    posterUrl = posterUrl(config, match.hit.posterPath), overview = match.overview)
             }
         } catch (e: CancellationException) {
             throw e
@@ -132,7 +135,8 @@ class TmdbResolver(
                 val metadata = resolveByTmdbId(parsed.tmdbId, parsed.type)
                     ?: return ManualTmdbSearch.NoMatch
                 ManualTmdbSearch.Found(listOf(
-                    MediaCandidate(null, metadata.title, metadata.year, parsed.type, tmdbId = parsed.tmdbId)))
+                    MediaCandidate(null, metadata.title, metadata.year, parsed.type, tmdbId = parsed.tmdbId,
+                        posterUrl = metadata.posterUrl, overview = metadata.overview)))
             }
             is ManualTmdbLink.ByTitle -> {
                 val type = fallbackType?.takeIf { it == "movie" || it == "series" }
@@ -167,6 +171,7 @@ class TmdbResolver(
         val localizedTitleMatches: Boolean,
         /** Display title as TMDB returned it (never the normalized form). */
         val displayTitle: String,
+        val overview: String?,
     )
 
     private val configMutex = Mutex()
@@ -291,6 +296,7 @@ class TmdbResolver(
                         obj.optString("original_language")?.takeIf { it.isNotBlank() },
                         obj.optString("popularity")?.toDoubleOrNull()?.takeIf { it.isFinite() },
                         localizedTitleMatches = title == titleKey,
+                        overview = obj.optString("overview")?.takeIf { it.isNotBlank() },
                         displayTitle = obj.optString(if (series) "name" else "title")
                             ?.takeIf { it.isNotBlank() }
                             ?: obj.optString(if (series) "original_name" else "original_title").orEmpty(),
