@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.38 — 2026-11-22
+
+- Blank details sheet with keyboard open (PR 68): the details sheet's list now uses inset-aware padding, so opening the keyboard no longer collapses the sheet to blank — the title, manual field, Search button and results stay visible while typing. Picker rows now show a poster and a two-line synopsis, so same-name matches (e.g. five "The Odyssey" results) can be told apart. Cleanup: the old inline row renderer was removed, superseded by the new row; no other dead code was found in the touched files.
+- Baseline: 745 JVM tests, lint 0 errors.
+
 ## 0.1.37 — 2026-11-21
 
 - Five code-proven picker bugs (PR 65): TMDB links with title slugs now parse — `…/movie/550-fight-club` resolves to the movie instead of falling through to a title search and returning no match. Deleting a download now cancels a running manual search and clears its status, mirroring dismiss, so the field and Search cannot stay disabled on reopen. Pick and Clear buttons disable while a resolve is in flight, so a tap during a slow resolve can no longer be silently dropped. Editing the manual field clears the stale manual status, so a FOUND line for an old query is no longer shown beside new input. The manual draft survives activity recreation.
