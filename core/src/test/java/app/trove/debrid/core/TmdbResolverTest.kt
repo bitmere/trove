@@ -51,6 +51,12 @@ class TmdbResolverTest {
         "crew":[{"name":"Episode Director","job":"Director"}]}
     """.trimIndent()
 
+    private val pushpaSearchJson = """
+        {"results":[
+        {"id":1,"title":"Pushpa: The Rise","release_date":"2021-12-17","poster_path":"/rise.jpg"},
+        {"id":2,"title":"Pushpa 2: The Rule","release_date":"2024-12-05","poster_path":"/rule.jpg"}]}
+    """.trimIndent()
+
     private inner class FakeTmdb : HttpTransport {
         val requests = mutableListOf<HttpRequest>()
         var configStatus = 200
@@ -440,6 +446,41 @@ class TmdbResolverTest {
                 MediaCandidate(null, "Example Film", 2026, "movie", tmdbId = 1,
                     posterUrl = "https://images.example.invalid/t/p/w185/a.jpg"))),
             result)
+    }
+
+    @Test fun `searchManualLink finds partial titles by prefix`() = runBlocking {
+        val http = FakeTmdb().apply { searchMovieJson = pushpaSearchJson }
+        assertEquals(
+            ManualTmdbSearch.Found(listOf(
+                MediaCandidate(null, "Pushpa: The Rise", 2021, "movie", tmdbId = 1,
+                    posterUrl = "https://images.example.invalid/t/p/w185/rise.jpg"),
+                MediaCandidate(null, "Pushpa 2: The Rule", 2024, "movie", tmdbId = 2,
+                    posterUrl = "https://images.example.invalid/t/p/w185/rule.jpg"))),
+            resolver(http).searchManualLink("pushpa", "movie"))
+    }
+
+    @Test fun `searchManualLink matches a prefix of the original title`() = runBlocking {
+        val http = FakeTmdb().apply {
+            searchMovieJson = """
+                {"results":[{"id":3,"title":"Localized Title","original_title":"Pushpa: The Rise",
+                "release_date":"2021-12-17","poster_path":"/rise.jpg"}]}
+            """.trimIndent()
+        }
+        assertEquals(
+            ManualTmdbSearch.Found(listOf(
+                MediaCandidate(null, "Localized Title", 2021, "movie", tmdbId = 3,
+                    posterUrl = "https://images.example.invalid/t/p/w185/rise.jpg"))),
+            resolver(http).searchManualLink("pushpa", "movie"))
+    }
+
+    @Test fun `searchManualLink keeps short queries exact-only`() = runBlocking {
+        val http = FakeTmdb().apply { searchMovieJson = pushpaSearchJson }
+        assertEquals(ManualTmdbSearch.NoMatch, resolver(http).searchManualLink("pu", "movie"))
+    }
+
+    @Test fun `searchCandidates keeps the exact gate for the automatic picker`() = runBlocking {
+        val http = FakeTmdb().apply { searchMovieJson = pushpaSearchJson }
+        assertTrue(resolver(http).searchCandidates(MediaQuery("pushpa", null, "movie")).isEmpty())
     }
 
     @Test fun `searchManualLink reports no match when the title search is empty`() = runBlocking {
