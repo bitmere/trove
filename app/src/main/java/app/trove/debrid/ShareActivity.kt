@@ -13,7 +13,7 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.lifecycleScope
-import app.trove.debrid.core.DownloadKind
+import app.trove.debrid.core.DebridDownload
 import app.trove.debrid.ui.add.AddSheet
 import app.trove.debrid.ui.add.AddViewModel
 import app.trove.debrid.ui.theme.TroveTheme
@@ -25,7 +25,7 @@ import kotlinx.coroutines.launch
 /** A transparent share host: only the existing add sheet, with no library underneath. */
 class ShareActivity : ComponentActivity() {
     companion object {
-        private val additions = MutableSharedFlow<DownloadKind>(extraBufferCapacity = 1)
+        private val additions = MutableSharedFlow<DebridDownload>(extraBufferCapacity = 1)
         internal val completedAdds = additions.asSharedFlow()
     }
 
@@ -52,8 +52,8 @@ class ShareActivity : ComponentActivity() {
                         initialText = input.text.takeUnless { restoreInput },
                         initialFile = input.bytes?.takeUnless { restoreInput }?.let { Triple(it, input.fileName ?: "file", input.mimeType) },
                         onDismiss = { finish() },
-                        onAdded = { kind ->
-                            additions.tryEmit(kind)
+                        onAdded = { download ->
+                            additions.tryEmit(download)
                             Toast.makeText(this, R.string.download_added, Toast.LENGTH_SHORT).show()
                             finish()
                         },

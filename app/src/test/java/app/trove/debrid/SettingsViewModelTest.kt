@@ -683,4 +683,26 @@ class SettingsViewModelTest {
         val secret = "private-test-value"
         assertFalse(SettingsUiState(torbox = ProviderAccountState(keyField = secret, showKey = true)).toString().contains(secret))
     }
+
+    @Test fun `download progress toggle defaults off, persists, and signals the list`() = runTest {
+        val repo = FakeRepository()
+        val vm = SettingsViewModel(repo)
+        advanceUntilIdle()
+        assertFalse(vm.state.value.downloadProgressNotifications)
+        assertFalse(vm.notificationPreferenceChanged.value)
+
+        vm.setDownloadProgressNotificationsEnabled(true)
+        advanceUntilIdle()
+        assertTrue(repo.savedDownloadProgressNotifications)
+        assertTrue(vm.state.value.downloadProgressNotifications)
+        assertTrue(vm.notificationPreferenceChanged.value)
+
+        vm.consumeNotificationPreferenceChanged()
+        assertFalse(vm.notificationPreferenceChanged.value)
+        vm.setDownloadProgressNotificationsEnabled(false)
+        advanceUntilIdle()
+        assertFalse(repo.savedDownloadProgressNotifications)
+        assertFalse(vm.state.value.downloadProgressNotifications)
+        assertTrue(vm.notificationPreferenceChanged.value)
+    }
 }

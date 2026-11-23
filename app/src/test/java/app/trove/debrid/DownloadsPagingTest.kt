@@ -234,22 +234,29 @@ class DownloadsPagingTest {
     }
 
     @Test
-    fun `refresh traverses without losing loaded coverage`() = runTest {
-        val vm = viewModel(FakeRepository(provider = FakeProvider(downloads = manyRows(250))))
+    fun `fresh refresh reconciles only the head without losing loaded coverage`() = runTest {
+        val rows = manyRows(250)
+        val calls = mutableListOf<Pair<Int, Boolean>>()
+        val vm = viewModel(pagingRepo(rows) { offset, bypass, result ->
+            calls += offset to bypass
+            result()
+        })
         advanceUntilIdle()
-        vm.loadNextPage()
-        advanceUntilIdle()
-        vm.loadNextPage()
-        advanceUntilIdle()
-        assertTrue(vm.state.value.pagedByTab.getValue(DownloadKind.TORRENT).endReached)
-
-        vm.refresh()
+        repeat(2) {
+            vm.loadNextPage()
+            advanceUntilIdle()
+        }
+        rows.removeAt(0)
+        rows.add(0, sampleDownload(id = "brand-new").copy(createdAtEpochMs = 9999))
+        calls.clear()
+        vm.refreshFromUser()
         assertEquals(250, vm.state.value.downloads.size)
         advanceUntilIdle()
-        val reset = vm.state.value.pagedByTab.getValue(DownloadKind.TORRENT)
-        assertEquals(250, reset.loaded.size)
-        assertEquals(250, reset.nextOffset)
-        assertTrue(reset.endReached)
+        val refreshed = vm.state.value.pagedByTab.getValue(DownloadKind.TORRENT)
+        assertEquals(listOf(0 to true), calls)
+        assertEquals(rows.map { it.id }, refreshed.loaded.map { it.id })
+        assertEquals(250, refreshed.loaded.size)
+        assertEquals("brand-new", vm.visibleDownloads(vm.state.value).first().id)
     }
 
     @Test
@@ -398,6 +405,13 @@ class DownloadsPagingTest {
         runCurrent()
         vm.refresh()
         advanceUntilIdle()
+        // Head-only refresh: the head is reconciled and the loaded 100 rows
+        // are retained; the remaining rows arrive on scroll, not on refresh.
+        assertEquals(100, vm.state.value.downloads.size)
+        vm.loadNextPage()
+        advanceUntilIdle()
+        vm.loadNextPage()
+        advanceUntilIdle()
         assertEquals(250, vm.state.value.downloads.size)
         gate.complete(Unit)
         advanceUntilIdle()
@@ -418,7 +432,7 @@ class DownloadsPagingTest {
     }
 
     @Test
-    fun `fresh refresh reaches newest late page across 2401 rows with bypass`() = runTest {
+    fun `fresh refresh fetches only page zero with bypass across 2401 rows`() = runTest {
         val calls = mutableListOf<Pair<Int, Boolean>>()
         val vm = viewModel(pagingRepo(manyRows(2401)) { offset, bypass, result ->
             calls += offset to bypass
@@ -428,13 +442,12 @@ class DownloadsPagingTest {
         assertEquals(listOf(0 to false), calls)
         calls.clear()
         vm.refreshFromUser()
-        runCurrent()
         assertTrue(vm.state.value.refreshing)
         advanceUntilIdle()
-        assertEquals((0..24).map { it * 100 to true }, calls)
-        assertEquals(2401, vm.state.value.downloads.size)
-        assertEquals("2400", vm.visibleDownloads(vm.state.value).first().id)
-        assertTrue(vm.state.value.pagedByTab.getValue(DownloadKind.TORRENT).endReached)
+        assertEquals(listOf(0 to true), calls)
+        assertEquals(100, vm.state.value.downloads.size)
+        assertEquals("99", vm.visibleDownloads(vm.state.value).first().id)
+        assertFalse(vm.state.value.pagedByTab.getValue(DownloadKind.TORRENT).endReached)
         assertFalse(vm.state.value.refreshing)
         assertFalse(vm.state.value.pagedByTab.getValue(DownloadKind.WEB).visited)
     }
@@ -516,6 +529,8 @@ class DownloadsPagingTest {
         advanceUntilIdle()
         vm.refreshFromUser()
         advanceUntilIdle()
+        vm.loadNextPage()
+        advanceUntilIdle()
         assertNotNull(vm.state.value.error)
         assertFalse(vm.state.value.refreshing)
         fail = false
@@ -554,8 +569,10 @@ class DownloadsPagingTest {
         val vm = DownloadsViewModel(pagingRepo(rows) { _, _, result -> result() },
             StandardTestDispatcher(testScheduler), now = { time })
         advanceUntilIdle()
-        vm.refreshFromUser()
-        advanceUntilIdle()
+        repeat(2) {
+            vm.loadNextPage()
+            advanceUntilIdle()
+        }
         rows.removeAt(0)
         rows.add(0, sampleDownload(id = "brand-new").copy(createdAtEpochMs = 9999))
         time += DownloadsViewModel.HEAD_REVALIDATION_INTERVAL_MS
@@ -607,8 +624,10 @@ class DownloadsPagingTest {
             if (fail) Result.failure(IllegalStateException("offline")) else result()
         }, StandardTestDispatcher(testScheduler), now = { time })
         advanceUntilIdle()
-        vm.refreshFromUser()
-        advanceUntilIdle()
+        repeat(2) {
+            vm.loadNextPage()
+            advanceUntilIdle()
+        }
         val before = vm.state.value.pagedByTab.getValue(DownloadKind.TORRENT)
         time += DownloadsViewModel.HEAD_REVALIDATION_INTERVAL_MS
         fail = true
@@ -644,8 +663,10 @@ class DownloadsPagingTest {
             if (fail && offset == 100) Result.failure(IllegalStateException("offline")) else result()
         })
         advanceUntilIdle()
-        vm.refreshFromUser()
-        advanceUntilIdle()
+        repeat(2) {
+            vm.loadNextPage()
+            advanceUntilIdle()
+        }
         rows.removeAt(249)
         fail = true
         vm.setSort(DownloadSort.OLDEST)

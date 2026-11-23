@@ -131,6 +131,7 @@ class AddViewModelTest {
 
         assertEquals(1, repo.provider!!.addedInputs.size)
         assertTrue(vm.state.value.added)
+        assertNotNull(vm.state.value.addedDownload)
     }
 
     @Test
@@ -148,6 +149,7 @@ class AddViewModelTest {
         assertEquals(1, repo.premiumizeProvider.addedInputs.size)
         assertEquals(0, repo.provider!!.addedInputs.size)
         assertTrue(vm.state.value.added)
+        assertNotNull(vm.state.value.addedDownload)
     }
 
     @Test
@@ -166,6 +168,7 @@ class AddViewModelTest {
 
         assertEquals(1, repo.premiumizeProvider.addedInputs.size)
         assertTrue(vm.state.value.added)
+        assertNotNull(vm.state.value.addedDownload)
     }
 
     @Test
@@ -193,6 +196,7 @@ class AddViewModelTest {
         vm.add()
         advanceUntilIdle()
         assertTrue(vm.state.value.added)
+        assertNotNull(vm.state.value.addedDownload)
         assertEquals(1, repo.addedClassified.size)
     }
 
@@ -205,6 +209,7 @@ class AddViewModelTest {
         vm.add()
         advanceUntilIdle()
         assertTrue(vm.state.value.added)
+        assertNotNull(vm.state.value.addedDownload)
         assertEquals(1, repo.provider?.addedInputs?.size)
     }
 
@@ -286,6 +291,7 @@ class AddViewModelTest {
         vm.add()
         advanceUntilIdle()
         assertTrue(vm.state.value.added)
+        assertNotNull(vm.state.value.addedDownload)
         vm.add()
         assertEquals(2, attempts)
     }
@@ -319,6 +325,7 @@ class AddViewModelTest {
         advanceUntilIdle()
         assertEquals(2, connectionReads)
         assertTrue(model.state.value.added)
+        assertEquals(provider.downloads.single(), model.state.value.addedDownload)
         assertFalse(model.state.value.adding)
     }
 }

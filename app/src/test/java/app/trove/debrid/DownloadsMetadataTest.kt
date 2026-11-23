@@ -147,7 +147,7 @@ class DownloadsMetadataTest {
         advanceUntilIdle()
         vm.refreshFromUser()
         advanceUntilIdle()
-        vm.onAdded(DownloadKind.TORRENT)
+        vm.onAdded(sampleDownload())
         advanceUntilIdle()
         assertEquals(listOf(false, false, true, false), bypasses)
     }

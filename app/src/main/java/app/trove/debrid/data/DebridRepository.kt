@@ -175,6 +175,12 @@ class DebridRepository(
     override suspend fun saveClipboardOffersEnabled(enabled: Boolean) =
         preferences.saveClipboardOffersEnabled(enabled)
 
+    override suspend fun loadDownloadProgressNotificationsEnabled() =
+        preferences.loadDownloadProgressNotificationsEnabled()
+
+    override suspend fun saveDownloadProgressNotificationsEnabled(enabled: Boolean) =
+        preferences.saveDownloadProgressNotificationsEnabled(enabled)
+
     override suspend fun claimClipboardOffer(text: String?): Boolean =
         preferences.claimClipboardOffer(text)
 

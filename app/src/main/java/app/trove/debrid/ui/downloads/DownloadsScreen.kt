@@ -45,6 +45,7 @@ import androidx.compose.material.icons.filled.AccountCircle
 import app.trove.debrid.ui.theme.SpaceGrotesk
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.collectAsState
@@ -272,6 +273,14 @@ fun DownloadsScreen(
         }
     }
     val settingsLabel = stringResource(R.string.settings)
+    // Leaving this screen (e.g. Settings) backgrounds polling when the
+    // notification toggle is off; coming back restarts it. The activity
+    // onPause/onResume pair covers the app backgrounding.
+    DisposableEffect(viewModel) {
+        viewModel.onDownloadsVisible()
+        onDispose { viewModel.onBackground() }
+    }
+
     LaunchedEffect(state.error) {
         state.error?.let {
             val result = snackbarHostState.showSnackbar(
@@ -370,6 +379,7 @@ fun DownloadsScreen(
                 DownloadSortMenu(state.sort, viewModel::setSort)
             }
 
+            SearchSyncStatus(state.searchSyncing, state.query)
 
             HorizontalPager(
                 state = pagerState,
@@ -719,3 +729,15 @@ private fun sortLabel(sort: DownloadSort): String = stringResource(when (sort) {
     DownloadSort.SMALLEST -> R.string.sort_smallest
     DownloadSort.PROGRESS -> R.string.sort_progress
 })
+
+@Composable
+internal fun SearchSyncStatus(searchSyncing: Boolean, query: String) {
+    if (searchSyncing && query.isNotBlank()) {
+        Text(
+            text = stringResource(R.string.searching_all_downloads),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = TroveSpace.medium, vertical = TroveSpace.small),
+        )
+    }
+}

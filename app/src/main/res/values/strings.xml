@@ -4,6 +4,7 @@
     <string name="app_name">Trove</string>
     <string name="account_settings">Account and Settings</string>
     <string name="search_downloads">Search downloads</string>
+    <string name="searching_all_downloads">Searching all downloads…</string>
     <string name="clear_search">Clear search</string>
     <string name="reset">Reset</string>
     <string name="go_to_top">Go to top</string>
@@ -272,6 +273,12 @@
     <string name="tmdb_attribution">This product uses TMDB and the TMDB APIs but is not endorsed, certified, or otherwise approved by TMDB.</string>
     <string name="clipboard_offers_setting">Offer to add copied torrent links</string>
     <string name="clipboard_offers_setting_failed">Couldn’t load or save the clipboard offer setting.</string>
+    <string name="download_progress_notifications">Download progress notifications</string>
+    <string name="download_progress_notifications_failed">Couldn’t load or save the download progress setting. Try again.</string>
+    <string name="download_progress_notifications_denied">Notification permission is off. Turn it on in system Settings to show download progress.</string>
+    <string name="download_progress_channel">Download progress</string>
+    <string name="download_progress_channel_description">Progress of active downloads.</string>
+    <string name="download_notifications_summary">%1$d downloads in progress</string>
     <string name="clipboard_offer_title">Add copied link?</string>
     <string name="clipboard_offer_message">The copied link will be filled in for you.</string>
     <string name="clutter_files_setting_failed">Couldn’t load or save the clutter files setting. Try again.</string>

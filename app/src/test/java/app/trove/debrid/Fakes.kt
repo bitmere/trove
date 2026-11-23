@@ -174,6 +174,12 @@ open class FakeRepository(
         savedShowClutterFiles = show
     }
 
+    var savedDownloadProgressNotifications = false
+    override suspend fun loadDownloadProgressNotificationsEnabled() = savedDownloadProgressNotifications
+    override suspend fun saveDownloadProgressNotificationsEnabled(enabled: Boolean) {
+        savedDownloadProgressNotifications = enabled
+    }
+
     var savedPlayer: app.trove.debrid.core.PlayerComponent? = null
     override suspend fun defaultPlayer() = savedPlayer
     override suspend fun setDefaultPlayer(player: app.trove.debrid.core.PlayerComponent?) { savedPlayer = player }

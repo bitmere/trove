@@ -1,10 +1,15 @@
 package app.trove.debrid
+import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.test.advanceTimeBy
+import app.trove.debrid.core.DebridError
 import app.trove.debrid.core.DebridDownload
 import app.trove.debrid.core.DebridProvider
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 
+import app.trove.debrid.data.DownloadPage
 import app.trove.debrid.core.DownloadKind
 import app.trove.debrid.core.DownloadSort
 import app.trove.debrid.core.DownloadStatus
@@ -25,6 +30,7 @@ import kotlinx.coroutines.test.setMain
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNotSame
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -33,6 +39,8 @@ import org.junit.Test
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class DownloadsViewModelTest {
+
+    private val pollingViewModels = mutableListOf<DownloadsViewModel>()
 
     private val testDispatcher = StandardTestDispatcher()
 
@@ -43,6 +51,7 @@ class DownloadsViewModelTest {
 
     @After
     fun tearDown() {
+        pollingViewModels.forEach { it.viewModelScope.cancel() }
         Dispatchers.resetMain()
     }
 
@@ -56,7 +65,295 @@ class DownloadsViewModelTest {
     // ViewModel. Injecting the test dispatcher keeps preparation, the
     // 250 ms debounce and the return to Main on the drainable scheduler.
     private fun TestScope.viewModel(repo: TroveRepository) =
-        DownloadsViewModel(repo, StandardTestDispatcher(testScheduler))
+        DownloadsViewModel(repo, StandardTestDispatcher(testScheduler)).also { pollingViewModels += it }
+
+    private fun searchRepository(
+        page: suspend (Int, () -> Result<DownloadPage>) -> Result<DownloadPage>,
+    ): TroveRepository {
+        val rows = (0 until 250).map {
+            sampleDownload(id = "$it", name = "Movie $it", status = DownloadStatus.READY)
+                .copy(createdAtEpochMs = it.toLong())
+        }.toMutableList()
+        return object : TroveRepository by FakeRepository(provider = FakeProvider(downloads = rows)) {
+            override suspend fun listDownloadPage(
+                provider: DebridProvider, kind: DownloadKind, offset: Int, limit: Int, bypassCache: Boolean,
+            ): Result<DownloadPage> {
+                val result = super.listDownloadPage(provider, kind, offset, limit, bypassCache)
+                return page(offset) { result }
+            }
+        }
+    }
+
+    @Test
+    fun `search publishes loaded matches while syncing then includes the whole tab`() = runTest {
+        val gate = CompletableDeferred<Unit>()
+        val vm = viewModel(searchRepository { offset, result ->
+            if (offset > 0) gate.await()
+            result()
+        })
+        advanceUntilIdle()
+        vm.setQuery("Movie 2")
+        assertTrue(vm.state.value.searchSyncing)
+        advanceTimeBy(250)
+        runCurrent()
+        assertEquals((listOf(2) + (20..29)).map { "$it" }.toSet(),
+            vm.visibleDownloads(vm.state.value).map { it.id }.toSet())
+        advanceTimeBy(50)
+        runCurrent()
+        assertTrue(vm.state.value.searchSyncing)
+        assertEquals(100, vm.state.value.downloads.size)
+        gate.complete(Unit)
+        advanceUntilIdle()
+        assertEquals(61, vm.visibleDownloads(vm.state.value).size)
+        assertFalse(vm.state.value.searchSyncing)
+        vm.setQuery("Movie 249")
+        advanceUntilIdle()
+        assertFalse(vm.state.value.searchSyncing)
+        assertEquals(listOf("249"), vm.visibleDownloads(vm.state.value).map { it.id })
+    }
+
+    @Test
+    fun `clearing search cancels its page and an older sync cannot clear a newer indicator`() = runTest {
+        val gate = CompletableDeferred<Unit>()
+        val vm = viewModel(searchRepository { offset, result ->
+            if (offset > 0) gate.await()
+            result()
+        })
+        advanceUntilIdle()
+        vm.setQuery("Movie 2")
+        advanceTimeBy(300)
+        runCurrent()
+        assertTrue(vm.state.value.pagedByTab.getValue(DownloadKind.TORRENT).pageLoading)
+        vm.setQuery("")
+        assertFalse(vm.state.value.searchSyncing)
+        vm.setQuery("Movie 249")
+        runCurrent()
+        assertTrue(vm.state.value.searchSyncing)
+        advanceTimeBy(300)
+        runCurrent()
+        vm.setQuery("")
+        runCurrent()
+        assertFalse(vm.state.value.searchSyncing)
+        assertFalse(vm.state.value.pagedByTab.getValue(DownloadKind.TORRENT).pageLoading)
+        gate.complete(Unit)
+        advanceUntilIdle()
+        assertEquals(100, vm.state.value.downloads.size)
+    }
+
+    @Test
+    fun `refresh and sort cancellation clear the search sync indicator`() = runTest {
+        for ((sort, startSync) in listOf(false to false, false to true, true to false, true to true)) {
+            val vm = viewModel(searchRepository { _, result -> result() })
+            advanceUntilIdle()
+            vm.setQuery("Movie 249")
+            if (startSync) runCurrent()
+            assertTrue(vm.state.value.searchSyncing)
+            if (sort) vm.setSort(DownloadSort.OLDEST) else vm.refreshFromUser()
+            advanceUntilIdle()
+            assertFalse(vm.state.value.searchSyncing)
+            assertEquals(if (sort) 250 else 100, vm.state.value.downloads.size)
+        }
+    }
+
+    @Test
+    fun `search page failure clears the indicator and keeps loaded matches`() = runTest {
+        val vm = viewModel(searchRepository { offset, result ->
+            if (offset > 0) Result.failure(IllegalStateException("offline")) else result()
+        })
+        advanceUntilIdle()
+        vm.setQuery("Movie 2")
+        advanceUntilIdle()
+        assertFalse(vm.state.value.searchSyncing)
+        assertNotNull(vm.state.value.pagedByTab.getValue(DownloadKind.TORRENT).pageError)
+        assertEquals(11, vm.visibleDownloads(vm.state.value).size)
+    }
+
+    private class PollRepository(status: DownloadStatus) : FakeRepository(
+        provider = FakeProvider(downloads = mutableListOf(sampleDownload(status = status))),
+    ) {
+        val calls = mutableListOf<Triple<DownloadKind, Int, Boolean>>()
+        var failure: Exception? = null
+        var gate: CompletableDeferred<Unit>? = null
+
+        override suspend fun listDownloadPage(
+            provider: DebridProvider,
+            kind: DownloadKind,
+            offset: Int,
+            limit: Int,
+            bypassCache: Boolean,
+        ): Result<app.trove.debrid.data.DownloadPage> {
+            calls += Triple(kind, offset, bypassCache)
+            gate?.await()
+            failure?.let { return Result.failure(it) }
+            return super.listDownloadPage(provider, kind, offset, limit, bypassCache)
+        }
+    }
+
+    @Test
+    fun `downloading rows start a sixty second bypass head poll`() = runTest {
+        val repo = PollRepository(DownloadStatus.DOWNLOADING)
+        val vm = viewModel(repo)
+        runCurrent()
+        assertEquals(1, repo.calls.size)
+        advanceTimeBy(DownloadsViewModel.POLL_INTERVAL_MS - 1)
+        runCurrent()
+        assertEquals(1, repo.calls.size)
+        advanceTimeBy(1)
+        runCurrent()
+        assertEquals(2, repo.calls.size)
+        assertEquals(Triple(DownloadKind.TORRENT, 0, true), repo.calls.last())
+        // The poll loop never idles; stop it so runTest can finish.
+        vm.viewModelScope.cancel()
+    }
+
+    @Test
+    fun `polling stops when last downloading row becomes ready`() = runTest {
+        val repo = PollRepository(DownloadStatus.DOWNLOADING)
+        val vm = viewModel(repo)
+        runCurrent()
+        repo.provider!!.downloads[0] = sampleDownload(status = DownloadStatus.READY)
+        advanceTimeBy(DownloadsViewModel.POLL_INTERVAL_MS)
+        runCurrent()
+        assertEquals(DownloadStatus.READY, vm.state.value.downloads.single().status)
+        advanceTimeBy(3 * DownloadsViewModel.POLL_INTERVAL_MS)
+        runCurrent()
+        assertEquals(2, repo.calls.size)
+    }
+
+    @Test
+    fun `ready rows do not start polling`() = runTest {
+        val repo = PollRepository(DownloadStatus.READY)
+        viewModel(repo)
+        runCurrent()
+        advanceTimeBy(3 * DownloadsViewModel.POLL_INTERVAL_MS)
+        runCurrent()
+        assertEquals(1, repo.calls.size)
+    }
+
+    @Test
+    fun `polling waits for active refresh`() = runTest {
+        val repo = PollRepository(DownloadStatus.DOWNLOADING)
+        val vm = viewModel(repo)
+        runCurrent()
+        repo.gate = CompletableDeferred()
+        vm.refresh()
+        runCurrent()
+        val callsDuringRefresh = repo.calls.size
+        advanceTimeBy(3 * DownloadsViewModel.POLL_INTERVAL_MS)
+        runCurrent()
+        assertEquals(callsDuringRefresh, repo.calls.size)
+        repo.gate!!.complete(Unit)
+        runCurrent()
+        advanceTimeBy(DownloadsViewModel.POLL_INTERVAL_MS)
+        runCurrent()
+        assertEquals(callsDuringRefresh + 1, repo.calls.size)
+        // The poll loop never idles; stop it so runTest can finish.
+        vm.viewModelScope.cancel()
+    }
+
+    @Test
+    fun `failed poll keeps rows without errors and retries next tick`() = runTest {
+        val repo = PollRepository(DownloadStatus.DOWNLOADING)
+        val vm = viewModel(repo)
+        runCurrent()
+        val rows = vm.state.value.downloads
+        repo.failure = IllegalStateException("offline")
+        advanceTimeBy(DownloadsViewModel.POLL_INTERVAL_MS)
+        runCurrent()
+        assertEquals(rows, vm.state.value.downloads)
+        assertNull(vm.state.value.error)
+        assertNull(vm.state.value.loadError)
+        assertNull(vm.state.value.pagedByTab[DownloadKind.TORRENT]?.pageError)
+        repo.failure = null
+        advanceTimeBy(DownloadsViewModel.POLL_INTERVAL_MS)
+        runCurrent()
+        assertEquals(3, repo.calls.size)
+        // The poll loop never idles; stop it so runTest can finish.
+        vm.viewModelScope.cancel()
+    }
+
+    @Test
+    fun `polling follows the visible tab only`() = runTest {
+        val repo = PollRepository(DownloadStatus.DOWNLOADING)
+        repo.provider!!.downloads += sampleDownload(id = "web", kind = DownloadKind.WEB,
+            status = DownloadStatus.QUEUED)
+        val vm = viewModel(repo)
+        runCurrent()
+        vm.setTab(DownloadKind.WEB)
+        runCurrent()
+        val beforeTick = repo.calls.size
+        advanceTimeBy(DownloadsViewModel.POLL_INTERVAL_MS)
+        runCurrent()
+        assertEquals(beforeTick + 1, repo.calls.size)
+        assertEquals(Triple(DownloadKind.WEB, 0, true), repo.calls.last())
+        // The poll loop never idles; stop it so runTest can finish.
+        vm.viewModelScope.cancel()
+    }
+
+    @Test
+    fun `rate limited polling resumes only on foreground`() = runTest {
+        val repo = PollRepository(DownloadStatus.QUEUED)
+        val vm = viewModel(repo)
+        runCurrent()
+        repo.failure = DebridError.RateLimited(null)
+        advanceTimeBy(DownloadsViewModel.POLL_INTERVAL_MS)
+        runCurrent()
+        advanceTimeBy(2 * DownloadsViewModel.POLL_INTERVAL_MS)
+        runCurrent()
+        assertEquals(2, repo.calls.size)
+        repo.failure = null
+        vm.onForeground()
+        advanceTimeBy(DownloadsViewModel.POLL_INTERVAL_MS)
+        runCurrent()
+        assertEquals(3, repo.calls.size)
+        // The poll loop never idles; stop it so runTest can finish.
+        vm.viewModelScope.cancel()
+    }
+
+    @Test
+    fun `background stops polling when notifications are off`() = runTest {
+        val repo = PollRepository(DownloadStatus.DOWNLOADING)
+        val vm = viewModel(repo)
+        runCurrent()
+        assertEquals(1, repo.calls.size)
+        vm.onBackground()
+        advanceTimeBy(3 * DownloadsViewModel.POLL_INTERVAL_MS)
+        runCurrent()
+        assertEquals(1, repo.calls.size)
+    }
+
+    @Test
+    fun `polling resumes on foreground after background`() = runTest {
+        val repo = PollRepository(DownloadStatus.DOWNLOADING)
+        val vm = viewModel(repo)
+        runCurrent()
+        vm.onBackground()
+        advanceTimeBy(3 * DownloadsViewModel.POLL_INTERVAL_MS)
+        runCurrent()
+        assertEquals(1, repo.calls.size)
+        vm.onForeground()
+        advanceTimeBy(DownloadsViewModel.POLL_INTERVAL_MS)
+        runCurrent()
+        assertEquals(2, repo.calls.size)
+        // The poll loop never idles; stop it so runTest can finish.
+        vm.viewModelScope.cancel()
+    }
+
+    @Test
+    fun `background polling continues when notifications are on`() = runTest {
+        val repo = PollRepository(DownloadStatus.DOWNLOADING)
+        repo.savedDownloadProgressNotifications = true
+        val vm = viewModel(repo)
+        runCurrent()
+        assertTrue(vm.state.value.notificationsEnabled)
+        assertEquals(1, repo.calls.size)
+        vm.onBackground()
+        advanceTimeBy(2 * DownloadsViewModel.POLL_INTERVAL_MS)
+        runCurrent()
+        assertEquals(3, repo.calls.size)
+        // The poll loop never idles; stop it so runTest can finish.
+        vm.viewModelScope.cancel()
+    }
 
     @Test
     fun `signed out when no provider`() = runTest {
@@ -79,7 +376,8 @@ class DownloadsViewModelTest {
             ),
         )
         val vm = viewModel(repo)
-        advanceUntilIdle()
+        advanceTimeBy(1_000)
+        runCurrent()
         assertFalse(vm.state.value.signedOut)
         // Only the visible (Torrents) tab loads eagerly; Web loads on
         // first visit.
@@ -88,18 +386,23 @@ class DownloadsViewModelTest {
         // Default tab is Torrents: 2 rows.
         assertEquals(2, vm.visibleDownloads(vm.state.value).size)
         vm.setTab(DownloadKind.WEB)
-        advanceUntilIdle()
+        advanceTimeBy(1_000)
+        runCurrent()
         assertEquals(3, vm.state.value.downloads.size)
         assertEquals(1, vm.visibleDownloads(vm.state.value).size)
         assertEquals("2", vm.visibleDownloads(vm.state.value).first().id)
 
         vm.setTab(DownloadKind.TORRENT)
         vm.setQuery("dune 1984")
-        advanceUntilIdle()
+        advanceTimeBy(1_000)
+        runCurrent()
         assertEquals(1, vm.visibleDownloads(vm.state.value).size)
         vm.setQuery("zzz")
-        advanceUntilIdle()
+        advanceTimeBy(1_000)
+        runCurrent()
         assertEquals(0, vm.visibleDownloads(vm.state.value).size)
+        // The poll loop never idles; stop it so runTest can finish.
+        vm.viewModelScope.cancel()
     }
 
     @Test
@@ -296,11 +599,15 @@ class DownloadsViewModelTest {
             ),
         )
         val vm = viewModel(repo)
-        advanceUntilIdle()
+        advanceTimeBy(1_000)
+        runCurrent()
         vm.play(vm.state.value.downloads.first())
-        advanceUntilIdle()
+        advanceTimeBy(1_000)
+        runCurrent()
         assertNull(vm.state.value.playUrl)
         assertNull(vm.state.value.filePicker)
+        // The poll loop never idles; stop it so runTest can finish.
+        vm.viewModelScope.cancel()
     }
 
     @Test
@@ -430,12 +737,14 @@ class DownloadsViewModelTest {
     @Test
     fun `card can show incomplete download but cannot play its files`() = runTest {
         val vm = viewModel(FakeRepository())
-        advanceUntilIdle()
+        advanceTimeBy(1_000)
+        runCurrent()
         val download = sampleDownload(status = DownloadStatus.DOWNLOADING)
         vm.openDownload(download)
         assertEquals(download, vm.state.value.filePicker)
         vm.playFile(download, "1")
-        advanceUntilIdle()
+        advanceTimeBy(1_000)
+        runCurrent()
         assertNull(vm.state.value.playUrl)
     }
 
@@ -622,8 +931,8 @@ class DownloadsViewModelTest {
         vm.setQuery("Dune")
         val before = vm.state.value.downloads
         provider.downloads.add(sampleDownload(id = "new").copy(createdAtEpochMs = 2000))
-        vm.onAdded(DownloadKind.TORRENT)
-        assertEquals(before, vm.state.value.downloads)
+        vm.onAdded(provider.downloads.last())
+        assertEquals(listOf(provider.downloads.last()) + before, vm.state.value.downloads)
         assertFalse(vm.state.value.loading)
         assertFalse(vm.state.value.refreshing)
         assertEquals(DownloadKind.TORRENT, vm.state.value.addedConfirmation)

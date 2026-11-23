@@ -59,7 +59,7 @@ fun AddSheet(
     initialText: String?,
     initialFile: Triple<ByteArray, String, String?>?,
     onDismiss: () -> Unit,
-    onAdded: (app.trove.debrid.core.DownloadKind) -> Unit,
+    onAdded: (app.trove.debrid.core.DebridDownload) -> Unit,
 ) {
     val state by viewModel.state.collectAsState()
     val context = LocalContext.current
@@ -86,7 +86,7 @@ fun AddSheet(
         if (state.added) {
             closing = true
             sheetState.hide()
-            state.addedKind?.let(onAdded)
+            state.addedDownload?.let(onAdded)
         }
     }
 
