@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.42 — 2026-11-23
+
+- Download progress (PR 78): downloading rows now show a live progress bar, percentage, speed and ETA that update about once a minute via a 60 s head poll (page 0 only, stops on 429). The status mapping is fixed so an actively downloading row is never hidden behind a stale READY flag. Pull-to-refresh now fetches only page 0 instead of traversing the whole tab, scrolling paginates by offset, and search matches the loaded snapshot instantly while the rest syncs in the background. Adding a download inserts its row at the top immediately; if the server still cannot confirm it after a second check, the row is dropped with an explanation. Optional per-download progress notifications (off by default) use the notification permission and a foreground service to show active download progress; the notifications render locally from already-fetched list data and no data leaves the device for them. With notifications on, polling continues in the background so they stay live; with them off, polling stops when the app backgrounds.
+- Baseline: 805 JVM tests, lint 0 errors.
+
 ## 0.1.41 — 2026-11-23
 
 - Ordering fix (PR 76): Newest/Oldest are now truly date-first — preferred release words only break ties, so an old x265/REMUX download no longer outranks the newest plain download. Refreshes and sort changes no longer shrink a fully loaded library back to 100 rows, and the saved snapshot heals itself instead of needing preferences deleted. Also fixed metadata enrichment being attempted twice for the same download on a fresh refresh.
