@@ -51,6 +51,31 @@ class DownloadsOrderingRegressionTest {
         assertEquals(listOf("web"), vm.visibleDownloads(vm.state.value, DownloadKind.WEB).map { it.id })
     }
 
+    @Test fun `saved preferred words only break date ties in chronological sorts`() = runTest {
+        for (words in listOf(listOf("x265", "REMUX"), listOf("custom"), emptyList())) {
+            val suffix = words.joinToString(".")
+            val rows = mutableListOf(
+                sampleDownload(id = "null-plain", name = "Film").copy(createdAtEpochMs = null),
+                sampleDownload(id = "old-plain", name = "Film").copy(createdAtEpochMs = 10),
+                sampleDownload(id = "new", name = "Film").copy(createdAtEpochMs = 30),
+                sampleDownload(id = "old", name = "Film.$suffix").copy(createdAtEpochMs = 10),
+                sampleDownload(id = "tie", name = "Film.$suffix").copy(createdAtEpochMs = 10),
+                sampleDownload(id = "null-preferred", name = "Film.$suffix").copy(createdAtEpochMs = null),
+            )
+            val repo = object : TroveRepository by FakeRepository(provider = FakeProvider(downloads = rows)) {
+                override suspend fun loadPreferWords() = words
+            }
+            val vm = viewModel(repo)
+            advanceUntilIdle()
+            val old = if (words.isEmpty()) listOf("old-plain", "old", "tie") else listOf("old", "tie", "old-plain")
+            val unknown = if (words.isEmpty()) listOf("null-plain", "null-preferred") else listOf("null-preferred", "null-plain")
+            assertEquals(listOf("new") + old + unknown, vm.visibleDownloads(vm.state.value).map { it.id })
+            vm.setSort(DownloadSort.OLDEST)
+            advanceUntilIdle()
+            assertEquals(old + "new" + unknown, vm.visibleDownloads(vm.state.value).map { it.id })
+        }
+    }
+
     @Test fun `chosen sort survives refresh and applies after tab and query filters`() = runTest {
         val provider = FakeProvider(downloads = mutableListOf(
             sampleDownload(id = "a", name = "Match A").copy(sizeBytes = 10),

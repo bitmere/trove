@@ -36,7 +36,7 @@ class ReleasePreferencesTest {
     }
 
     @Test
-    fun `preference score comes first then newest then input order`() {
+    fun `newest comes first then preference score then input order`() {
         val newest = download("new", "Film", date = 30)
         val oldPreferred = download("old", "Film.x265", date = 10)
         val preferred = download("preferred", "Film.REMUX", date = 20)
@@ -44,9 +44,37 @@ class ReleasePreferencesTest {
         val mostPreferred = download("most", "Film.x265.REMUX", date = 5)
         val rows = listOf(newest, oldPreferred, preferred, tied, mostPreferred)
         assertEquals(
-            listOf(mostPreferred, preferred, tied, oldPreferred, newest),
+            listOf(newest, preferred, tied, oldPreferred, mostPreferred),
             sortDownloads(rows, DownloadSort.NEWEST, listOf("x265", "REMUX")),
         )
+    }
+
+    @Test
+    fun `dates outrank default and custom preferences with nulls last and stable ties`() {
+        for (words in listOf(listOf("x265", "REMUX"), listOf("custom"))) {
+            val plain = download("plain", "Film", 30)
+            val old = download("old", "Film.${words.joinToString(".")}", 10)
+            val tiedPlain = download("tie-plain", "Film", 10)
+            val tiedPreferred = old.copy(id = "tie-preferred")
+            val unknown = download("unknown", "Film")
+            val unknownPreferred = old.copy(id = "unknown-preferred", createdAtEpochMs = null)
+            val rows = listOf(unknown, tiedPlain, plain, old, tiedPreferred, unknownPreferred)
+            assertEquals(listOf(plain, old, tiedPreferred, tiedPlain, unknownPreferred, unknown),
+                sortDownloads(rows, DownloadSort.NEWEST, words))
+            assertEquals(listOf(old, tiedPreferred, tiedPlain, plain, unknownPreferred, unknown),
+                sortDownloads(rows, DownloadSort.OLDEST, words))
+        }
+    }
+
+    @Test
+    fun `non chronological sorts keep preference first`() {
+        val preferred = download("preferred", "Middle.x265").copy(sizeBytes = 20, progress = 0.5f)
+        val low = download("low", "Alpha").copy(sizeBytes = 10, progress = 0f)
+        val high = download("high", "Zebra").copy(sizeBytes = 30, progress = 1f)
+        for (sort in DownloadSort.entries.filter { it != DownloadSort.NEWEST && it != DownloadSort.OLDEST }) {
+            assertEquals(sort.name, preferred,
+                sortDownloads(listOf(low, high, preferred), sort, listOf("x265")).first())
+        }
     }
 
     @Test

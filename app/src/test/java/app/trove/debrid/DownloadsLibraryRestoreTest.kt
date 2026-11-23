@@ -63,6 +63,32 @@ class DownloadsLibraryRestoreTest {
         runCurrent()
     }
 
+    @Test fun snapshotAgeControlsBypassAndInactiveTabsAgeUntilVisited() = runTest(dispatcher) {
+        val interval = DownloadsViewModel.HEAD_REVALIDATION_INTERVAL_MS
+        for (age in listOf(0L, interval - 1, interval, interval + 1)) {
+            var time = snapshot.savedAt + age
+            val web = DownloadKind.WEB
+            val cachedWeb = cached.first().copy(id = "cached-web", kind = web)
+            val repo = Repository(snapshot.copy(tabs = snapshot.tabs +
+                (web to LibrarySnapshot.Tab(listOf(cachedWeb), true, 1))))
+            val vm = DownloadsViewModel(repo, dispatcher, now = { time })
+            runCurrent()
+            assertEquals(listOf(torrent to (age >= interval)), repo.bypasses)
+            assertEquals(cached, vm.visibleDownloads(vm.state.value))
+            assertEquals(listOf(cachedWeb), vm.visibleDownloads(vm.state.value, web))
+            repo.page.complete(Result.success(DownloadPage(listOf(live), true)))
+            runCurrent()
+            assertEquals(listOf(live), vm.visibleDownloads(vm.state.value))
+            time += interval
+            vm.setTab(web)
+            runCurrent()
+            assertEquals(web to true, repo.bypasses.last())
+            assertTrue(vm.visibleDownloads(vm.state.value, web).isEmpty())
+            advanceTimeBy(500)
+            runCurrent()
+        }
+    }
+
     @Test fun absentSnapshotUsesInitialLoadingFrame() = runTest(dispatcher) {
         checkUncachedStartup(null)
     }
@@ -188,6 +214,7 @@ class DownloadsLibraryRestoreTest {
         var webPage: CompletableDeferred<DownloadPage>? = null
         var nextPage = DownloadPage(emptyList(), endReached = true)
         val offsets = mutableListOf<Int>()
+        val bypasses = mutableListOf<Pair<DownloadKind, Boolean>>()
         val writes = mutableListOf<LibrarySnapshot>()
         val lookups = mutableListOf<String>()
         val artwork = "https://example.invalid/restored.jpg"
@@ -213,6 +240,7 @@ class DownloadsLibraryRestoreTest {
             bypassCache: Boolean,
         ): Result<DownloadPage> {
             offsets += offset
+            bypasses += kind to bypassCache
             return when {
                 kind == DownloadKind.WEB -> Result.success(webPage?.await() ?: DownloadPage(emptyList(), endReached = true))
                 offset == 0 -> page.await()
