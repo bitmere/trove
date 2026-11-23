@@ -101,6 +101,11 @@ data class SettingsUiState(
     val loadingClipboardOffers: Boolean = true,
     val savingClipboardOffers: Boolean = false,
     val clipboardOffersError: Boolean = false,
+    val downloadProgressNotifications: Boolean = false,
+    val loadingDownloadProgressNotifications: Boolean = true,
+    val savingDownloadProgressNotifications: Boolean = false,
+    val downloadProgressNotificationsError: Boolean = false,
+    val downloadProgressNotificationsDenied: Boolean = false,
     val excludeWords: List<String> = defaultExcludeWords,
     val preferWords: List<String> = defaultPreferWords,
     val loadingReleaseWords: Boolean = true,
@@ -187,6 +192,10 @@ class SettingsViewModel(
     /** One-shot refresh after account changes or restoring library preferences. */
     val accountChanged: StateFlow<Boolean> = _accountChanged.asStateFlow()
 
+    private val _notificationPreferenceChanged = MutableStateFlow(false)
+    /** One-shot: the Downloads list should re-read the notification toggle. */
+    val notificationPreferenceChanged: StateFlow<Boolean> = _notificationPreferenceChanged.asStateFlow()
+
     private val accountReadError = "Couldn't read the saved account. Try again."
     private var refreshJob: Job? = null
 
@@ -245,6 +254,18 @@ class SettingsViewModel(
                 _state.update { it.copy(clipboardOffersError = true) }
             } finally {
                 _state.update { it.copy(loadingClipboardOffers = false) }
+            }
+        }
+        viewModelScope.launch {
+            try {
+                val enabled = repository.loadDownloadProgressNotificationsEnabled()
+                _state.update { it.copy(downloadProgressNotifications = enabled) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                _state.update { it.copy(downloadProgressNotificationsError = true) }
+            } finally {
+                _state.update { it.copy(loadingDownloadProgressNotifications = false) }
             }
         }
     }
@@ -723,6 +744,30 @@ class SettingsViewModel(
         }
     }
 
+    fun setDownloadProgressNotificationsEnabled(enabled: Boolean) {
+        if (backupBlocksEdits() || _state.value.loadingDownloadProgressNotifications || _state.value.savingDownloadProgressNotifications) return
+        _state.update { it.copy(savingDownloadProgressNotifications = true, downloadProgressNotificationsError = false, downloadProgressNotificationsDenied = false) }
+        viewModelScope.launch {
+            try {
+                repository.saveDownloadProgressNotificationsEnabled(enabled)
+                _state.update { it.copy(downloadProgressNotifications = enabled) }
+                _notificationPreferenceChanged.value = true
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                _state.update { it.copy(downloadProgressNotificationsError = true) }
+            } finally {
+                _state.update { it.copy(savingDownloadProgressNotifications = false) }
+            }
+        }
+    }
+
+    /** The system permission request was denied: the toggle stays off and
+     *  the Settings screen explains where to enable it. No re-prompt. */
+    fun setDownloadProgressNotificationsDenied() {
+        _state.update { it.copy(downloadProgressNotificationsDenied = true) }
+    }
+
     fun setKeyField(text: String) {
         _state.update {
             it.clearFeedback().copy(
@@ -1071,6 +1116,10 @@ class SettingsViewModel(
 
     fun consumeAccountChanged() {
         _accountChanged.value = false
+    }
+
+    fun consumeNotificationPreferenceChanged() {
+        _notificationPreferenceChanged.value = false
     }
 }
 

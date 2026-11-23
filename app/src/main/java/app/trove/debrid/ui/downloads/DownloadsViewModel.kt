@@ -20,6 +20,8 @@ import app.trove.debrid.data.DownloadPage
 import app.trove.debrid.data.MetadataOverride
 import app.trove.debrid.data.TroveRepository
 import app.trove.debrid.data.defaultPreferWords
+import app.trove.debrid.ui.downloads.notifications.ActiveDownload
+import app.trove.debrid.ui.downloads.notifications.DownloadNotificationController
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CoroutineDispatcher
@@ -114,11 +116,14 @@ data class DownloadsUiState(
     val accountLabel: String? = null,
     val tab: DownloadKind = DownloadKind.TORRENT,
     val query: String = "",
+    val searchSyncing: Boolean = false,
     val sort: DownloadSort = DownloadSort.NEWEST,
     /** Release words that rank matching downloads first; loaded from Settings. */
     val preferWords: List<String> = defaultPreferWords,
     /** When true the details sheet shows clutter files (.nfo, samples, covers). */
     val showClutterFiles: Boolean = false,
+    /** Whether download progress notifications are enabled (Settings, off by default). */
+    val notificationsEnabled: Boolean = false,
     /** Whether a TMDB key is configured, for the picker's no-key hint. */
     val tmdbConfigured: Boolean = false,
     val error: String? = null,
@@ -149,6 +154,7 @@ class DownloadsViewModel(
     private val backgroundDispatcher: CoroutineDispatcher = Dispatchers.Default,
     private val now: () -> Long = System::currentTimeMillis,
     private val elapsedNanos: () -> Long = System::nanoTime,
+    private val notifications: DownloadNotificationController = DownloadNotificationController.NoOp,
 ) : ViewModel() {
 
     companion object {
@@ -156,11 +162,24 @@ class DownloadsViewModel(
         const val PAGE_SIZE = 100
         // TorBox Get Torrent List documents information updates every 600 seconds.
         const val HEAD_REVALIDATION_INTERVAL_MS = 600_000L
+        const val POLL_INTERVAL_MS = 60_000L
     }
 
     private val _state = MutableStateFlow(DownloadsUiState())
     val state: StateFlow<DownloadsUiState> = _state.asStateFlow()
 
+    private data class PendingAdd(val download: DebridDownload, val misses: Int = 0)
+    private val pendingAdds = mutableMapOf<Pair<DownloadKind, String>, PendingAdd>()
+
+    private var pollJob: Job? = null
+    private var pollingRateLimited = false
+    /** True while the app is backgrounded or the user is on another screen
+     *  (MainActivity.onPause / DownloadsScreen dispose). Polling keeps
+     *  running in that state only when the notification toggle is on. */
+    private var backgrounded = false
+    /** Last active-download list sent to the notification controller;
+     *  identical lists are not re-sent. */
+    private var lastSyncedNotifications: List<ActiveDownload>? = null
     private var refreshJob: Job? = null
     private var refreshVersion = 0
     private var generationBypass = false
@@ -254,9 +273,11 @@ class DownloadsViewModel(
      *  `() -> Unit` for `viewModel::refresh` references.
      *
      *  A refresh resets pagination to page 0 for every tab (offsets
-     *  to 0, end-reached cleared). Fresh refreshes and replacements of
-     *  loaded tabs traverse to the end. Other tabs reload on first visit.
-     *  Loaded rows remain visible until traversal confirms deletions. */
+     *  to 0, end-reached cleared). Refresh is head-only: it fetches
+     *  page 0 of the visible tab and keeps rows below the head. Sort
+     *  changes still traverse the visible tab; other tabs reload on
+     *  first visit. Loaded rows remain visible until traversal
+     *  confirms deletions. */
     fun refresh(showIndicator: Boolean = true, fresh: Boolean) =
         refreshLibrary(showIndicator, fresh, restoreSnapshot = false)
 
@@ -270,6 +291,8 @@ class DownloadsViewModel(
         restoreSnapshot: Boolean,
         bypassMetadataMiss: Boolean = false,
     ) {
+        pollingRateLimited = false
+        stopPolling()
         refreshJob?.cancel()
         cachedTabs.clear()
         cancelPageJobs()
@@ -293,14 +316,16 @@ class DownloadsViewModel(
                 // current after the user changes them in Settings.
                 val preferWords = repository.loadPreferWords()
                 val showClutterFiles = repository.loadShowClutterFiles()
+                val notificationsEnabled = repository.loadDownloadProgressNotificationsEnabled()
                 if (version != refreshVersion) return@launch
-                _state.update { it.copy(preferWords = preferWords, showClutterFiles = showClutterFiles) }
+                _state.update { it.copy(preferWords = preferWords, showClutterFiles = showClutterFiles, notificationsEnabled = notificationsEnabled) }
                 val provider = connection.provider
                 val snapshot = if (restoreSnapshot && provider != null) readLibrarySnapshot() else null
                 if (version != refreshVersion) return@launch
                 val restored = provider != null && snapshot != null && restoreLibrary(provider, snapshot)
                 val accountLabel = connection.account?.label?.substringAfter('(')?.trimEnd(')')
                 if (libraryProvider !== provider) {
+                    pendingAdds.clear()
                     lastHeadValidation.clear()
                     if (libraryProvider != null) missBypassVersion = null
                     cancelHydration()
@@ -341,7 +366,7 @@ class DownloadsViewModel(
                 _state.update { it.copy(signedOut = false, accountLabel = accountLabel) }
                 if (!restored) resetPagination(keepRows = true, currentTab = _state.value.tab)
                 launchPage(provider, _state.value.tab, offset = 0, bypassCache = fresh,
-                    version = version, replace = true, traverse = fresh)
+                    version = version, replace = true, traverse = false, headOnly = true)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -413,9 +438,46 @@ class DownloadsViewModel(
         }
     }
 
-    fun onAdded(kind: DownloadKind) {
-        _state.update { it.copy(addedConfirmation = kind) }
+    fun onAdded(download: DebridDownload) {
+        pendingAdds[download.kind to download.id] = PendingAdd(download)
+        _state.update { state ->
+            val tab = state.pagedByTab.getValue(download.kind)
+            val byTab = state.pagedByTab + (download.kind to tab.copy(
+                loaded = listOf(download) + tab.loaded.filterNot { it.id == download.id },
+            ))
+            state.copy(
+                pagedByTab = byTab,
+                downloads = byTab.values.flatMap { it.loaded },
+                addedConfirmation = download.kind,
+            )
+        }
+        schedulePreparation(debounced = false)
+        // The optimistic row is active now: show its notification at once
+        // instead of waiting for the head fetch to return.
+        syncNotifications()
         refresh(showIndicator = false, fresh = true)
+    }
+
+    /** Re-reads the notification toggle after the user flips it in
+     *  Settings. Takes effect immediately: off stops the service at once,
+     *  on starts it at once when a download is active. */
+    fun refreshNotificationPreference() {
+        viewModelScope.launch {
+            val enabled = try {
+                repository.loadDownloadProgressNotificationsEnabled()
+            } catch (_: Exception) {
+                return@launch
+            }
+            _state.update { it.copy(notificationsEnabled = enabled) }
+            if (enabled) maybeStartPolling()
+            syncNotifications()
+        }
+    }
+
+    override fun onCleared() {
+        stopPolling()
+        notifications.stop()
+        super.onCleared()
     }
 
     fun consumeAddedConfirmation() {
@@ -423,6 +485,7 @@ class DownloadsViewModel(
     }
 
     fun setTab(tab: DownloadKind) {
+        stopPolling()
         if (tab != _state.value.tab) {
             cancelHydration()
             visibleRowKeys = emptySet()
@@ -430,6 +493,7 @@ class DownloadsViewModel(
             reconcileHydration(tab, refreshVersion)
         }
         ensureTabLoaded(tab)
+        maybeStartPolling()
     }
 
     internal fun updateVisibleRows(tab: DownloadKind, keys: Set<String>) {
@@ -437,11 +501,10 @@ class DownloadsViewModel(
     }
 
     fun setQuery(query: String) {
-        _state.update { it.copy(query = query) }
+        _state.update { it.copy(query = query, searchSyncing = query.isNotBlank() && libraryProvider != null) }
         schedulePreparation(debounced = query.isNotEmpty())
         if (query.isNotBlank()) {
-            // Search matches the whole tab, not just loaded rows: finish
-            // the tab's sync before matching (Step 2).
+            // Match loaded rows first while the remaining pages sync in the background.
             ensureFullSync(_state.value.tab)
         } else {
             fullSyncJob?.cancel()
@@ -515,7 +578,128 @@ class DownloadsViewModel(
             traverse = generationBypass || tab in replacementRows, headOnly = tab in failedHeads)
     }
 
-    fun onForeground() = revalidateHead(_state.value.tab)
+    fun onForeground() {
+        backgrounded = false
+        pollingRateLimited = false
+        revalidateHead(_state.value.tab)
+        maybeStartPolling()
+    }
+
+    /** The app backgrounded (or the user left the Downloads screen).
+     *  With the notification toggle off, polling stops: the 60 s loop
+     *  must not keep fetching while nobody watches the list. With the
+     *  toggle on, polling continues so the notification stays live
+     *  (user decision 2026-11-23). Deliberately does NOT stop the
+     *  notification service: the last posted values stay frozen until
+     *  the foreground resumes. */
+    fun onBackground() {
+        backgrounded = true
+        if (!_state.value.notificationsEnabled) stopPolling()
+    }
+
+    /** The Downloads screen (re-)entered composition. Idempotent:
+     *  maybeStartPolling() no-ops when a loop is already running. */
+    fun onDownloadsVisible() {
+        backgrounded = false
+        maybeStartPolling()
+    }
+
+    private fun pollingSuppressed(): Boolean {
+        val state = _state.value
+        return state.signedOut || state.loading || state.refreshing ||
+            refreshJob?.isActive == true || fullSyncJob?.isActive == true ||
+            state.pagedByTab.values.any { it.pageLoading }
+    }
+
+    private fun hasPollingRows(): Boolean =
+        _state.value.pagedByTab[_state.value.tab]?.loaded?.any {
+            it.status == DownloadStatus.DOWNLOADING || it.status == DownloadStatus.QUEUED
+        } == true
+
+    private fun stopPolling() {
+        pollJob?.cancel()
+        pollJob = null
+    }
+
+    private fun maybeStartPolling() {
+        if (backgrounded && !_state.value.notificationsEnabled) {
+            // Backgrounded with the toggle off: no loop, but push the
+            // current set so a stale notification still clears.
+            syncNotifications()
+            return
+        }
+        if (pollingRateLimited || pollJob?.isActive == true ||
+            !hasPollingRows() || pollingSuppressed()) {
+            // No poll loop: the active set may just have emptied (a download
+            // finished), so push the current set — an empty one stops the
+            // notification service at once instead of leaving it stale.
+            syncNotifications()
+            return
+        }
+        pollJob = viewModelScope.launch {
+            while (currentCoroutineContext().isActive) {
+                delay(POLL_INTERVAL_MS)
+                if (backgrounded && !_state.value.notificationsEnabled) {
+                    // Toggle flipped off while backgrounded: no further
+                    // page calls until the foreground resumes.
+                    stopPolling()
+                    break
+                }
+                if (!hasPollingRows()) {
+                    syncNotifications()
+                    stopPolling()
+                    break
+                }
+                if (pollingSuppressed()) continue
+                val provider = libraryProvider ?: break
+                val tab = _state.value.tab
+                launchPage(provider, tab, offset = 0, bypassCache = true,
+                    version = refreshVersion, replace = true, headOnly = true, polling = true)
+                pageJobs[tab]?.join()
+                syncNotifications()
+                if (pollingRateLimited) break
+            }
+        }
+        syncNotifications()
+    }
+
+    /** Pushes the current active downloads to the notification controller.
+     *  The active set spans every loaded tab, not just the visible one:
+     *  a download on another tab is still the user's download. Only
+     *  DOWNLOADING rows, and QUEUED rows that are just-added optimistic
+     *  rows, get notifications. Identical sets are not re-sent; the
+     *  service itself decides whether a changed set is worth re-posting
+     *  (progress moved >= 2% or the speed/ETA text changed). */
+    private fun syncNotifications() {
+        val state = _state.value
+        val active = if (!state.notificationsEnabled) {
+            emptyList()
+        } else {
+            state.pagedByTab.values.flatMap { it.loaded }
+                .filter { row ->
+                    row.status == DownloadStatus.DOWNLOADING ||
+                        (row.status == DownloadStatus.QUEUED && row.kind to row.id in pendingAdds)
+                }
+                .distinctBy { it.kind to it.id }
+                .map { it.toActiveDownload() }
+        }
+        if (active == lastSyncedNotifications) return
+        lastSyncedNotifications = active
+        if (active.isEmpty()) notifications.stop() else notifications.sync(active)
+    }
+
+    private fun DebridDownload.toActiveDownload(): ActiveDownload {
+        val progress = downloadProgress(this)
+        return ActiveDownload(
+            kind = kind,
+            id = id,
+            name = name,
+            queued = status == DownloadStatus.QUEUED,
+            percent = progress?.let { (it.fraction * 100).toInt() } ?: 0,
+            speedText = progress?.speed,
+            etaText = progress?.eta,
+        )
+    }
 
     private fun revalidateHead(tab: DownloadKind) {
         val provider = libraryProvider ?: return
@@ -544,8 +728,8 @@ class DownloadsViewModel(
     }
 
     /** Loads the rest of [tab], page by page, until the end or a page
-     *  error. Used for search: the tab must be complete before it is
-     *  matched. A page error stops the sync and stays visible as the
+     *  error. Search matches loaded rows as each page arrives.
+     *  A page error stops the sync and stays visible as the
      *  tab's page error with Retry. */
     private fun ensureFullSync(tab: DownloadKind) {
         val provider = libraryProvider ?: return
@@ -553,22 +737,35 @@ class DownloadsViewModel(
         fullSyncJob?.cancel()
         fullSyncTab = tab
         val version = refreshVersion
-        fullSyncJob = viewModelScope.launch {
-            while (version == refreshVersion) {
-                pageJobs[tab]?.join()
-                val current = _state.value.pagedByTab[tab] ?: return@launch
-                if (tab in cachedTabs || current.endReached || current.pageError != null) return@launch
-                delay(300)
-                if (version != refreshVersion || pageJobs[tab]?.isActive == true) continue
-                val latest = _state.value.pagedByTab.getValue(tab)
-                if (latest.endReached || latest.pageError != null) return@launch
-                launchPage(provider, tab, latest.nextOffset, generationBypass, version, false)
-                val pageJob = pageJobs[tab] ?: return@launch
-                try { pageJob.join() } finally {
-                    if (!currentCoroutineContext().isActive) pageJob.cancel()
+        _state.update { it.copy(searchSyncing = it.query.isNotBlank()) }
+        val job = viewModelScope.launch(start = CoroutineStart.LAZY) {
+            try {
+                while (version == refreshVersion) {
+                    pageJobs[tab]?.join()
+                    val current = _state.value.pagedByTab[tab] ?: return@launch
+                    if (tab in cachedTabs || current.endReached || current.pageError != null) return@launch
+                    delay(300)
+                    if (version != refreshVersion || pageJobs[tab]?.isActive == true) continue
+                    val latest = _state.value.pagedByTab.getValue(tab)
+                    if (latest.endReached || latest.pageError != null) return@launch
+                    launchPage(provider, tab, latest.nextOffset, generationBypass, version, false)
+                    val pageJob = pageJobs[tab] ?: return@launch
+                    try { pageJob.join() } finally {
+                        if (!currentCoroutineContext().isActive) pageJob.cancel()
+                    }
+                }
+            } finally {
+                if (fullSyncJob === currentCoroutineContext()[Job]) {
+                    _state.update { it.copy(searchSyncing = false) }
                 }
             }
         }
+        fullSyncJob = job
+        // Cancellation before the coroutine starts does not enter its finally block.
+        job.invokeOnCompletion {
+            if (fullSyncJob === job) _state.update { it.copy(searchSyncing = false) }
+        }
+        job.start()
     }
 
     private fun launchPage(
@@ -580,10 +777,13 @@ class DownloadsViewModel(
         replace: Boolean,
         traverse: Boolean = false,
         headOnly: Boolean = false,
+        polling: Boolean = false,
     ) {
         pageJobs[tab]?.cancel()
-        val traversePages = !headOnly && (traverse || tab in replacementRows ||
-            (replace && tab !in cachedTabs && _state.value.pagedByTab[tab]?.loaded?.isNotEmpty() == true))
+        // A replace without head reconciliation would truncate the tab to page 0
+        // (the 0.1.40 missing-files regression). Full traversal is explicit.
+        val headOnlyEffective = headOnly || (replace && !traverse)
+        val traversePages = !headOnlyEffective && (traverse || tab in replacementRows)
         val bypass = bypassCache || (tab in cachedTabs && snapshotSavedAt?.let {
             now() - it >= HEAD_REVALIDATION_INTERVAL_MS
         } == true)
@@ -593,13 +793,15 @@ class DownloadsViewModel(
                 (tab to current.copy(pageLoading = true, pageError = null, visited = true)))
         }
         val job = viewModelScope.launch(start = CoroutineStart.LAZY) {
+            var published = false
             try {
                 if (traversePages) _state.update { it.copy(refreshing = true) }
                 var next = offset
                 var replacePage = replace
                 do {
-                    val outcome = fetchPage(provider, tab, next, bypass, version, replacePage, headOnly)
+                    val outcome = fetchPage(provider, tab, next, bypass, version, replacePage, headOnlyEffective, polling)
                     if (outcome != PageOutcome.LOADED) break
+                    published = true
                     if (next == 0 && !headOnly && !traversePages && _state.value.query.isNotBlank()) ensureFullSync(tab)
                     val current = _state.value.pagedByTab.getValue(tab)
                     if (!traversePages || current.endReached) break
@@ -614,6 +816,11 @@ class DownloadsViewModel(
                         refreshing = if (traversePages || tab == state.tab) false else state.refreshing,
                         pagedByTab = state.pagedByTab + (tab to state.pagedByTab.getValue(tab).copy(pageLoading = false)),
                     ) }
+                    if (published) {
+                        maybeStartPolling()
+                        refreshJob?.takeIf { it.isActive }?.invokeOnCompletion { maybeStartPolling() }
+                        fullSyncJob?.takeIf { it.isActive }?.invokeOnCompletion { maybeStartPolling() }
+                    }
                 }
             }
         }
@@ -633,11 +840,14 @@ class DownloadsViewModel(
         version: Int,
         replace: Boolean,
         headOnly: Boolean,
+        polling: Boolean,
     ): PageOutcome {
         val owner = currentCoroutineContext()[Job]
         if (version != refreshVersion || pageJobs[tab] !== owner) return PageOutcome.STALE
-        if (headOnly) failedHeads.add(tab) else failedHeads.remove(tab)
-        failedPages[tab] = offset to bypassCache
+        if (!polling) {
+            if (headOnly) failedHeads.add(tab) else failedHeads.remove(tab)
+            failedPages[tab] = offset to bypassCache
+        }
         _state.update { state ->
             val current = state.pagedByTab[tab] ?: PagedTabState()
             state.copy(pagedByTab = state.pagedByTab +
@@ -650,6 +860,10 @@ class DownloadsViewModel(
         } catch (e: Exception) {
             currentCoroutineContext().ensureActive()
             if (version != refreshVersion || libraryProvider !== provider || pageJobs[tab] !== owner) return PageOutcome.STALE
+            if (polling) {
+                if (e is DebridError.RateLimited) pollingRateLimited = true
+                return PageOutcome.FAILED
+            }
             _state.update { state ->
                 val current = state.pagedByTab[tab] ?: PagedTabState()
                 state.copy(
@@ -674,12 +888,17 @@ class DownloadsViewModel(
         currentCoroutineContext().ensureActive()
         if (version != refreshVersion || libraryProvider !== provider || pageJobs[tab] !== owner) return PageOutcome.STALE
         val oldTab = _state.value.pagedByTab[tab] ?: PagedTabState()
-        val reconcileHead = headOnly && tab !in cachedTabs
+        // Reconciling the head only makes sense when rows below the head
+        // exist to retain. On a first load (or a tab with at most one
+        // page) a plain replace must carry the page's own cursor;
+        // reconciling would freeze nextOffset at 0 and endReached at
+        // false, so appends and the search full sync could never advance.
+        val reconcileHead = headOnly && tab !in cachedTabs && oldTab.loaded.size > PAGE_SIZE
         if (replace && !reconcileHead && tab !in cachedTabs && oldTab.loaded.isNotEmpty()) {
             replacementRows[tab] = LinkedHashMap()
         }
         val replacement = replacementRows[tab].takeUnless { reconcileHead }
-        val merged = if (reconcileHead) {
+        var merged = if (reconcileHead) {
             val byKey = LinkedHashMap<Pair<DownloadKind, String>, DebridDownload>()
             for (row in page.rows) byKey[row.kind to row.id] = row
             for (row in oldTab.loaded.drop(PAGE_SIZE)) byKey.putIfAbsent(row.kind to row.id, row)
@@ -698,6 +917,28 @@ class DownloadsViewModel(
             for (row in oldTab.loaded) byKey[row.kind to row.id] = row
             for (row in page.rows) byKey.putIfAbsent(row.kind to row.id, row)
             byKey.values.toList()
+        }
+        var droppedPending = false
+        if (replace && offset == 0) {
+            val serverKeys = page.rows.mapTo(mutableSetOf()) { it.kind to it.id }
+            for ((key, pending) in pendingAdds.toMap()) {
+                if (key.first != tab) continue
+                if (key in serverKeys) {
+                    pendingAdds.remove(key)
+                } else if (!polling && pending.misses >= 1) {
+                    pendingAdds.remove(key)
+                    droppedPending = true
+                    merged = merged.filterNot { it.kind to it.id == key }
+                } else {
+                    // Phase 4 deviation: only non-poll heads count misses. TorBox's
+                    // 600 s list lag must not exhaust both lives on 60 s poll ticks.
+                    // Polls can still confirm a row via the serverKeys branch above.
+                    if (!polling) pendingAdds[key] = pending.copy(misses = pending.misses + 1)
+                    if (merged.none { it.kind to it.id == key }) {
+                        merged = listOf(pending.download) + merged
+                    }
+                }
+            }
         }
         _state.update { state ->
             val tabState = state.pagedByTab[tab] ?: PagedTabState()
@@ -733,6 +974,15 @@ class DownloadsViewModel(
                 metadataOverrides = state.metadataOverrides.filterKeys(keep),
                 simklStatuses = state.simklStatuses.filterKeys(keep),
             )
+        }
+        if (droppedPending) {
+            // The optimistic row is gone with no other trace: say so on
+            // the existing error snackbar path instead of dropping it
+            // silently. loadError/pageError stay untouched — the list
+            // itself loaded fine.
+            _state.update {
+                it.copy(error = "Couldn't confirm the added download. Pull to refresh and try again.")
+            }
         }
         if (offset == 0) lastHeadValidation[tab] = now()
         if (!reconcileHead && page.endReached) replacementRows.remove(tab)

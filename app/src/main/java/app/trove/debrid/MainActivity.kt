@@ -33,6 +33,7 @@ import app.trove.debrid.ui.add.AddSheet
 import app.trove.debrid.ui.add.AddViewModel
 import app.trove.debrid.ui.downloads.DownloadsScreen
 import app.trove.debrid.ui.downloads.DownloadsViewModel
+import app.trove.debrid.ui.downloads.notifications.ServiceDownloadNotificationController
 import app.trove.debrid.ui.settings.SettingsScreen
 import app.trove.debrid.ui.settings.UpdateViewModel
 import app.trove.debrid.ui.settings.SettingsViewModel
@@ -49,7 +50,7 @@ class MainActivity : ComponentActivity() {
 
     private val container by lazy { AppContainer(applicationContext) }
     private val downloadsViewModel by lazy {
-        androidx.lifecycle.ViewModelProvider(this, SimpleFactory { DownloadsViewModel(container.repository) })[DownloadsViewModel::class.java]
+        androidx.lifecycle.ViewModelProvider(this, SimpleFactory { DownloadsViewModel(container.repository, notifications = ServiceDownloadNotificationController(applicationContext)) })[DownloadsViewModel::class.java]
     }
     private var openAddRequested by mutableStateOf(false)
     private var clipboardOffer by mutableStateOf<String?>(null)
@@ -104,6 +105,7 @@ class MainActivity : ComponentActivity() {
     override fun onPause() {
         resumed = false
         clipboardCheckPending = false
+        downloadsViewModel.onBackground()
         super.onPause()
     }
 
@@ -247,8 +249,18 @@ private fun TroveApp(
         }
     }
 
+    // Re-read the notification toggle when it flips in Settings so it
+    // takes effect immediately, without an app restart.
+    val notificationPreferenceChanged by settingsViewModel.notificationPreferenceChanged.collectAsState()
+    androidx.compose.runtime.LaunchedEffect(notificationPreferenceChanged) {
+        if (notificationPreferenceChanged) {
+            downloadsViewModel.refreshNotificationPreference()
+            settingsViewModel.consumeNotificationPreferenceChanged()
+        }
+    }
+
     androidx.compose.runtime.LaunchedEffect(downloadsViewModel) {
-        ShareActivity.completedAdds.collect { kind -> downloadsViewModel.onAdded(kind) }
+        ShareActivity.completedAdds.collect { download -> downloadsViewModel.onAdded(download) }
     }
 
     // Two destinations, one back stack. System Back (gesture or key)
@@ -332,10 +344,10 @@ private fun TroveApp(
                 showAdd = false
                 addInitialText = null
             },
-            onAdded = {
+            onAdded = { download ->
                 showAdd = false
                 addInitialText = null
-                downloadsViewModel.onAdded(it)
+                downloadsViewModel.onAdded(download)
             },
         )
     }

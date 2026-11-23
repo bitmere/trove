@@ -96,6 +96,8 @@ interface TroveRepository {
     suspend fun saveShowClutterFiles(show: Boolean) = Unit
     suspend fun loadClipboardOffersEnabled(): Boolean = true
     suspend fun saveClipboardOffersEnabled(enabled: Boolean) = Unit
+    suspend fun loadDownloadProgressNotificationsEnabled(): Boolean = false
+    suspend fun saveDownloadProgressNotificationsEnabled(enabled: Boolean) = Unit
     suspend fun loadBackupSignIn(): BackupSignIn? = null
     suspend fun restoreBackupSignIn(signIn: BackupSignIn): Unit = error("Backup sign-in unavailable")
     suspend fun claimClipboardOffer(text: String?): Boolean = false

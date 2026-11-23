@@ -645,23 +645,21 @@ class TorBoxProvider(
         val downloadPresent = optBoolean("download_present", false)
         val cachedFlag = optBoolean("cached", false)
         val state = optString("download_state")?.lowercase().orEmpty()
+        val normalizedState = state.replace("_", "")
+        val rawProgress = optDouble("progress") ?: 0.0
+        // Finished rows at full progress win; otherwise active states beat readiness flags.
+        // Stalled states are prefix-matched because the server may append a reason.
         val status = when {
-            finished || downloadPresent || cachedFlag ||
-                state in setOf("cached", "seeding", "uploading") -> DownloadStatus.READY
-            // TorBox's states also include metaDL (downloading metadata —
-            // every magnet starts here), "stalled (no seeds)" and
-            // checkingResumeData. All three are still trying to
-            // download, so they show the progress row instead of
-            // UNKNOWN; "stalled" is prefix-matched because the server
-            // appends a reason in parentheses.
-            state == "downloading" || state == "metadl" || state.replace("_", "") == "checkingresumedata" ||
+            finished && rawProgress >= 1.0 -> DownloadStatus.READY
+            normalizedState in setOf("downloading", "metadl", "checkingresumedata", "allocating", "checkingdl", "forceddl") ||
                 state.startsWith("stalled") -> DownloadStatus.DOWNLOADING
-            state == "queued" -> DownloadStatus.QUEUED
+            normalizedState == "queued" || normalizedState == "queueddl" -> DownloadStatus.QUEUED
             state == "paused" -> DownloadStatus.PAUSED
             state.contains("error") || state.contains("fail") -> DownloadStatus.ERROR
+            finished || downloadPresent || cachedFlag ||
+                state in setOf("cached", "seeding", "uploading") -> DownloadStatus.READY
             else -> DownloadStatus.UNKNOWN
         }
-        val rawProgress = optDouble("progress") ?: 0.0
         val progress = when {
             rawProgress > 1.0 -> (rawProgress / 100.0).coerceIn(0.0, 1.0)
             else -> rawProgress.coerceIn(0.0, 1.0)
@@ -696,6 +694,7 @@ class TorBoxProvider(
             peers = optInt("peers")?.takeIf { it >= 0 },
             active = optBooleanOrNull("active"),
             cached = optBooleanOrNull("cached"),
+            rawState = optString("download_state")?.lowercase()?.takeIf { it.isNotBlank() },
             expiresAtEpochMs = optString("expires_at")?.let {
                 runCatching { Instant.parse(it).toEpochMilli() }.getOrNull()
             },

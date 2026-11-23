@@ -85,6 +85,17 @@ class DownloadPresentationTest {
     }
 
     @Test
+    fun `zero percent downloading shows progress while queued and ready hide it`() {
+        val row = sampleDownload().copy(status = app.trove.debrid.core.DownloadStatus.DOWNLOADING, progress = 0f)
+        val display = app.trove.debrid.ui.downloads.downloadProgress(row)!!
+        assertEquals("0%", display.percentage)
+        assertEquals(0f, display.fraction)
+        for (status in listOf(app.trove.debrid.core.DownloadStatus.QUEUED, app.trove.debrid.core.DownloadStatus.READY)) {
+            org.junit.Assert.assertNull(app.trove.debrid.ui.downloads.downloadProgress(row.copy(status = status)))
+        }
+    }
+
+    @Test
     fun `every other state hides all progress even with stale stats`() {
         for (state in app.trove.debrid.core.DownloadStatus.entries.filter { it != app.trove.debrid.core.DownloadStatus.DOWNLOADING }) {
             org.junit.Assert.assertNull(app.trove.debrid.ui.downloads.downloadProgress(

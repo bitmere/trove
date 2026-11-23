@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import app.trove.debrid.R
 import app.trove.debrid.core.CachedInfo
 import app.trove.debrid.core.ClassifiedShare
+import app.trove.debrid.core.DebridDownload
 import app.trove.debrid.core.DebridError
 import app.trove.debrid.core.DebridService
 import app.trove.debrid.core.ServiceCacheResult
@@ -26,7 +27,7 @@ data class AddUiState(
     val checking: Boolean = false,
     val adding: Boolean = false,
     val added: Boolean = false,
-    val addedKind: app.trove.debrid.core.DownloadKind? = null,
+    val addedDownload: DebridDownload? = null,
     val error: String? = null,
     val errorResource: Int? = null,
     val cacheResults: List<ServiceCacheResult> = emptyList(),
@@ -139,7 +140,7 @@ class AddViewModel(
             }
             catch (e: Exception) { Result.failure(e) }
             result.fold(
-                onSuccess = { download -> _state.update { s -> s.copy(adding = false, added = true, addedKind = download.kind) } },
+                onSuccess = { download -> _state.update { s -> s.copy(adding = false, added = true, addedDownload = download) } },
                 onFailure = { e ->
                     if (e is CancellationException) throw e
                     if (e is DebridError.AuthInvalid && service == DebridService.ALLDEBRID) {

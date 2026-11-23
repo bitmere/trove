@@ -4,6 +4,13 @@ import app.trove.debrid.core.DebridService
 import app.trove.debrid.core.PlayerComponent
 import app.trove.debrid.data.debridServiceOrder
 import app.trove.debrid.R
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
+import androidx.compose.ui.platform.LocalContext
 import androidx.activity.compose.BackHandler
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.ui.platform.testTag
@@ -309,6 +316,52 @@ private fun LibraryContent(state: SettingsUiState, canEdit: Boolean, viewModel: 
     )
     if (state.clipboardOffersError) {
         Feedback(stringResource(R.string.clipboard_offers_setting_failed), error = true)
+    }
+    // Download progress notifications, off by default. On Android 13+ the
+    // switch first asks for POST_NOTIFICATIONS; below 13 the permission
+    // does not exist and the switch just works. The displayed state is the
+    // persisted value AND the permission, so revoking the permission in
+    // system Settings shows the switch off again.
+    val context = LocalContext.current
+    val notificationPermissionGranted = Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+        ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) ==
+        PackageManager.PERMISSION_GRANTED
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (granted) viewModel.setDownloadProgressNotificationsEnabled(true)
+        else viewModel.setDownloadProgressNotificationsDenied()
+    }
+    val notificationsSwitchEnabled = canEdit && !state.loadingDownloadProgressNotifications && !state.savingDownloadProgressNotifications
+    val notificationsChecked = state.downloadProgressNotifications && notificationPermissionGranted
+    ListItem(
+        headlineContent = { Text(stringResource(R.string.download_progress_notifications)) },
+        trailingContent = {
+            Switch(
+                checked = notificationsChecked,
+                onCheckedChange = null,
+                enabled = notificationsSwitchEnabled,
+            )
+        },
+        modifier = Modifier.toggleable(
+            value = notificationsChecked,
+            enabled = notificationsSwitchEnabled,
+            role = Role.Switch,
+            onValueChange = { enabled ->
+                if (enabled) {
+                    if (notificationPermissionGranted) viewModel.setDownloadProgressNotificationsEnabled(true)
+                    else notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                } else {
+                    viewModel.setDownloadProgressNotificationsEnabled(false)
+                }
+            },
+        ),
+    )
+    if (state.downloadProgressNotificationsError) {
+        Feedback(stringResource(R.string.download_progress_notifications_failed), error = true)
+    }
+    if (state.downloadProgressNotificationsDenied) {
+        Feedback(stringResource(R.string.download_progress_notifications_denied), error = true)
     }
     HorizontalDivider()
     Text(stringResource(R.string.release_preferences), style = MaterialTheme.typography.titleMedium)

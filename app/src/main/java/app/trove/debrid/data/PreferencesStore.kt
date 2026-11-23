@@ -44,6 +44,7 @@ class PreferencesStore(
         private const val KEY_DOWNLOAD_SORT = "download_sort"
         private const val KEY_SHOW_CLUTTER_FILES = "show_clutter_files"
         private const val KEY_CLIPBOARD_OFFERS_ENABLED = "clipboard_offers_enabled"
+        private const val KEY_DOWNLOAD_PROGRESS_NOTIFICATIONS = "download_progress_notifications"
         private const val KEY_OFFERED_CLIPBOARD_HASHES = "offered_clipboard_hashes"
         private const val KEY_PLAYER_PACKAGE = "default_player_package"
         private const val KEY_PLAYER_ACTIVITY = "default_player_activity"
@@ -118,6 +119,16 @@ class PreferencesStore(
 
     suspend fun loadClipboardOffersEnabled() = withContext(ioDispatcher) {
         prefs.getBoolean(KEY_CLIPBOARD_OFFERS_ENABLED, true)
+    }
+
+    /** Download progress notifications, off by default: nothing is
+     *  posted and no permission is requested until the user opts in. */
+    suspend fun loadDownloadProgressNotificationsEnabled() = withContext(ioDispatcher) {
+        prefs.getBoolean(KEY_DOWNLOAD_PROGRESS_NOTIFICATIONS, false)
+    }
+
+    suspend fun saveDownloadProgressNotificationsEnabled(enabled: Boolean) = withContext(ioDispatcher) {
+        prefs.edit { putBoolean(KEY_DOWNLOAD_PROGRESS_NOTIFICATIONS, enabled) }
     }
 
     suspend fun saveClipboardOffersEnabled(enabled: Boolean) {

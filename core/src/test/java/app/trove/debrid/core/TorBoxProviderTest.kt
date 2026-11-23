@@ -889,7 +889,8 @@ class TorBoxProviderTest {
     }
 
     @Test
-    fun `readiness uses download booleans and retains uploading fallback`() {
+    // The old expectations encoded the bug: READY at 1.0 hid the bar; rewritten deliberately.
+    fun `active download state beats cached and present flags`() {
         val rowsJson = """[
             {"id":1,"download_state":"completed","download_finished":false,"progress":0.4},
             {"id":2,"download_state":"completed","download_finished":true,"progress":0.4},
@@ -902,11 +903,89 @@ class TorBoxProviderTest {
         }
         val rows = kotlinx.coroutines.runBlocking { p.listDownloads() }.getOrThrow().associateBy { it.id }
         assertEquals(DownloadStatus.UNKNOWN, rows.getValue("1").status)
-        for (id in listOf("2", "3", "4", "5")) {
+        for (id in listOf("3", "4")) {
+            val row = rows.getValue(id)
+            assertEquals(DownloadStatus.DOWNLOADING, row.status)
+            assertEquals(0.4f, row.progress)
+        }
+        for (id in listOf("2", "5")) {
             val row = rows.getValue(id)
             assertEquals(DownloadStatus.READY, row.status)
             assertEquals(1f, row.progress)
         }
+    }
+
+    @Test
+    fun `downloading retains reported progress despite readiness flags unless finished at full progress`() {
+        val rowsJson = """[
+            {"id":1,"download_state":"downloading","cached":true,"progress":0.23},
+            {"id":2,"download_state":"downloading","download_present":true,"progress":42},
+            {"id":3,"download_state":"downloading","download_finished":true,"progress":1.0},
+            {"id":4,"download_state":"downloading","download_finished":true,"progress":100},
+            {"id":5,"download_state":"downloading","download_finished":true,"progress":0.4}
+        ]"""
+        val (p, _) = provider { request ->
+            HttpResponse(200, envelope(if (request.url.contains("/torrents/mylist")) rowsJson else "[]"))
+        }
+        val rows = kotlinx.coroutines.runBlocking { p.listDownloads() }.getOrThrow().associateBy { it.id }
+        for ((id, progress) in listOf("1" to 0.23f, "2" to 0.42f, "5" to 0.4f)) {
+            assertEquals(DownloadStatus.DOWNLOADING, rows.getValue(id).status)
+            assertEquals(progress, rows.getValue(id).progress, 0.001f)
+        }
+        for (id in listOf("3", "4")) {
+            assertEquals(DownloadStatus.READY, rows.getValue(id).status)
+            assertEquals(1f, rows.getValue(id).progress)
+        }
+    }
+
+    @Test
+    fun `queuedDL and active allocation checking and forced states preserve progress`() {
+        val states = listOf("queuedDL", "queued_dl", "allocating", "checkingDL", "checking_dl", "forcedDL", "forced_dl")
+        val (p, _) = provider { request ->
+            val rows = states.mapIndexed { i, state ->
+                """{"id":$i,"download_state":"$state","cached":true,"progress":${if (i == 2) 0 else 0.37}}"""
+            }.joinToString(",", "[", "]")
+            HttpResponse(200, envelope(if (request.url.contains("/torrents/mylist")) rows else "[]"))
+        }
+        val rows = kotlinx.coroutines.runBlocking { p.listDownloads() }.getOrThrow().associateBy { it.id }
+        for ((i, state) in states.withIndex()) {
+            val row = rows.getValue(i.toString())
+            assertEquals(if (i < 2) DownloadStatus.QUEUED else DownloadStatus.DOWNLOADING, row.status)
+            assertEquals(if (i == 2) 0f else 0.37f, row.progress, 0.001f)
+            assertEquals(state.lowercase(), row.rawState)
+        }
+    }
+
+    @Test
+    fun `completed without finished remains unknown and blank raw states are absent`() {
+        val rowsJson = """[
+            {"id":1,"download_state":"completed","download_finished":false,"progress":0.4},
+            {"id":2,"download_state":" "},
+            {"id":3}
+        ]"""
+        val (p, _) = provider { request ->
+            HttpResponse(200, envelope(if (request.url.contains("/torrents/mylist")) rowsJson else "[]"))
+        }
+        val rows = kotlinx.coroutines.runBlocking { p.listDownloads() }.getOrThrow().associateBy { it.id }
+        assertEquals(DownloadStatus.UNKNOWN, rows.getValue("1").status)
+        assertEquals(0.4f, rows.getValue("1").progress)
+        assertEquals("completed", rows.getValue("1").rawState)
+        assertEquals(null, rows.getValue("2").rawState)
+        assertEquals(null, rows.getValue("3").rawState)
+    }
+
+    @Test
+    fun `web mylist downloading retains progress speed and ETA`() {
+        val (p, _) = provider { request ->
+            val rows = """[{"id":1,"download_state":"downloading","progress":0.77,"download_speed":74000000,"eta":123}]"""
+            HttpResponse(200, envelope(if (request.url.contains("/webdl/mylist")) rows else "[]"))
+        }
+        val row = kotlinx.coroutines.runBlocking { p.listDownloads() }.getOrThrow().single()
+        assertEquals(DownloadKind.WEB, row.kind)
+        assertEquals(DownloadStatus.DOWNLOADING, row.status)
+        assertEquals(0.77f, row.progress, 0.001f)
+        assertEquals(74_000_000L, row.downloadSpeedBytesPerSec)
+        assertEquals(123L, row.etaSeconds)
     }
 
     @Test
