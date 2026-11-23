@@ -38,7 +38,7 @@ class LibraryDiskCacheTest {
     @Test fun capsEachTabAndTheUnion() {
         val cache = LibraryDiskCache(temporary.newFolder())
         val tabs = DownloadKind.entries.associateWith { kind ->
-            LibrarySnapshot.Tab(List(120) { row(it.toString(), kind) }, endReached = true, nextOffset = 120)
+            LibrarySnapshot.Tab(List(250) { row(it.toString(), kind) }, endReached = true, nextOffset = 250)
         }
         cache.save(LibrarySnapshot(DebridService.TORBOX, 123, tabs))
 
@@ -46,9 +46,16 @@ class LibraryDiskCacheTest {
         assertEquals(300, restored.values.sumOf { it.rows.size })
         for ((kind, tab) in restored) {
             assertEquals(tabs.getValue(kind).rows.take(100), tab.rows)
-            assertEquals(120, tab.nextOffset)
-            assertTrue(tab.endReached)
+            assertEquals(100, tab.nextOffset)
+            assertFalse(tab.endReached)
         }
+    }
+
+    @Test fun keepsGenuinelyCompleteSmallTab() {
+        val cache = LibraryDiskCache(temporary.newFolder())
+        val tab = LibrarySnapshot.Tab(List(80) { row(it.toString(), DownloadKind.TORRENT) }, true, 80)
+        cache.save(LibrarySnapshot(DebridService.TORBOX, 123, mapOf(DownloadKind.TORRENT to tab)))
+        assertEquals(tab, cache.load()!!.tabs.getValue(DownloadKind.TORRENT))
     }
 
     @Test fun deletesCorruptUnsupportedAndOversizedFiles() {

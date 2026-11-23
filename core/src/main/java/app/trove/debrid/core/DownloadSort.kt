@@ -32,8 +32,16 @@ fun sortDownloads(
         }
     }
     if (preferWords.isEmpty()) return downloads.sortedWith(comparator)
+    val preference = compareByDescending<Pair<DebridDownload, Int>> { it.second }
+    val selected = Comparator<Pair<DebridDownload, Int>> { first, second ->
+        comparator.compare(first.first, second.first)
+    }
+    val combined = if (sort == DownloadSort.NEWEST || sort == DownloadSort.OLDEST) {
+        selected.then(preference)
+    } else {
+        preference.then(selected)
+    }
     return downloads.map { it to preferScore(it.name, preferWords) }
-        .sortedWith(compareByDescending<Pair<DebridDownload, Int>> { it.second }
-            .thenComparator { first, second -> comparator.compare(first.first, second.first) })
+        .sortedWith(combined)
         .map { it.first }
 }

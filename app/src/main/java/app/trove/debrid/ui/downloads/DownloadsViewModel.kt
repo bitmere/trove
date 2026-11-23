@@ -172,11 +172,16 @@ class DownloadsViewModel(
     private var metadataOrder = 0
     private val overrideEdits = mutableSetOf<DownloadRef>()
     private val hydrationQueue = LinkedHashMap<DownloadRef, Pair<DebridDownload, Boolean>>()
+    private val hydratedAttempts = mutableMapOf<DownloadRef, Pair<DebridDownload, Boolean>>()
     private var visibleRowKeys = emptySet<String>()
     private var libraryProvider: DebridProvider? = null
     // A restored prefix can be shorter than its saved server offset.
     // Revalidate page 0 before appending so no uncached rows are skipped.
     private val cachedTabs = mutableSetOf<DownloadKind>()
+    private var snapshotSavedAt: Long? = null
+    // Fresh traversal evidence is separate from retained rows until the end.
+    private val replacementRows = mutableMapOf<DownloadKind, LinkedHashMap<Pair<DownloadKind, String>, DebridDownload>>()
+    private val failedHeads = mutableSetOf<DownloadKind>()
     private var snapshotJob: Job? = null
     private val snapshotWrites = Mutex()
     private var fileLookupJob: Job? = null
@@ -249,9 +254,9 @@ class DownloadsViewModel(
      *  `() -> Unit` for `viewModel::refresh` references.
      *
      *  A refresh resets pagination to page 0 for every tab (offsets
-     *  to 0, end-reached cleared). Fresh refreshes traverse the visible
-     *  tab; other tabs reload page 0 on first visit. Loaded rows
-     *  stay visible until page 0 replaces them. */
+     *  to 0, end-reached cleared). Fresh refreshes and replacements of
+     *  loaded tabs traverse to the end. Other tabs reload on first visit.
+     *  Loaded rows remain visible until traversal confirms deletions. */
     fun refresh(showIndicator: Boolean = true, fresh: Boolean) =
         refreshLibrary(showIndicator, fresh, restoreSnapshot = false)
 
@@ -273,6 +278,8 @@ class DownloadsViewModel(
         val version = ++refreshVersion
         generationBypass = fresh
         failedPages.clear()
+        failedHeads.clear()
+        replacementRows.clear()
         missBypassVersion = version.takeIf { bypassMetadataMiss }
         // Set feedback synchronously, then do all account/Keystore reads in
         // the repository's suspending IO path, after construction can return.
@@ -371,6 +378,7 @@ class DownloadsViewModel(
         // Set the provider before publishing so the refresh keeps these rows.
         libraryProvider = provider
         cachedTabs.addAll(snapshot.tabs.keys)
+        snapshotSavedAt = snapshot.savedAt
         _state.update { it.copy(downloads = rows, pagedByTab = tabs, loading = false, refreshing = true) }
         schedulePreparation(debounced = false)
         reconcileHydration(_state.value.tab, refreshVersion)
@@ -384,10 +392,10 @@ class DownloadsViewModel(
             delay(500)
             val snapshot = LibrarySnapshot(
                 provider.service,
-                System.currentTimeMillis(),
+                now(),
                 tabs.filterValues { it.visited || it.loaded.isNotEmpty() }.mapValues { (_, tab) ->
                     LibrarySnapshot.Tab(
-                        tab.loaded.take(LibrarySnapshot.MAX_ROWS_PER_TAB),
+                        tab.loaded,
                         tab.endReached,
                         tab.nextOffset,
                     )
@@ -441,9 +449,10 @@ class DownloadsViewModel(
         }
     }
 
-    /** A sort change resets pagination to page 0 for every tab and
-     *  reloads page 0 of the visible tab. In-flight pages belong to
-     *  the old sort, so the refresh version is bumped to drop them. */
+    /** A sort change resets pagination for every tab and
+     *  traverses the visible tab while retaining its loaded rows.
+     *  In-flight pages belong to the old sort, so the refresh version
+     *  is bumped to drop them. */
     fun setSort(sort: DownloadSort) {
         sortChanged = true
         cancelPageJobs()
@@ -452,6 +461,8 @@ class DownloadsViewModel(
         ++refreshVersion
         generationBypass = false
         failedPages.clear()
+        failedHeads.clear()
+        replacementRows.clear()
         cachedTabs.clear()
         _state.update { it.copy(sort = sort, pendingAnchor = null) }
         resetPagination(keepRows = true, currentTab = _state.value.tab)
@@ -459,7 +470,7 @@ class DownloadsViewModel(
         val provider = libraryProvider
         if (provider != null) {
             launchPage(provider, _state.value.tab, offset = 0, bypassCache = false,
-                version = refreshVersion, replace = true)
+                version = refreshVersion, replace = true, traverse = true)
         }
         viewModelScope.launch {
             sortWrites.withLock { repository.saveDownloadSort(sort) }
@@ -500,7 +511,8 @@ class DownloadsViewModel(
         if (_state.value.pagedByTab[tab]?.pageLoading == true) return
         val failed = failedPages[tab] ?: return
         launchPage(provider, tab, failed.first, failed.first == 0 || failed.second,
-            refreshVersion, replace = failed.first == 0, traverse = generationBypass)
+            refreshVersion, replace = failed.first == 0,
+            traverse = generationBypass || tab in replacementRows, headOnly = tab in failedHeads)
     }
 
     fun onForeground() = revalidateHead(_state.value.tab)
@@ -512,7 +524,7 @@ class DownloadsViewModel(
             fullSyncJob?.isActive == true || state.pagedByTab.values.any { it.pageLoading }) return
         val last = lastHeadValidation[tab]
         if (last != null && now() - last < HEAD_REVALIDATION_INTERVAL_MS) return
-        launchPage(provider, tab, 0, true, refreshVersion, replace = true, headOnly = true)
+        launchPage(provider, tab, 0, true, refreshVersion, replace = true, headOnly = tab !in cachedTabs && tab !in replacementRows)
     }
 
     /** Item 29: only the visible tab loads eagerly. Other tabs load
@@ -570,6 +582,11 @@ class DownloadsViewModel(
         headOnly: Boolean = false,
     ) {
         pageJobs[tab]?.cancel()
+        val traversePages = !headOnly && (traverse || tab in replacementRows ||
+            (replace && tab !in cachedTabs && _state.value.pagedByTab[tab]?.loaded?.isNotEmpty() == true))
+        val bypass = bypassCache || (tab in cachedTabs && snapshotSavedAt?.let {
+            now() - it >= HEAD_REVALIDATION_INTERVAL_MS
+        } == true)
         _state.update { state ->
             val current = state.pagedByTab[tab] ?: PagedTabState()
             state.copy(pagedByTab = state.pagedByTab +
@@ -577,15 +594,15 @@ class DownloadsViewModel(
         }
         val job = viewModelScope.launch(start = CoroutineStart.LAZY) {
             try {
-                if (traverse) _state.update { it.copy(refreshing = true) }
+                if (traversePages) _state.update { it.copy(refreshing = true) }
                 var next = offset
                 var replacePage = replace
                 do {
-                    val outcome = fetchPage(provider, tab, next, bypassCache, version, replacePage)
+                    val outcome = fetchPage(provider, tab, next, bypass, version, replacePage, headOnly)
                     if (outcome != PageOutcome.LOADED) break
-                    if (next == 0 && !headOnly && _state.value.query.isNotBlank()) ensureFullSync(tab)
+                    if (next == 0 && !headOnly && !traversePages && _state.value.query.isNotBlank()) ensureFullSync(tab)
                     val current = _state.value.pagedByTab.getValue(tab)
-                    if (!traverse || current.endReached) break
+                    if (!traversePages || current.endReached) break
                     next = current.nextOffset
                     replacePage = false
                     // At most 200 calls/minute, below TorBox's 300/min endpoint limit.
@@ -594,7 +611,7 @@ class DownloadsViewModel(
             } finally {
                 if (version == refreshVersion && pageJobs[tab] === currentCoroutineContext()[Job]) {
                     _state.update { state -> state.copy(
-                        refreshing = if (traverse || tab == state.tab) false else state.refreshing,
+                        refreshing = if (traversePages || tab == state.tab) false else state.refreshing,
                         pagedByTab = state.pagedByTab + (tab to state.pagedByTab.getValue(tab).copy(pageLoading = false)),
                     ) }
                 }
@@ -615,10 +632,11 @@ class DownloadsViewModel(
         bypassCache: Boolean,
         version: Int,
         replace: Boolean,
+        headOnly: Boolean,
     ): PageOutcome {
         val owner = currentCoroutineContext()[Job]
         if (version != refreshVersion || pageJobs[tab] !== owner) return PageOutcome.STALE
-        if (offset == 0) lastHeadValidation[tab] = now()
+        if (headOnly) failedHeads.add(tab) else failedHeads.remove(tab)
         failedPages[tab] = offset to bypassCache
         _state.update { state ->
             val current = state.pagedByTab[tab] ?: PagedTabState()
@@ -656,7 +674,24 @@ class DownloadsViewModel(
         currentCoroutineContext().ensureActive()
         if (version != refreshVersion || libraryProvider !== provider || pageJobs[tab] !== owner) return PageOutcome.STALE
         val oldTab = _state.value.pagedByTab[tab] ?: PagedTabState()
-        val merged = if (replace) {
+        val reconcileHead = headOnly && tab !in cachedTabs
+        if (replace && !reconcileHead && tab !in cachedTabs && oldTab.loaded.isNotEmpty()) {
+            replacementRows[tab] = LinkedHashMap()
+        }
+        val replacement = replacementRows[tab].takeUnless { reconcileHead }
+        val merged = if (reconcileHead) {
+            val byKey = LinkedHashMap<Pair<DownloadKind, String>, DebridDownload>()
+            for (row in page.rows) byKey[row.kind to row.id] = row
+            for (row in oldTab.loaded.drop(PAGE_SIZE)) byKey.putIfAbsent(row.kind to row.id, row)
+            byKey.values.toList()
+        } else if (replacement != null) {
+            for (row in page.rows) replacement.putIfAbsent(row.kind to row.id, row)
+            if (page.endReached) replacement.values.toList() else {
+                val retained = LinkedHashMap(replacement)
+                for (row in oldTab.loaded) retained.putIfAbsent(row.kind to row.id, row)
+                retained.values.toList()
+            }
+        } else if (replace) {
             page.rows
         } else {
             val byKey = LinkedHashMap<Pair<DownloadKind, String>, DebridDownload>()
@@ -668,8 +703,8 @@ class DownloadsViewModel(
             val tabState = state.pagedByTab[tab] ?: PagedTabState()
             val byTab = state.pagedByTab + (tab to tabState.copy(
                 loaded = merged,
-                nextOffset = offset + page.fetchedCount,
-                endReached = page.endReached,
+                nextOffset = if (reconcileHead) oldTab.nextOffset.coerceAtMost(merged.size) else offset + page.fetchedCount,
+                endReached = if (reconcileHead) oldTab.endReached else page.endReached,
                 pageLoading = true,
                 pageError = null,
                 visited = true,
@@ -699,7 +734,10 @@ class DownloadsViewModel(
                 simklStatuses = state.simklStatuses.filterKeys(keep),
             )
         }
+        if (offset == 0) lastHeadValidation[tab] = now()
+        if (!reconcileHead && page.endReached) replacementRows.remove(tab)
         failedPages.remove(tab)
+        failedHeads.remove(tab)
         cachedTabs.remove(tab)
         scheduleSnapshotSave(provider)
         schedulePreparation(debounced = false)
@@ -711,7 +749,7 @@ class DownloadsViewModel(
     }
 
     /** Resets every tab's cursor to page 0. Loaded rows are kept
-     *  visible until their tab's page 0 replaces them; unvisited tabs
+     *  visible until their tab's traversal reconciles them; unvisited tabs
      *  reload on first visit. */
     private fun resetPagination(keepRows: Boolean, currentTab: DownloadKind) {
         _state.update { state ->
@@ -787,6 +825,7 @@ class DownloadsViewModel(
         hydrationJob?.cancel()
         hydrationJob = null
         hydrationQueue.clear()
+        hydratedAttempts.clear()
     }
 
     private fun cancelRevalidationObservers() {
@@ -817,9 +856,11 @@ class DownloadsViewModel(
             ) continue
             val ref = DownloadRef(download.kind, download.id)
             if (ref in overrideEdits) continue
-            val queued = hydrationQueue[ref]
+            val queued = hydrationQueue[ref] ?: hydratedAttempts[ref]
             if (queued == null || queued.first != download || (bypassMiss && !queued.second)) {
-                hydrationQueue[ref] = download to bypassMiss
+                val request = download to bypassMiss
+                hydrationQueue[ref] = request
+                hydratedAttempts[ref] = request
             }
         }
         if (hydrationQueue.isEmpty() || hydrationJob?.isActive == true) return
@@ -1498,7 +1539,12 @@ private fun prepareVisible(
         DownloadSort.SMALLEST -> compareBy<DownloadSortKeys, Long?>(nullsLast(naturalOrder())) { it.size }
         DownloadSort.PROGRESS -> compareByDescending { it.progress }
     }
-    val comparator = compareByDescending<DownloadSortKeys> { it.preference }.then(sortComparator)
+    val preference = compareByDescending<DownloadSortKeys> { it.preference }
+    val comparator = if (sort == DownloadSort.NEWEST || sort == DownloadSort.OLDEST) {
+        sortComparator.then(preference)
+    } else {
+        preference.then(sortComparator)
+    }
 
     return downloads.groupBy { it.kind }.mapValues { (_, rows) ->
         rows.mapNotNull { download ->

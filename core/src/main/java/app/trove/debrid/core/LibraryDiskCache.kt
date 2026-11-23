@@ -69,8 +69,9 @@ class LibraryDiskCache(private val directory: File) {
         add("tabs", JsonObject().apply {
             snapshot.tabs.forEach { (kind, tab) ->
                 add(kind.name, JsonObject().apply {
-                    addProperty("endReached", tab.endReached)
-                    addProperty("nextOffset", tab.nextOffset)
+                    val truncated = tab.rows.size > LibrarySnapshot.MAX_ROWS_PER_TAB
+                    addProperty("endReached", tab.endReached && !truncated)
+                    addProperty("nextOffset", if (truncated) LibrarySnapshot.MAX_ROWS_PER_TAB else tab.nextOffset)
                     add("rows", JsonArray().apply {
                         tab.rows.take(LibrarySnapshot.MAX_ROWS_PER_TAB).forEach { add(encodeRow(it)) }
                     })
