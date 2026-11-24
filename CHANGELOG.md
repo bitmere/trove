@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.43 — 2026-11-24
+
+- TMDB manual input and similar release-name cases (PR 80): bare-number titles (418, 1917, 300) are now searched as titles instead of being parsed as TMDB ids, two-letter titles work in manual search, site banners are stripped from release names, the year is kept, and HDTS/DVDScr act as title boundaries. Limit: the 418 download itself may still not auto-enrich (no year, '418 TRUE' remains) — pull-to-refresh retries it.
+- Baseline: 820 JVM tests, lint 0 errors.
+
 ## 0.1.42 — 2026-11-23
 
 - Download progress (PR 78): downloading rows now show a live progress bar, percentage, speed and ETA that update about once a minute via a 60 s head poll (page 0 only, stops on 429). The status mapping is fixed so an actively downloading row is never hidden behind a stale READY flag. Pull-to-refresh now fetches only page 0 instead of traversing the whole tab, scrolling paginates by offset, and search matches the loaded snapshot instantly while the rest syncs in the background. Adding a download inserts its row at the top immediately; if the server still cannot confirm it after a second check, the row is dropped with an explanation. Optional per-download progress notifications (off by default) use the notification permission and a foreground service to show active download progress; the notifications render locally from already-fetched list data and no data leaves the device for them. With notifications on, polling continues in the background so they stay live; with them off, polling stops when the app backgrounds.
