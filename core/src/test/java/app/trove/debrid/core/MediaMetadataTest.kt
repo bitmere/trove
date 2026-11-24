@@ -42,6 +42,139 @@ class MediaMetadataTest {
             "https://images.example.invalid/b.jpg", null), candidates.map { it.posterUrl })
     }
 
+    @Test fun `strips only structurally delimited leading domain banners`() {
+        for (banner in listOf("www.1TamilMV.ceo - ", "[example.technology] ", "(example.org) ",
+            "{example.org} ", "example.org - ", "example.co.uk--", "example.org  ")) {
+            assertEquals(banner, MediaQuery("Film", null, null), parseMediaName("${banner}Film"))
+        }
+        assertEquals(MediaQuery("418 TRUE", null, null), parseMediaName("www 1TamilMV ceo - 418 TRUE"))
+        for ((name, title) in listOf(
+            "O.M Operation Mole" to "O M Operation Mole", "S.H.I.E.L.D." to "S H I E L D",
+            "Spider-Man" to "Spider-Man", "example.org Film" to "example org Film",
+            "example.org-Film" to "example org-Film", "Naruto-Kun.org - Film" to "Naruto-Kun org - Film",
+            "www 1TamilMV ceo Film" to "www 1TamilMV ceo Film",
+        )) assertEquals(name, MediaQuery(title, null, null), parseMediaName(name))
+    }
+
+    @Test fun `supplied releases share the same primary title and grouped year`() {
+        val releases = listOf(
+            "O M Operation Mole (2026) 1080p Telugu DVDScr - x264 - AAC - 7.5GB",
+            "www.1TamilMV.ceo - O.M Operation Mole (2026) Telugu HQ HDTS - 720p - x264 - HQ Clean - AAC - 1.7GB.mkv",
+        )
+        for (release in releases) {
+            assertEquals(MediaQuery("O M Operation Mole", 2026, null), parseMediaName(release))
+            assertEquals(listOf(MediaQuery("O M Operation Mole", 2026, null),
+                MediaQuery("O M Operation Mole", null, null)), mediaQueryVariants(release))
+        }
+    }
+
+    @Test fun `prefers first standalone grouped year and otherwise last bare year`() {
+        for (year in listOf("(2026)", "[2026]", "{2026}", "( 2026 )")) {
+            assertEquals(MediaQuery("Film", 2026, null), parseMediaName("Film $year Telugu HQ HDTS"))
+        }
+        assertEquals(MediaQuery("Film", 2020, null), parseMediaName("Film (2020) 2021 1080p"))
+        assertEquals(MediaQuery("Film", 2020, null), parseMediaName("Film (2020) [2021] 1080p"))
+        assertEquals(MediaQuery("Film 2020", 2021, null), parseMediaName("Film 2020 2021 1080p"))
+        val variants = mediaQueryVariants("Blade.Runner.2049.(Hindi.Dubbed.2024).2017.1080p.mkv")
+        assertEquals(MediaQuery("Blade Runner 2049", 2017, null), variants.first())
+        assertTrue(variants.all { it.year == null || it.year == 2017 })
+        val next = java.time.Year.now().value + 1
+        assertEquals(next, parseMediaName("Film ($next)").year)
+        assertEquals(MediaQuery("Film ${next + 1}", null, null), parseMediaName("Film ${next + 1} 1080p"))
+        assertTrue(mediaQueryVariants("Film (${next + 1})").all { it.year == null })
+    }
+
+    @Test fun `recognizes bounded compound technical families before punctuation cleanup`() {
+        val tokens = listOf("HDTS", "HD-TS", "TELESYNC", "HDCAM", "HD-CAMRip", "CAMRip", "HDTC", "HD-TC",
+            "TELECINE", "DVDScr", "DVDScreener", "SCREENER", "WEB-DL", "WEBRip", "BluRay", "Blu-Ray",
+            "BDRip", "BRRip", "HDRip", "DVDRip", "HDTV", "576p", "1080i", "2160p", "4K", "FHD",
+            "x264", "h.265", "HEVC", "AVC", "Xvid", "AV1", "AAC", "HE-AAC", "AAC-LC", "AC3",
+            "DDP", "DD5.1", "DDP7.1", "DTS-HD-MA", "TrueHD", "Atmos", "1.7GB", "7.5 GB", "700MB",
+            "remux", "HDR10+", "DV", "multi", "proper", "repack")
+        for (token in tokens) assertEquals(token, MediaQuery("Film", null, null), parseMediaName("Film $token"))
+        for (token in listOf("TS", "TC", "CAM", "WEB", "HD", "DD", "SCR", "5.1", "7.1", "2.0")) {
+            assertEquals(token, MediaQuery("Film", null, null), parseMediaName("Film $token 720p"))
+            assertEquals(token, MediaQuery("Film", 2026, null), parseMediaName("Film 2026 $token"))
+            assertEquals(token, MediaQuery("Film $token".replace('.', ' '), null, null), parseMediaName("Film $token"))
+        }
+        assertEquals(MediaQuery("Film", null, null), parseMediaName("Film HQ HDTS 720p"))
+        assertEquals(MediaQuery("Film", null, null), parseMediaName("Film HQ CAM 720p"))
+        assertEquals(MediaQuery("Film HQ", null, null), parseMediaName("Film HQ AAC"))
+    }
+
+    @Test fun `preserves weak title words languages and excluded ambiguities`() {
+        for (title in listOf("Cam", "The Web", "HQ Clean", "Film HQ", "Film HQ CAM", "The Telugu Film",
+            "Film Clean", "418 TRUE", "Film-GROUP", "Webster", "Scary", "FilmXvid", "AACademy")) {
+            assertEquals(title, MediaQuery(title, null, null), parseMediaName(title))
+        }
+        assertEquals(MediaQuery("Film Telugu", null, null), parseMediaName("Film Telugu HDTS"))
+        assertEquals(MediaQuery("Film", 2026, null), parseMediaName("Film (2026) Telugu"))
+        assertEquals(MediaQuery("Film", null, null), parseMediaName("Film HDTS Telugu"))
+        assertEquals(MediaQuery("Class of", 1984, null), parseMediaName("Class of 1984"))
+        assertEquals(MediaQuery("Room", null, "series"), parseMediaName("Room 237"))
+        assertTrue(mediaQueryVariants("[REC]").all { it.title.isBlank() })
+    }
+
+    @Test fun `rejects embedded and leading release years across variants`() {
+        for (title in listOf("Film A2012B", "1917", "2012", "300", "42")) {
+            assertEquals(MediaQuery(title, null, null), parseMediaName(title))
+            assertTrue(mediaQueryVariants(title).all { it.year == null })
+        }
+        for (title in listOf("[1917]", "(1917)", "1917.")) {
+            assertEquals(listOf(MediaQuery("1917", null, null)), mediaQueryVariants(title))
+            assertEquals(MediaQuery("1917", null, null), parseMediaName(title))
+        }
+        for (title in listOf("(1917) (2019) 1080p", "1917.2019.1080p")) {
+            assertEquals(MediaQuery("1917", 2019, null), parseMediaName(title))
+            assertTrue(mediaQueryVariants(title).all { it.year == null || it.year == 2019 })
+        }
+        assertEquals(MediaQuery("1923", null, "series"), parseMediaName("1923 S01E01"))
+    }
+
+    @Test fun `recovers existing raw title only when clean primary is blank`() = runBlocking {
+        for (release in listOf("(Alien)", "(Alien) 1080p")) {
+            assertEquals(MediaQuery("Alien", null, null), parseMediaName(release))
+            val variants = mediaQueryVariants(release)
+            assertEquals(listOf(MediaQuery("Alien", null, null)), variants)
+            val http = CinemetaTransport().apply {
+                catalog = """{"metas":[{"id":"tt1","name":"Alien","type":"movie"}]}"""
+            }
+            assertEquals("Alien", CinemetaResolver(http).candidates(variants.first()).single().title)
+            assertTrue(http.requests.any { "/catalog/" in it.url && "search=Alien" in it.url })
+        }
+        for (release in listOf("", "...", "(Hindi Dubbed)", "(1080p)", "1080p", "1080p x264",
+            "https://example.org/Film.mkv", "magnet:?dn=(Alien)")) {
+            assertTrue(release, parseMediaName(release).title.isBlank())
+            val http = CinemetaTransport()
+            assertNull(CinemetaResolver(http).resolve(mediaQueryVariants(release)))
+            assertTrue(release, http.requests.isEmpty())
+        }
+    }
+
+    @Test fun `numeric punctuation retains all digits without weak episode inference`() {
+        for (title in listOf("1.618", "1-618", "4:18", "418.", "1071", "42", "0")) {
+            val query = parseMediaName(title)
+            assertEquals(title, normalizedTitle(title), normalizedTitle(query.title))
+            assertNull(query.type)
+            assertNull(query.year)
+        }
+        assertEquals(MediaQuery("1917", null, "series"), parseMediaName("1917 S01E01"))
+        assertEquals(MediaQuery("Show", null, "series"), parseMediaName("Show 1071"))
+        assertEquals(MediaQuery("One Piece", null, "series"), parseMediaName("One Piece - 1071"))
+        assertEquals(MediaQuery("The 100", null, null), parseMediaName("The 100"))
+    }
+
+    @Test fun `expanded search boundaries do not expand display quality labels`() {
+        for (source in listOf("HDTS", "DVDScr", "HDRip", "576p", "FHD", "AV1", "TrueHD")) {
+            assertEquals(ReleaseDetails(null, null), parseReleaseDetails("Film $source"))
+        }
+        assertEquals(ReleaseDetails("S01E02", "720p"), parseReleaseDetails("Show S01E02 HQ HDTS 720p"))
+        for ((token, label) in listOf("4K" to "2160p", "1080p" to "1080p", "1080i" to "1080i",
+            "720p" to "720p", "480p" to "480p")) {
+            assertEquals(ReleaseDetails(null, label), parseReleaseDetails("Film $token"))
+        }
+    }
+
     @Test fun `parses release titles years and tags`() {
         assertEquals(MediaQuery("Baththa", 2026, null), parseMediaName("Baththa.2026.1080p.WEB-Rip.HEVC-GROUP.mkv"))
         assertEquals(MediaQuery("Baahubali The Beginning", 2015, null),

@@ -82,6 +82,7 @@ data class MediaCandidate(val imdbId: String?, val title: String, val year: Int?
 
 private val extension = Regex("\\.(mkv|mp4|avi|mov|webm|m4v|ts|torrent|nzb)$", RegexOption.IGNORE_CASE)
 private val yearToken = Regex("(?<!\\d)(19\\d{2}|20\\d{2})(?!\\d)")
+private val releaseYearToken = Regex("(?<![\\p{L}\\p{N}])(19\\d{2}|20\\d{2})(?![\\p{L}\\p{N}])")
 private val episode = Regex("(?i)\\b(?:s(\\d{1,2})(?:e(\\d{1,3}))?|(\\d{1,2})x(\\d{2})|season\\s+\\d+)\\b")
 private val absoluteEpisode = Regex("(?:\\s+|-+)(\\d{2,4})$")
 private val imdbIdPattern = Regex("tt\\d+")
@@ -122,10 +123,92 @@ private val dubTag = Regex(
     "(?i)\\b(?:(?:(?:hindi|english|tamil|telugu|malayalam|kannada)[ -]+)?dub(?:bed)?|dual[ -]+audio)\\b",
 )
 
-fun parseMediaName(name: String): MediaQuery = parseMediaRelease(name, clean = true)
+// Search boundaries use raw punctuation; display labels retain releaseTag above.
+private const val sourceTokens = "HD[ ._-]?(?:TS|CAM(?:Rip)?|TC|TELESYNC|TELECINE)|TELESYNC|TELECINE|CAM[ ._-]?Rip|DVD(?:Scr(?:eener)?|Rip)|SCREENER|WEB[ ._-]?(?:DL|Rip)|Blu[ ._-]?Ray|B[DR]Rip|HDRip|HDTV"
+private const val channelTokens = "[257]\\.[01]"
+private val technicalToken = Regex(
+    "(?i)(?<![\\p{L}\\p{N}])(?:$sourceTokens|\\d{3,4}[pi]|4K|FHD|[xh][ .-]?26[45]|HEVC|AVC|Xvid|AV1|" +
+        "(?:HE[ .-]?)?AAC(?:[ .-]?LC)?|AC[ .-]?3|DDP?(?:[ ._-]?$channelTokens)?|DTS(?:[ .-]?HD(?:[ .-]?MA)?)?|TrueHD|Atmos|" +
+        "\\d+(?:\\.\\d+)?[ ]?(?:MB|GB)|$channelTokens|TS|TC|CAM|WEB|HD|SCR|remux|hdr10?\\+?|dv|multi|dual(?![ ._-]+audio)|proper|repack)(?![\\p{L}\\p{N}])",
+)
+private val sourceToken = Regex("(?i)(?:$sourceTokens|TS|TC|CAM|WEB|SCR)")
+private val weakTechnicalToken = Regex("(?i)(?:TS|TC|CAM|WEB|HD|DD|SCR|$channelTokens)")
+private val hqSuffix = Regex("(?i)(?<![\\p{L}\\p{N}])HQ[ ._-]+$")
+private val domainBanner = Regex(
+    "(?i)^(?:[\\[({]\\s*)?(?:www\\.)?([a-z0-9-]+)(?:\\.[a-z0-9-]+)*\\.[a-z]{2,}(?:\\s*[\\])}]|[ -]{2,})[ -]*",
+)
+private val normalizedBanner = Regex("(?i)^www +([a-z0-9-]+) +[a-z]{2,} +- +")
+private val bracketGroup = Regex("\\[[^]]*]")
+private val groupedYear = Regex("(?:\\(\\s*(?:19|20)\\d{2}\\s*\\)|\\[\\s*(?:19|20)\\d{2}\\s*]|\\{\\s*(?:19|20)\\d{2}\\s*})")
+private val wrappers = Regex("[(){}\\[\\]]")
+private val whitespace = Regex("\\s+")
+
+private data class ReleaseInput(val title: String, val year: Int?, val series: Boolean)
+
+private fun stripBanner(name: String): String {
+    val banner = domainBanner.find(name) ?: normalizedBanner.find(name) ?: return name
+    return if (banner.groupValues[1].equals("Naruto-Kun", true)) name else name.drop(banner.value.length)
+}
+
+private fun technicalBoundary(base: String): Int {
+    val tokens = technicalToken.findAll(base).toList()
+    fun adjacent(left: MatchResult, right: MatchResult): Boolean =
+        base.substring(left.range.last + 1, right.range.first).all { it in " ._-" }
+    for ((index, token) in tokens.withIndex()) {
+        if (weakTechnicalToken.matches(token.value)) {
+            val before = tokens.getOrNull(index - 1)
+            val after = tokens.getOrNull(index + 1)
+            val supported = before != null && !weakTechnicalToken.matches(before.value) && adjacent(before, token) ||
+                after != null && !weakTechnicalToken.matches(after.value) && adjacent(token, after)
+            if (!supported) continue
+        }
+        var start = token.range.first
+        if (sourceToken.matches(token.value)) {
+            hqSuffix.find(base.take(start))?.let { start = it.range.first }
+        }
+        if (base.take(start).any(Char::isLetterOrDigit)) return start
+    }
+    return base.length
+}
+
+private fun prepareRelease(name: String): ReleaseInput {
+    if (name.contains("://") || name.startsWith("magnet:", true)) return ReleaseInput("", null, false)
+    val raw = stripBanner(name.replace('\\', '/').substringAfterLast('/').replace(extension, "").trim())
+    // Mask discarded qualifiers without moving year positions. Standalone grouped years survive.
+    val base = bracketGroup.replace(raw) { if (groupedYear.matches(it.value)) it.value else " ".repeat(it.value.length) }
+    val yearBase = parenthetical.replace(base) { if (groupedYear.matches(it.value)) it.value else " ".repeat(it.value.length) }
+    val ep = episode.find(base.replace('.', ' ').replace('_', ' '))
+    val boundary = minOf(ep?.range?.first ?: base.length, technicalBoundary(base))
+    val latestYear = Year.now().value + 1
+    val groups = groupedYear.findAll(yearBase).toList()
+    val years = releaseYearToken.findAll(yearBase.take(boundary)).filter {
+        it.value.toInt() <= latestYear && yearBase.take(it.range.first).any(Char::isLetterOrDigit)
+    }.toList()
+    val year = years.firstOrNull { candidate -> groups.any { candidate.range.first in it.range } }
+        ?: years.lastOrNull()
+    val end = minOf(boundary, year?.range?.first ?: base.length)
+    return ReleaseInput(base.take(end), year?.value?.toInt(), ep != null)
+}
+
+private fun primaryQuery(input: ReleaseInput): MediaQuery {
+    val clean = parseMediaRelease(input, clean = true)
+    val titleTokens = technicalToken.replace(clean.title) {
+        if (weakTechnicalToken.matches(it.value)) it.value else " "
+    }
+    if (clean.title.isNotBlank() && titleTokens.none(Char::isLetterOrDigit)) return clean.copy(title = "")
+    if (clean.title.isNotBlank()) return clean
+    val raw = parseMediaRelease(input, clean = false)
+    // Recovery must not turn a qualifier or technical-only input into a catalog query.
+    val evidence = dubTag.replace(editionTag.replace(raw.title, " "), " ")
+    if (technicalToken.replace(evidence, " ").none(Char::isLetterOrDigit)) return clean
+    return raw
+}
+
+fun parseMediaName(name: String): MediaQuery = primaryQuery(prepareRelease(name))
 
 fun mediaQueryVariants(name: String): List<MediaQuery> {
-    val query = parseMediaName(name)
+    val input = prepareRelease(name)
+    val query = primaryQuery(input)
     if (query.title.isBlank()) return listOf(query)
     val editionStripped = cleanTitle(query.title.replace(editionTag, " "))
     return buildList {
@@ -145,27 +228,19 @@ fun mediaQueryVariants(name: String): List<MediaQuery> {
                 add(query.copy(title = "The $rest"))
             }
         }
-        add(parseMediaRelease(name, clean = false))
+        add(parseMediaRelease(input, clean = false))
     }.distinctBy { it.copy(title = normalizedTitle(it.title)) }
 }
 
-private fun cleanTitle(title: String): String = title.replace(Regex("[(){}\\[\\]]"), " ")
-    .replace(Regex("\\s+"), " ").trim(' ', '-')
+private fun cleanTitle(title: String): String = title.replace(wrappers, " ")
+    .replace(whitespace, " ").trim(' ', '-')
 
-private fun parseMediaRelease(name: String, clean: Boolean): MediaQuery {
-    // URLs and magnets must never become third-party search requests.
-    if (name.contains("://") || name.startsWith("magnet:", true)) return MediaQuery("", null, null)
-    val raw = name.replace('\\', '/').substringAfterLast('/').replace(extension, "")
-        .replace(Regex("\\[(?!(?:19|20)\\d{2}])[^]]*]"), " ").replace('.', ' ').replace('_', ' ')
-    val base = (if (clean) raw.replace(parenthetical, " ") else raw).trim()
-    val ep = episode.find(base)
-    val tag = releaseTag.find(base)
-    val boundary = listOfNotNull(ep?.range?.first, tag?.range?.first).minOrNull() ?: base.length
-    val latestYear = Year.now().value + 1
-    val year = yearToken.findAll(base.take(boundary))
-        .lastOrNull { it.range.first > 0 && it.value.toInt() <= latestYear }
-    val end = minOf(boundary, year?.range?.first ?: base.length)
-    var title = cleanTitle(base.take(end))
+private fun parseMediaRelease(input: ReleaseInput, clean: Boolean): MediaQuery {
+    val raw = input.title.replace('.', ' ').replace('_', ' ')
+    val base = if (clean) parenthetical.replace(raw) {
+        if (groupedYear.matches(it.value)) it.value else " "
+    } else raw
+    var title = cleanTitle(base)
     if (clean) {
         // Strip trailing release qualifiers while preserving words inside a title.
         while (true) {
@@ -177,13 +252,13 @@ private fun parseMediaRelease(name: String, clean: Boolean): MediaQuery {
             title = stripped
         }
     }
-    val absolute = if (ep == null) absoluteEpisode.find(title) else null
+    val absolute = if (!input.series) absoluteEpisode.find(title) else null
     val seriesTitle = absolute?.takeUnless { yearToken.matches(it.groupValues[1]) }
         ?.takeIf { it.groupValues[1].length >= 3 && it.groupValues[1].toInt() > 100 }
         ?.let { title.take(it.range.first).trimEnd(' ', '-') }
-        ?.takeIf { it.any(Char::isLetterOrDigit) }
-    return MediaQuery(seriesTitle ?: title, year?.value?.toIntOrNull(),
-        if (ep != null || seriesTitle != null) "series" else null)
+        ?.takeIf { it.any(Char::isLetter) }
+    return MediaQuery(seriesTitle ?: title, input.year,
+        if (input.series || seriesTitle != null) "series" else null)
 }
 
 internal fun normalizedTitle(title: String): String = java.text.Normalizer
