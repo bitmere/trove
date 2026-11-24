@@ -369,6 +369,101 @@ class TmdbResolverTest {
         assertNull(result?.director)
     }
 
+    @Test fun `untyped numeric manual inputs search original digits including zero and overflow`() = runBlocking {
+        for (type in listOf(null, "bogus")) for (digits in listOf("418", "1917", "300", "2012", "42", "0", "2147483648")) {
+            val http = FakeTmdb().apply { searchMovieJson = """{"results":[{"id":1,"title":"$digits"}]}""" }
+            val service = resolver(http)
+            assertEquals(ManualTmdbLink.ByTitle(digits), service.parseManualLink(" $digits ", type))
+            assertTrue(service.searchManualLink(" $digits ", type) is ManualTmdbSearch.Found)
+            assertEquals(listOf("movie", "tv"), http.requests.filter { "/search/" in it.url }
+                .map { it.url.substringAfter("/search/").substringBefore('?') })
+            assertTrue(http.requests.filter { "/search/" in it.url }.all { it.url.endsWith("query=$digits") })
+            assertTrue(http.requests.none { "/3/movie/" in it.url || "/3/tv/" in it.url })
+        }
+    }
+
+    @Test fun `typed numeric IDs and explicit links retain validation and detail routing`() = runBlocking {
+        for (type in listOf("movie", "series")) {
+            for (digits in listOf("418", "1917", "300", "2012", "42")) {
+                val http = FakeTmdb()
+                assertEquals(ManualTmdbLink.ById(digits.toInt(), type), resolver(http).parseManualLink(digits, type))
+                resolver(http).searchManualLink(digits, type)
+                val endpoint = if (type == "series") "tv" else "movie"
+                assertTrue(http.requests.any { "/3/$endpoint/$digits?" in it.url })
+                assertTrue(http.requests.none { "/search/" in it.url })
+            }
+            for (digits in listOf("0", "2147483648")) {
+                val http = FakeTmdb()
+                assertEquals(ManualTmdbSearch.Invalid, resolver(http).searchManualLink(digits, type))
+                for (endpoint in listOf("movie", "tv")) {
+                    assertEquals(ManualTmdbSearch.Invalid,
+                        resolver(http).searchManualLink("https://themoviedb.org/$endpoint/$digits", type))
+                }
+                assertTrue(http.requests.isEmpty())
+            }
+        }
+        val http = FakeTmdb()
+        assertEquals(ManualTmdbSearch.NoMatch, resolver(http, apiKey = null).searchManualLink("418", null))
+        assertTrue(http.requests.isEmpty())
+    }
+
+    @Test fun `manual punctuation queries are trimmed but never cleaned`() = runBlocking {
+        for (title in listOf("4:18", "418.", "1917.", "42!", "1.618")) {
+            val http = FakeTmdb().apply {
+                searchMovieJson = """{"results":[{"id":1,"title":"${normalizedTitle(title)}"}]}"""
+            }
+            assertEquals(ManualTmdbLink.ByTitle(title), resolver(http).parseManualLink(" $title ", "movie"))
+            assertTrue(resolver(http).searchManualLink(" $title ", "movie") is ManualTmdbSearch.Found)
+            assertTrue(http.requests.single { "/search/" in it.url }.url.endsWith(
+                "query=" + java.net.URLEncoder.encode(title, "UTF-8")))
+        }
+    }
+
+    @Test fun `manual two character and interior matches use either title field`() = runBlocking {
+        for (query in listOf("O.M", "Operation Mole", "Mole")) {
+            val http = FakeTmdb().apply {
+                searchMovieJson = """{"results":[
+                    {"id":1,"title":"O.M Operation Mole"},
+                    {"id":2,"title":"Localized","original_title":"O.M Operation Mole"}]}"""
+            }
+            val found = resolver(http).searchManualLink(query, "movie") as ManualTmdbSearch.Found
+            assertEquals(listOf(1, 2), found.candidates.map { it.tmdbId })
+            assertTrue(resolver(http).searchCandidates(MediaQuery(query, null, "movie")).isEmpty())
+        }
+        val http = FakeTmdb().apply {
+            searchTvJson = """{"results":[{"id":3,"name":"Localized","original_name":"Pushpa"}]}"""
+        }
+        assertTrue(resolver(http).searchManualLink("pu", "series") is ManualTmdbSearch.Found)
+    }
+
+    @Test fun `one character and empty keys do not enable partial matching`() = runBlocking {
+        val http = FakeTmdb().apply {
+            searchMovieJson = """{"results":[{"id":1,"title":"X"},{"id":2,"title":"X Files"},
+                {"id":3,"title":"Box"},{"id":4,"title":"It"},{"id":5,"title":"Up"}]}"""
+        }
+        for (title in listOf("X", "It", "Up")) {
+            val found = resolver(http).searchManualLink(title, "movie") as ManualTmdbSearch.Found
+            assertEquals(listOf(title), found.candidates.map { it.title })
+            assertEquals(listOf(title), resolver(http).searchCandidates(MediaQuery(title, null, "movie")).map { it.title })
+        }
+        // Supply both fields so an absent original title cannot be an exact empty key.
+        http.searchMovieJson = """{"results":[{"id":1,"title":"Film","original_title":"Film"}]}"""
+        assertEquals(ManualTmdbSearch.NoMatch, resolver(http).searchManualLink("...", "movie"))
+    }
+
+    @Test fun `manual contains preserves order deduplication cap and outgoing query`() = runBlocking {
+        val http = FakeTmdb().apply {
+            searchMovieJson = """{"results":[{"id":3,"title":"A Mole Story"},
+                {"id":1,"title":"The Mole"},{"id":3,"title":"Duplicate Mole"}]}"""
+            searchTvJson = """{"results":[{"id":3,"name":"Series Mole"},{"id":2,"name":"Another Mole"},
+                {"id":7,"name":"Final Mole"},{"id":8,"name":"Extra Mole"}]}"""
+        }
+        val found = resolver(http).searchManualLink("  Mo.le  ", null) as ManualTmdbSearch.Found
+        assertEquals(listOf(3, 1, 3, 2, 7), found.candidates.map { it.tmdbId })
+        assertEquals(listOf("movie", "movie", "series", "series", "series"), found.candidates.map { it.type })
+        assertTrue(http.requests.filter { "/search/" in it.url }.all { it.url.endsWith("query=Mo.le") })
+    }
+
     @Test fun `parseManualLink accepts TMDB movie and tv links`() {
         val parsed = resolver(FakeTmdb())
         assertEquals(ManualTmdbLink.ById(123, "movie"),
@@ -395,8 +490,8 @@ class TmdbResolverTest {
         val parsed = resolver(FakeTmdb())
         assertEquals(ManualTmdbLink.ById(123, "movie"), parsed.parseManualLink("123", "movie"))
         assertEquals(ManualTmdbLink.ById(456, "series"), parsed.parseManualLink(" 456 ", "series"))
-        assertEquals(ManualTmdbLink.Invalid, parsed.parseManualLink("123", null))
-        assertEquals(ManualTmdbLink.Invalid, parsed.parseManualLink("123", "bogus"))
+        assertEquals(ManualTmdbLink.ByTitle("123"), parsed.parseManualLink("123", null))
+        assertEquals(ManualTmdbLink.ByTitle("123"), parsed.parseManualLink("123", "bogus"))
         assertEquals(ManualTmdbLink.Invalid, parsed.parseManualLink("0", "movie"))
     }
 
@@ -473,9 +568,10 @@ class TmdbResolverTest {
             resolver(http).searchManualLink("pushpa", "movie"))
     }
 
-    @Test fun `searchManualLink keeps short queries exact-only`() = runBlocking {
+    @Test fun `searchManualLink accepts two character prefixes`() = runBlocking {
         val http = FakeTmdb().apply { searchMovieJson = pushpaSearchJson }
-        assertEquals(ManualTmdbSearch.NoMatch, resolver(http).searchManualLink("pu", "movie"))
+        assertTrue(resolver(http).searchManualLink("pu", "movie") is ManualTmdbSearch.Found)
+        assertTrue(resolver(http).searchCandidates(MediaQuery("pu", null, "movie")).isEmpty())
     }
 
     @Test fun `searchCandidates keeps the exact gate for the automatic picker`() = runBlocking {

@@ -64,13 +64,13 @@ class TmdbResolver(
      *  returned order (movies, then series) and capped at the
      *  picker's [MAX_PICKER_CANDIDATES]. No year filter: the
      *  picker shows all years and the user chooses. The automatic
-     *  picker uses exact normalized-title matches; [allowPrefix]
-     *  permits manual title prefixes of 3+ normalized characters. */
-    suspend fun searchCandidates(query: MediaQuery, allowPrefix: Boolean = false): List<MediaCandidate> {
+     *  picker uses exact normalized-title matches; [allowPartial]
+     *  permits manual title substrings of 2+ normalized characters. */
+    suspend fun searchCandidates(query: MediaQuery, allowPartial: Boolean = false): List<MediaCandidate> {
         val key = configuredKey() ?: return emptyList()
         if (query.title.isBlank() || query.title.length > 160) return emptyList()
         return try {
-            val matches = searchMatches(query, key, allowPrefix).take(MAX_PICKER_CANDIDATES)
+            val matches = searchMatches(query, key, allowPartial).take(MAX_PICKER_CANDIDATES)
             val config = if (matches.isEmpty()) null else imageConfig(key)
             matches.mapNotNull { match ->
                 val title = match.displayTitle.takeIf { it.isNotBlank() } ?: return@mapNotNull null
@@ -103,9 +103,8 @@ class TmdbResolver(
 
     /** Parses hand-entered picker input without a network call.
      *  Accepts a themoviedb.org link (`/movie/<id>` or `/tv/<id>`),
-     *  a bare numeric id (typed by [fallbackType], invalid when the
-     *  type is unknown), or a title to search. Blank or over-long
-     *  input is invalid. */
+     *  a bare numeric id when [fallbackType] is known, or a title to search
+     *  (including untyped digits). Blank or over-long input is invalid. */
     fun parseManualLink(input: String, fallbackType: String?): ManualTmdbLink {
         val trimmed = input.trim()
         if (trimmed.isEmpty() || trimmed.length > 160) return ManualTmdbLink.Invalid
@@ -117,9 +116,9 @@ class TmdbResolver(
             return ManualTmdbLink.ById(id, type)
         }
         if (trimmed.all { it.isDigit() }) {
-            val id = trimmed.toIntOrNull()?.takeIf { it > 0 } ?: return ManualTmdbLink.Invalid
             val type = fallbackType?.takeIf { it == "movie" || it == "series" }
-                ?: return ManualTmdbLink.Invalid
+                ?: return ManualTmdbLink.ByTitle(trimmed)
+            val id = trimmed.toIntOrNull()?.takeIf { it > 0 } ?: return ManualTmdbLink.Invalid
             return ManualTmdbLink.ById(id, type)
         }
         return ManualTmdbLink.ByTitle(trimmed)
@@ -127,7 +126,7 @@ class TmdbResolver(
 
     /** Manual TMDB search for the picker: an id resolves its detail
      *  to a single candidate, a title reuses [searchCandidates]
-     *  with prefix matching for 3+ normalized characters and the
+     *  with substring matching for 2+ normalized characters and the
      *  same cap as the picker. The automatic picker stays exact. No key
      *  or any TMDB failure means [ManualTmdbSearch.NoMatch], never
      *  an exception; invalid input makes no request. */
@@ -143,7 +142,7 @@ class TmdbResolver(
             }
             is ManualTmdbLink.ByTitle -> {
                 val type = fallbackType?.takeIf { it == "movie" || it == "series" }
-                val found = searchCandidates(MediaQuery(parsed.title, null, type), allowPrefix = true)
+                val found = searchCandidates(MediaQuery(parsed.title, null, type), allowPartial = true)
                 if (found.isEmpty()) ManualTmdbSearch.NoMatch else ManualTmdbSearch.Found(found)
             }
         }
@@ -281,7 +280,7 @@ class TmdbResolver(
      *  type (or movie + series when the type is unknown). The
      *  caller decides what a match means — the strict single-hit
      *  gate picks from these, the picker lists them. */
-    private suspend fun searchMatches(query: MediaQuery, key: String, allowPrefix: Boolean = false): List<SearchMatch> {
+    private suspend fun searchMatches(query: MediaQuery, key: String, allowPartial: Boolean = false): List<SearchMatch> {
         val encoded = URLEncoder.encode(query.title, "UTF-8").replace("+", "%20")
         val titleKey = normalizedTitle(query.title)
         val types = query.type?.let { listOf(it) } ?: listOf("movie", "series")
@@ -293,9 +292,10 @@ class TmdbResolver(
                     if (id == null) return@mapNotNull null
                     val title = normalizedTitle(obj.optString(if (series) "name" else "title").orEmpty())
                     val original = normalizedTitle(obj.optString(if (series) "original_name" else "original_title").orEmpty())
-                    val prefixMatches = allowPrefix && titleKey.length >= 3 &&
-                        (title.startsWith(titleKey) || original.startsWith(titleKey))
-                    if (title != titleKey && original != titleKey && !prefixMatches) return@mapNotNull null
+                    val exact = title == titleKey || original == titleKey
+                    val partial = !exact && allowPartial && titleKey.length >= 2 &&
+                        (title.contains(titleKey) || original.contains(titleKey))
+                    if (!exact && !partial) return@mapNotNull null
                     SearchMatch(
                         TmdbHit(id, type, obj.optString("poster_path")), releaseYear(obj, type), title, original,
                         obj.optString("original_language")?.takeIf { it.isNotBlank() },
